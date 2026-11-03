@@ -1,0 +1,53 @@
+name: "💡 Feature or Source Proposal"
+description: "Suggest a new ingestion source, distillation preset, or capability for Notebook Alchemy"
+title: "[Feature]: "
+labels: ["enhancement", "proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We welcome proposals for new ingestion sources (e.g. Podcasts, RSS, ArXiv, Notion), topic clustering lenses, and LLM backends!
+  - type: dropdown
+    id: category
+    attributes:
+      label: "Feature Category"
+      description: "Which architectural subsystem does this proposal relate to?"
+      options:
+        - "Ingestion Source (Audio, Video, PDF, RSS, API)"
+        - "Thematic Decomposition & Topic Clustering"
+        - "Compendium Synthesis & Prompt Lenses"
+        - "NotebookLM Sync & Atomic Source Swapping"
+        - "MCP Server & Agentic Tooling"
+        - "Local UI / CLI Experience"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem or Workflow Gap"
+      description: "What pain point or workflow limitation does this solve?"
+      placeholder: "When ingesting 500+ research papers or audio podcasts, we hit NotebookLM source limits before topic synthesis can occur..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: "Proposed Solution & Design"
+      description: "Detailed description of how this feature should work."
+      placeholder: "Add an async RSS/Audio parser that fetches Whisper transcripts and batches them into the existing Gemini Flash pipeline..."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives Considered"
+      description: "Any alternative workarounds or solutions you evaluated."
+    validations:
+      required: false
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: "Willingness to Contribute"
+      options:
+        - label: "I would be willing to submit a Pull Request to implement this feature."
+          required: false
