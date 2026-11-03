@@ -1,0 +1,79 @@
+name: "🐛 Bug Report"
+description: "Report a bug, unexpected error, or failed distillation in Notebook Alchemy"
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue! Before opening, please make sure you are not reporting a security vulnerability—see our [Security Policy](https://github.com/gagexhill/notebook-alchemy/security/policy).
+  - type: input
+    id: version
+    attributes:
+      label: "Notebook Alchemy Version"
+      description: "Run `notebook-alchemy --version` or check your installed version."
+      placeholder: "e.g., 0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: "Operating System"
+      description: "What operating system are you running?"
+      options:
+        - "Windows 11 / Windows 10"
+        - "macOS (Apple Silicon M-Series)"
+        - "macOS (Intel)"
+        - "Linux (Ubuntu / Debian)"
+        - "Linux (Arch / Fedora / Other)"
+        - "WSL2 (Windows Subsystem for Linux)"
+    validations:
+      required: true
+  - type: dropdown
+    id: python-version
+    attributes:
+      label: "Python Version"
+      description: "What Python runtime are you using?"
+      options:
+        - "Python 3.12"
+        - "Python 3.11"
+        - "Python 3.10"
+        - "Python 3.13 / 3.14 (Preview)"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: "Steps to Reproduce"
+      description: "Explain how you encountered the issue step by step."
+      placeholder: |
+        1. Run 'notebook-alchemy dry-run -n "My Notebook"'
+        2. Attempt distillation of 50+ YouTube video transcripts...
+        3. Encounter RPC exception or rate-limit
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Expected Behavior"
+      description: "A clear description of what you expected to happen."
+      placeholder: "Notebook Alchemy should parse transcripts and produce 4 structured domain compendiums without crashing."
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Relevant Log Output & Stack Trace"
+      description: "Please paste your console logs or traceback. Redact any private API keys, emails, or personal session tokens!"
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklists
+    attributes:
+      label: "Sanity Checks"
+      options:
+        - label: "I have confirmed that my `.env` file and private credentials are NOT leaked in these logs."
+          required: true
+        - label: "I searched existing issues and confirmed this bug is not a duplicate."
+          required: true
