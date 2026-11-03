@@ -6,4 +6,4 @@ from .config import AlchemyConfig
 from .engine import AlchemyEngine
 from .vault import VaultManager
 
-__all__ = ["__version__", "AlchemyConfig", "AlchemyEngine", "VaultManager"]
+__all__ = ["AlchemyConfig", "AlchemyEngine", "VaultManager", "__version__"]

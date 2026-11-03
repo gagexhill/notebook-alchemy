@@ -57,13 +57,15 @@ class NotebookAnalyzer:
     def _run_cli(self, args: list[str]) -> dict[str, Any] | list[Any]:
         """Execute notebooklm CLI command with JSON output."""
         cmd = ["notebooklm", "--profile", self.profile] + args + ["--json"]
-        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+        res = subprocess.run(cmd, check=False, capture_output=True, text=True, encoding="utf-8")
         if res.returncode != 0:
             try:
                 err_json = json.loads(res.stdout or res.stderr)
                 raise RuntimeError(err_json.get("message", res.stderr or res.stdout))
             except json.JSONDecodeError:
-                raise RuntimeError(res.stderr or res.stdout or f"Command failed with code {res.returncode}")
+                raise RuntimeError(
+                    res.stderr or res.stdout or f"Command failed with code {res.returncode}"
+                )
 
         try:
             return json.loads(res.stdout)
@@ -168,27 +170,35 @@ class NotebookAnalyzer:
         patterns = [
             (
                 "Lead Generation & Client Acquisition",
-                re.compile(r"lead|client|acquire|attract|cold|prospect|outreach|marketing", re.I),
+                re.compile(
+                    r"lead|client|acquire|attract|cold|prospect|outreach|marketing", re.IGNORECASE
+                ),
             ),
             (
                 "Client Management, Retention & QBRs",
-                re.compile(r"qbr|quarterly|retain|churn|past client|onboard|deliver", re.I),
+                re.compile(
+                    r"qbr|quarterly|retain|churn|past client|onboard|deliver", re.IGNORECASE
+                ),
             ),
             (
                 "Web Design & Development Agency Operations",
-                re.compile(r"website|wordpress|design|agency|build|freelanc|portfolio", re.I),
+                re.compile(
+                    r"website|wordpress|design|agency|build|freelanc|portfolio", re.IGNORECASE
+                ),
             ),
             (
                 "SEO, Local Search & Google Business Profile",
-                re.compile(r"seo|gbp|google business|rank|local|map pack", re.I),
+                re.compile(r"seo|gbp|google business|rank|local|map pack", re.IGNORECASE),
             ),
             (
                 "Pricing, Proposals & Contract Strategy",
-                re.compile(r"pric|rate|proposal|pitch|charge|money|estimate|dollar", re.I),
+                re.compile(r"pric|rate|proposal|pitch|charge|money|estimate|dollar", re.IGNORECASE),
             ),
             (
                 "Solo Operator Productivity & Automation",
-                re.compile(r"productivity|time|system|scale|crm|tool|workflow|routine", re.I),
+                re.compile(
+                    r"productivity|time|system|scale|crm|tool|workflow|routine", re.IGNORECASE
+                ),
             ),
         ]
 

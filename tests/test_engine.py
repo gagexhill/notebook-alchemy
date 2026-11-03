@@ -7,9 +7,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from notebook_alchemy.client import SourceDocument  # noqa: E402
-from notebook_alchemy.config import AlchemyConfig  # noqa: E402
-from notebook_alchemy.engine import AlchemyEngine  # noqa: E402
+from notebook_alchemy.client import SourceDocument
+from notebook_alchemy.config import AlchemyConfig
+from notebook_alchemy.engine import AlchemyEngine
 
 
 class TestAlchemyEngine(unittest.TestCase):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+
 import click
 from rich.console import Console
 from rich.panel import Panel
@@ -36,7 +37,9 @@ def login(browser: str) -> None:
     cmd = ["notebooklm", "login", "--browser", browser]
     try:
         subprocess.run(cmd, check=True)
-        console.print("[bold green]✓ Successfully authenticated with Google NotebookLM![/bold green]")
+        console.print(
+            "[bold green]✓ Successfully authenticated with Google NotebookLM![/bold green]"
+        )
     except subprocess.CalledProcessError as err:
         console.print(f"[bold red]Authentication failed with code {err.returncode}[/bold red]")
         sys.exit(err.returncode)
@@ -73,7 +76,7 @@ def dry_run(notebook: str) -> None:
 
     try:
         report = analyzer.generate_dry_run(notebook_query=notebook)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         console.print(f"[bold red]Dry run failed:[/bold red] {exc}")
         sys.exit(1)
 
