@@ -1,0 +1,58 @@
+# ==============================================================================
+# Security & Sensitive Credentials (Strict Blocklist)
+# ==============================================================================
+.env
+.env.*
+*.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+!.env.example
+
+# Session state, cookies, and tokens
+*state*.json
+*cookie*
+*.cookie
+*cookies*
+*.session
+*.token
+*token*.json
+
+# NotebookLM / Workspace Runtime caches & local vaults
+.notebooklm/
+vault/
+.vault/
+notes/
+artifacts/
+
+# Python Virtual Environments & Packages
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Operating System & IDE Artifacts
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
