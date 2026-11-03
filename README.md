@@ -1,131 +1,77 @@
-<div align="center">
+# notebook-alchemy
 
-# ⚡ Notebook Alchemy
+[![CI](https://github.com/gagexhill/notebook-alchemy/actions/workflows/ci.yml/badge.svg)](https://github.com/gagexhill/notebook-alchemy/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-### *Bypass Google NotebookLM’s 300-source limit. Autonomously distill 10,000+ YouTube videos into self-organizing, human-readable Domain Compendiums.*
+A CLI tool to bypass Google NotebookLM's 300-source limit.
 
-[![CI & Security Audit](https://github.com/gagexhill/notebook-alchemy/actions/workflows/ci.yml/badge.svg)](https://github.com/gagexhill/notebook-alchemy/actions/workflows/ci.yml)
-[![Security Audited](https://img.shields.io/badge/Security-Gitleaks%20Audited-2ea44f.svg)](SECURITY.md)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-F5A97F.svg)](LICENSE)
-[![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-8A2BE2.svg)](https://modelcontextprotocol.io/)
-[![GitHub Stars](https://img.shields.io/github/stars/gagexhill/notebook-alchemy?style=social)](https://github.com/gagexhill/notebook-alchemy)
+If you add an entire YouTube playlist or channel backlog to NotebookLM, you will hit the hard 300-source cap immediately. NotebookLM slows down, chat context gets fragmented, and you run out of slots for any new notes or documents.
 
-[Quickstart](#-3-command-quickstart) • [Architecture](#-architecture) • [Before vs After](#-before-vs-after-the-300-source-wall) • [AI Studio Key Guide](#-step-by-step-gemini-api-key--google-ai-studio-guide) • [Contributing](CONTRIBUTING.md)
+`notebook-alchemy` solves this: it fetches the transcripts, clusters related videos into coherent topics, and condenses hundreds of scattered video links into clean, structured reference notes directly inside your notebook.
 
-</div>
-
----
-
-## 🧱 The Problem: "The 300-Source Wall"
-
-Google NotebookLM is arguably the most powerful grounded RAG and audio-synthesis interface ever built. However, power users, researchers, and solo operators quickly slam directly into **The 300-Source Wall**:
-
-1. **Hard 300-Source Cap**: A single notebook hard-stops at 300 sources. Ingesting an active YouTube channel, podcast backlog, or federal contract archive is structurally impossible.
-2. **Context Dilution**: Even with 250+ raw transcripts, query quality degrades into fragmented answers and incomplete citations.
-3. **No Native Topic Synthesis**: NotebookLM treats every uploaded link as a flat, unorganized leaf node. You end up with 300 chaotic titles and zero hierarchical clarity.
-
----
-
-## 🔮 The Solution: Information Alchemy
-
-**Notebook Alchemy** acts as an autonomous synthesis engine that sits between high-volume source libraries and NotebookLM. It executes **Thematic Decomposition**:
-
-- Transcribes and chunks raw video libraries (via `yt-dlp` and async transcript engines).
-- Employs **Gemini 2.5 Flash** with structured XML-sandboxed prompts to cluster, cross-reference, and synthesize related sources into structured **Domain Compendiums**.
-- Executes an **Atomic Swap** into your live NotebookLM workspace, replacing hundreds of raw, disjointed videos with 10–15 curated, high-density reference compendiums.
-- Bridges your synthesized notes into local markdown vaults (Obsidian, Logseq, Antigravity) with bi-directional links.
-
----
-
-## 📊 Before vs. After: "The 300-Source Wall"
-
-| Dimension | Before: Raw YouTube Links | After: Notebook Alchemy Compendiums |
-| :--- | :--- | :--- |
-| **Source Footprint** | 288 flat video URLs (approaching the 300 limit) | **12 Structured Domain Compendiums** |
-| **Organization** | Unorganized, chronological timeline | **Topic-Clustered** (e.g. `GBP Ranking & Optimization (Vol. 1)`) |
-| **Citation Depth** | Shallow single-video quotes | **Cross-Video Synthesis** with consolidated citations |
-| **Quota Headroom** | 12 sources remaining before failure | **288 free slots** available for new research |
-| **Studio Artifacts** | Audio Overviews hallucinate across clutter | **Crystal-clear Deep Dives** focused on coherent themes |
-
----
-
-## 🏗️ Architecture
-
-```mermaid
-flowchart LR
-    A["Raw YouTube Videos<br/>(10,000+ Backlog)"] --> B["yt-dlp & Async<br/>Transcript Fetcher"]
-    B --> C["Thematic Decomposition<br/>& Clustering Engine"]
-    C --> D["Gemini 2.5 Flash<br/>(XML-Sandboxed Synthesis)"]
-    D --> E["Domain Compendiums<br/>(Vol. 1, Vol. 2...)"]
-    E --> F["Atomic Source Swap<br/>(notebooklm-py Engine)"]
-    F --> G["Live NotebookLM UI<br/>(Clean ~12 High-Signal Sources)"]
-    E --> H["Local Markdown Vault<br/>(Obsidian / Antigravity)"]
-
-    style A fill:#ff4d4f,stroke:#333,stroke-width:1px,color:#fff
-    style D fill:#1890ff,stroke:#333,stroke-width:1px,color:#fff
-    style G fill:#52c41a,stroke:#333,stroke-width:1px,color:#fff
-    style H fill:#722ed1,stroke:#333,stroke-width:1px,color:#fff
+```
+288 raw YouTube links  ──►  notebook-alchemy  ──►  12 topic compendiums
+(fills notebook to cap)                              (288 free slots remaining)
 ```
 
 ---
 
-## 🚀 3-Command Quickstart
+## Features
 
-Get up and running in under 60 seconds using `pip` or `uvx`:
+- **Bypass the 300-source wall**: Turn hundreds of video links into 10–15 clean reference notes.
+- **Safe dry-run preview**: See video counts, topic clusters, and token cost estimates before touching anything in NotebookLM.
+- **Cheap & fast**: Uses Gemini Flash for synthesis (~$0.15 total for hundreds of video transcripts).
+- **Zero credential leaks**: Browser session cookies and API keys stay local and are strictly git-ignored.
+- **Markdown vault export**: Optionally exports all notes to local markdown folders (Obsidian, Logseq, etc.).
+
+---
+
+## Quickstart
+
+### Installation
 
 ```bash
-# 1. Clone repository
 git clone https://github.com/gagexhill/notebook-alchemy.git
 cd notebook-alchemy
-
-# 2. Install editable engine
 pip install -e .
-
-# 3. Inspect your notebook safely (Zero API cost pre-flight)
-notebook-alchemy dry-run -n "Example Notebook"
 ```
 
----
+### 1. Set your Gemini API key
 
-## 🔑 Step-by-Step Gemini API Key & Google AI Studio Guide
+Create a local `.env` file (this is strictly git-ignored):
 
-Notebook Alchemy uses Google Gemini Flash for high-speed, cost-effective transcript synthesis (averaging **<$0.20 total** for hundreds of videos).
+```bash
+cp .env.example .env
+```
 
-### 1. Generate Your Key in Google AI Studio
-1. Navigate to **[aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)**.
-2. Sign in with your Google account.
-3. Click **"Create API key"** and select or create a project.
-4. Copy your key (starts with `AIzaSy...`).
+Add your Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey):
 
-### 2. Configure Your Local `.env`
-Notebook Alchemy uses a strict zero-leak security architecture. Your `.env` file is permanently blocked by `.gitignore`.
+```env
+GEMINI_API_KEY=your_key_here
+```
 
-1. Copy the example configuration:
-   ```bash
-   cp .env.example .env
-   ```
-2. Open `.env` and paste your key:
-   ```env
-   GEMINI_API_KEY=AIzaSyYourGeneratedKeyHere
-   ```
+### 2. Log in to NotebookLM
 
-### 3. Authenticate with NotebookLM
-Run the browser login to establish your persistent local session:
 ```bash
 notebooklm login
 ```
-*Your browser will launch, detect your active Google AI Pro session, and write authentication state safely to your local user directory.*
+
+This opens a browser window for a one-time Google login and saves your session locally to `~/.notebooklm/profiles/default/storage_state.json`.
 
 ---
 
-## 🧪 Pre-Flight Dry-Run Preview
+## Usage
 
-Run a non-destructive simulation before touching live NotebookLM workspaces:
+### Preview a notebook without making any changes
+
+Run a dry run on any notebook by name or ID:
 
 ```bash
 notebook-alchemy dry-run -n "Example Notebook"
 ```
+
+Output:
 
 ```text
 ╭─────────────────────────── Dry-Run Cost & Token Sizing ───────────────────────────╮
@@ -139,38 +85,60 @@ notebook-alchemy dry-run -n "Example Notebook"
 │ Estimated Synthesis Output Cost: $0.0432 USD                                       │
 │ Total Estimated Cost: $0.1404 USD                                                  │
 ╰────────────────────────────────────────────────────────────────────────────────────╯
+
+Topic Clusters Preview:
+• Lead Generation & Client Acquisition (74 videos)
+• Web Design & Agency Operations (62 videos)
+• Client Retention, Onboarding & QBRs (41 videos)
+• Pricing & Proposal Strategy (38 videos)
+• SEO & Local Search (35 videos)
+• Solo Operator Systems & Productivity (38 videos)
+```
+
+### Sync notes to a local markdown vault
+
+```bash
+notebook-alchemy sync --vault-path ./vault
 ```
 
 ---
 
-## 🛡️ Security & Zero-Leak Architecture
+## CLI Reference
 
-- **Strict Sandbox**: Session cookies and storage states (`storage_state.json`) are stored strictly in local user profiles and blocked by `.gitignore`.
-- **Gitleaks Audited**: Every push and PR is scanned for accidentally exposed secrets.
-- **Dry-Run Default**: The engine never deletes or mutates existing sources without explicit user confirmation.
-
----
-
-## 🗺️ Public Roadmap
-
-- [x] Initial scaffold & Playwright browser session engine (`v0.1.0`)
-- [x] Pre-flight dry-run token estimation & topic clustering (`v0.1.1`)
-- [ ] **v1.1**: Native Podcast / RSS Feed & Local PDF Folder Ingestion ([#1](https://github.com/gagexhill/notebook-alchemy/issues/1))
-- [ ] **v1.2**: Interactive Streamlit / Gradio Local Web Dashboard ([#2](https://github.com/gagexhill/notebook-alchemy/issues/2))
-- [ ] **v1.3**: Domain Preset Lenses (Academic Research, Legal Discovery, Solo Agency) ([#3](https://github.com/gagexhill/notebook-alchemy/issues/3))
-- [ ] **v1.4**: Async parallel transcript batching with proxy rotation ([#4](https://github.com/gagexhill/notebook-alchemy/issues/4))
+| Command | Description |
+| :--- | :--- |
+| `notebook-alchemy status` | Check engine configuration and authentication status |
+| `notebook-alchemy dry-run -n <name>` | Preview source counts, topic clusters, and token cost |
+| `notebook-alchemy sync --vault-path <dir>` | Export notes to an Obsidian/Markdown vault |
+| `notebooklm list` | List all NotebookLM notebooks in your account |
+| `notebooklm source list -n <id>` | List all sources in a specific notebook |
 
 ---
 
-## 🤝 Community & Contributing
+## How It Works
 
-We welcome pull requests and feature proposals from the developer community!
-- Read our [Contributing Guide](CONTRIBUTING.md) to set up your dev environment.
-- Review our [Code of Conduct](CODE_OF_CONDUCT.md).
-- Open or join discussions on our [GitHub Discussions](https://github.com/gagexhill/notebook-alchemy/discussions) board.
+1. **Source Inspection**: Reads your notebook's existing sources via the local session.
+2. **Transcript Extraction**: Grabs full transcripts from YouTube sources.
+3. **Topic Clustering**: Groups related videos into topical themes (e.g. all videos on pricing, all videos on SEO).
+4. **Synthesis**: Uses Gemini Flash to compile each group into a comprehensive, cited reference note.
+5. **Notebook Update**: Places the condensed reference notes into your notebook so your source count drops from 250+ down to ~12, freeing up room for more research while keeping full knowledge retention.
 
 ---
 
-## 📜 License
+## Contributing
 
-This project is licensed under the terms of the [MIT License](LICENSE).
+Pull requests are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup and guidelines.
+
+```bash
+# Run tests
+python -m unittest discover tests
+
+# Run linter
+ruff check .
+```
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
