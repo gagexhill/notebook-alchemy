@@ -31,9 +31,7 @@ class BaseNotebookClient:
 
     def is_authenticated(self) -> bool:
         """Check whether valid session state is present."""
-        if self.config.session_file and self.config.session_file.exists():
-            return True
-        return False
+        return bool(self.config.session_file and self.config.session_file.exists())
 
     def list_sources(self) -> list[SourceDocument]:
         """List active sources in the notebook."""

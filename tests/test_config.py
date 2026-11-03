@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from notebook_alchemy.config import AlchemyConfig  # noqa: E402
+from notebook_alchemy.config import AlchemyConfig
 
 
 class TestAlchemyConfig(unittest.TestCase):
@@ -20,6 +20,7 @@ class TestAlchemyConfig(unittest.TestCase):
 
     def test_ensure_directories(self) -> None:
         import tempfile
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             config = AlchemyConfig(
