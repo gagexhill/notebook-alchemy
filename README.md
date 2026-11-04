@@ -68,11 +68,31 @@ GEMINI_API_KEY=your_key_here
 
 ## Usage
 
-### 1. Preview a notebook without making changes (`dry-run`)
+### 1. Distill an Entire YouTube Channel (288, 1,000, or 1,670+ Videos)
 
-Run a dry run on any notebook by name or ID:
+Pass any channel handle, playlist, or channel URL directly to the CLI:
 
 ```bash
+notebook-alchemy run https://www.youtube.com/@Portableentrepreneur
+```
+
+`notebook-alchemy` will automatically:
+1. Scan the channel and resolve all video IDs, titles, and durations without downloading video bytes.
+2. Fetch or load cached video transcripts.
+3. Group videos into 6–12 authoritative domain clusters.
+4. Synthesize structured Domain Compendiums (batched into volumes like Vol. 1, Vol. 2 for 50+ video topics).
+5. Generate the immutable `MASTER_SOURCES_CATALOG.md` tracking all original video links.
+6. Automatically create the notebook in Google NotebookLM and upload all compendiums as sources.
+
+### 2. Preview a Channel or Notebook First (`dry-run`)
+
+Inspect video counts, domain clusters, and estimated Gemini Flash token costs without modifying anything:
+
+```bash
+# Preview from a live YouTube channel URL
+notebook-alchemy dry-run https://www.youtube.com/@Portableentrepreneur
+
+# Or preview an existing NotebookLM notebook
 notebook-alchemy dry-run -n "Example Notebook"
 ```
 
@@ -80,32 +100,36 @@ Output:
 
 ```text
 ╭──────────────────────── Dry-Run Cost & Token Sizing ─────────────────────────╮
-│ Notebook: Example Notebook (00000000-0000-4000-8000-0000000000aa)       │
-│ Total Sources: 288                                                           │
-│ YouTube Video Sources: 288                                                   │
+│ Notebook: Example Notebook (nb_portableentrepreneur) (Live NotebookLM)  │
+│ Total Sources: 363                                                           │
+│ YouTube Video Sources: 363                                                   │
 │                                                                              │
-│ Total Estimated Tokens: ~1,296,000                                           │
-│ Estimated Gemini Flash Input Cost: $0.0972 USD                               │
-│ Estimated Synthesis Output Cost: $0.0432 USD                                 │
-│ Total Estimated Cost: $0.1404 USD                                            │
+│ Total Estimated Tokens: ~1,633,500                                           │
+│ Estimated Gemini Flash Input Cost: $0.1225 USD                               │
+│ Estimated Synthesis Output Cost: $0.0545 USD                                 │
+│ Total Estimated Cost: $0.1770 USD                                            │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
 Domain Topic Clusters:
-• Lead Generation & Client Acquisition (107 videos)
-• Web Design & Agency Operations (105 videos)
-• SEO & Local Search (28 videos)
+• Lead Generation & Client Acquisition (110 videos)
+• Web Design & Agency Operations (104 videos)
+• SEO & Local Search (53 videos)
 • Solo Operator Systems & Productivity (28 videos)
+• Pricing & Proposal Strategy (15 videos)
 • Client Retention, Onboarding & QBRs (11 videos)
-• Pricing & Proposal Strategy (9 videos)
+• General / Specialized Topics (42 videos)
 ```
 
-### 2. Run full distillation into Domain Compendiums (`run`)
+### 3. Incrementally Append New Videos as They Are Published
+
+When the channel releases a new video, append it to your existing notebook sources without re-synthesizing everything from scratch:
 
 ```bash
-notebook-alchemy run -n "Example Notebook"
+notebook-alchemy append -n "Example Notebook" \
+  --title "How to Sell $2,500/mo SEO Retainers" \
+  --url "https://youtube.com/watch?v=sample_id" \
+  --topic "Pricing & Proposal Strategy"
 ```
-
-This batches large clusters into indexed volumes (e.g. Vol. 1, Vol. 2 for 50+ video domains), generates rich Markdown reference notes with YAML frontmatter, executive summaries, SOPs, and cross-domain links in `./vault/compendiums/`, and generates a master `INDEX.md`.
 
 ---
 
@@ -113,9 +137,11 @@ This batches large clusters into indexed volumes (e.g. Vol. 1, Vol. 2 for 50+ vi
 
 | Command | Description |
 | :--- | :--- |
-| `notebook-alchemy test` | Automated self-test verifying catalog, clustering, synthesis & vault |
-| `notebook-alchemy dry-run -n <name>` | Preview source counts, domain clusters, and token cost |
-| `notebook-alchemy run -n <name>` | Distill hundreds of video sources into vault Domain Compendiums |
+| `notebook-alchemy run <URL or name>` | Distill 288 to 1,670+ videos from a YouTube channel into NotebookLM |
+| `notebook-alchemy dry-run <URL or name>` | Preview video count, domain clusters, and token cost before running |
+| `notebook-alchemy append` | Incrementally append newly published videos to the Master Catalog and compendiums |
+| `notebook-alchemy sync -n <name>` | Sync generated vault compendiums directly into Google NotebookLM |
+| `notebook-alchemy test` | Run 100% automated self-verification of the entire pipeline |
 | `notebook-alchemy status` | Inspect engine configuration, vault path, and session state |
 | `notebook-alchemy login --check` | Verify whether stored Google NotebookLM credentials are valid |
 | `notebook-alchemy login --browser-cookies edge` | Non-interactive cookie import from Edge |

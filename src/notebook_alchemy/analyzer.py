@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
+from .channel import ChannelScanner
 from .mock_data import (
     PORTABLE_ENTREPRENEUR_NOTEBOOK_ID,
     PORTABLE_ENTREPRENEUR_NOTEBOOK_TITLE,
@@ -126,8 +127,13 @@ class NotebookAnalyzer:
         notebook_query: str = "Example Notebook",
         *,
         use_fallback: bool = True,
+        limit: int | None = None,
     ) -> DryRunReport:
-        """Execute a full dry-run analysis for a notebook."""
+        """Execute a full dry-run analysis for a notebook or YouTube channel URL."""
+        scanner = ChannelScanner()
+        if scanner.is_youtube_url(notebook_query):
+            return self.scan_channel(notebook_query, limit=limit, force_offline=False)
+
         sources_raw: list[dict[str, Any]] = []
         nb_id = PORTABLE_ENTREPRENEUR_NOTEBOOK_ID
         nb_title = PORTABLE_ENTREPRENEUR_NOTEBOOK_TITLE
@@ -197,6 +203,48 @@ class NotebookAnalyzer:
             estimated_synthesis_output_cost_usd=round(output_cost, 4),
             domain_topic_clusters=topic_clusters,
             is_simulated=is_simulated,
+        )
+
+    def scan_channel(
+        self,
+        url: str,
+        limit: int | None = None,
+        force_offline: bool = False,
+    ) -> DryRunReport:
+        """Scan a live YouTube channel or playlist and generate a full DryRunReport."""
+        scanner = ChannelScanner()
+        scan_res = scanner.scan(url, limit=limit, force_offline=force_offline)
+
+        youtube_videos: list[VideoSourceSummary] = [
+            VideoSourceSummary(
+                source_id=v.id,
+                title=v.title,
+                url=v.url,
+                source_type="youtube_video",
+                status="ready",
+            )
+            for v in scan_res.videos
+        ]
+
+        total_tokens = len(youtube_videos) * AVG_TRANSCRIPT_TOKENS_PER_VIDEO
+        input_cost = (total_tokens / 1_000_000) * GEMINI_FLASH_INPUT_COST_PER_M
+        output_tokens = len(youtube_videos) * 500
+        output_cost = (output_tokens / 1_000_000) * GEMINI_FLASH_OUTPUT_COST_PER_M
+
+        topic_clusters = self._cluster_topics([v.title for v in youtube_videos])
+        safe_id = re.sub(r"[^\w-]", "", scan_res.channel_name).lower()
+
+        return DryRunReport(
+            notebook_id=f"nb_{safe_id}",
+            notebook_title=scan_res.channel_name,
+            total_sources=len(youtube_videos),
+            youtube_videos=youtube_videos,
+            other_sources=[],
+            total_estimated_tokens=total_tokens,
+            estimated_input_cost_usd=round(input_cost, 4),
+            estimated_synthesis_output_cost_usd=round(output_cost, 4),
+            domain_topic_clusters=topic_clusters,
+            is_simulated=not scan_res.is_live,
         )
 
     def _cluster_topics(self, titles: list[str]) -> dict[str, list[str]]:
