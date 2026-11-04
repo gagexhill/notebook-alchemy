@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 
@@ -359,3 +360,28 @@ def test_self_test_passes_offline_and_leaves_the_working_directory_untouched(
     assert "All 6 checks passed" in result.output
     assert sorted(p.name for p in isolated_environment.work.iterdir()) == before
     assert not (isolated_environment.home / ".notebook-alchemy").exists()
+
+
+@pytest.mark.parametrize(
+    ("args", "env", "expected"),
+    [
+        ([], None, logging.WARNING),
+        ([], "DEBUG", logging.DEBUG),
+        ([], "bogus", logging.WARNING),
+        (["-v"], "ERROR", logging.INFO),
+        (["-vv"], None, logging.DEBUG),
+        (["-q"], "DEBUG", logging.ERROR),
+    ],
+)
+def test_log_level_follows_flags_then_environment(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, args: list[str], env: str | None, expected: int
+) -> None:
+    if env:
+        monkeypatch.setenv("ALCHEMY_LOG_LEVEL", env)
+    root = logging.getLogger()
+    before = root.level
+    try:
+        runner.invoke(cli, [*args, "clean"])
+        assert root.level == expected
+    finally:
+        root.setLevel(before)
