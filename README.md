@@ -4,27 +4,60 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-A developer-first CLI tool to bypass Google NotebookLM's 300-source limit.
+A developer-first CLI tool to bypass Google NotebookLM's 300-source limit. Autonomously distill massive YouTube channels and playlists (50 to 1,500+ videos) into self-organizing, high-density Domain Compendiums.
 
-If you add an entire YouTube playlist or channel backlog to NotebookLM, you will hit the hard 300-source cap immediately. NotebookLM slows down, chat context gets fragmented, and you run out of slots for any new notes or documents.
+---
 
-`notebook-alchemy` solves this: it scans your video transcripts, clusters related videos into coherent domain themes, and condenses hundreds of scattered video links into clean, high-density Domain Compendiums with actionable SOPs, mental models, and video citations.
+## The Problem: Google NotebookLM's 300-Source Wall
+
+Google NotebookLM enforces a strict hard ceiling of **300 sources per notebook**. 
+
+When you attempt to ingest an entire YouTube channel backlog, course archive, or conference playlist, you hit this ceiling almost immediately. Worse, dumping hundreds of raw, individual video links causes severe practical issues:
+- **Notebook Capacity Exhaustion**: A single 300-video channel consumes 100% of your source slots, leaving zero room for user notes, PDFs, or research documents.
+- **RAG Retrieval Degradation**: Querying across hundreds of fragmented, conversational transcripts produces shallow, disjointed answers.
+- **Context Fragmentation**: Critical principles and SOPs scattered across multiple videos never get synthesized into a cohesive playbook.
 
 ```text
-288 raw YouTube links  ──►  notebook-alchemy  ──►  10 domain compendiums
-(fills notebook to cap)                              (290 free slots remaining)
+Massive Video Archive (50 to 1,500+ Videos)
+                    │
+                    ▼
+         [ 1. Channel Discovery ]  yt-dlp flat metadata extraction (<5s)
+                    │
+                    ▼
+       [ 2. Transcript Cache ]     youtube-transcript-api (SHA-256 local cache)
+                    │
+                    ▼
+     [ 3. Thematic Clustering ]    Dynamic domain grouping & volume balancing
+                    │
+                    ▼
+  [ 4. Information Alchemist ]    Gemini Flash synthesis (Zero Search Grounding)
+                    │
+                    ▼
+   [ 5. Artifact Generation ]     8–15 Domain Compendiums + Master Source Catalog
+                    │
+                    ▼
+    [ 6. Google NotebookLM ]      Fits comfortably under 300-source limit (280+ free slots)
+```
+
+`notebook-alchemy` solves this at arbitrary scale: it scans channel transcripts, clusters related videos into coherent domain themes, and condenses hundreds to thousands of videos into a curated collection of structured Domain Compendiums—complete with actionable SOPs, mental models, video citations, and an immutable Master Source Catalog.
+
+```text
+50 to 1,500+ Raw YouTube Links  ──►  notebook-alchemy  ──►  8–15 Domain Compendiums + Master Catalog
+(exceeds or fills 300-source cap)                          (280+ free slots remaining in NotebookLM)
 ```
 
 ---
 
 ## Features
 
-- **Bypass the 300-source wall**: Turn hundreds of video links into 6–10 structured reference compendiums.
-- **Safe dry-run preview**: See video counts, domain clusters, and token cost estimates before touching anything in NotebookLM.
-- **Cheap & fast**: Uses Gemini Flash for synthesis (~$0.14 total for 288 video transcripts, ~1.3M tokens).
-- **Automated pipeline verification**: Single command `notebook-alchemy test` verifies the entire ingestion, clustering, and vault synthesis flow without manual steps.
-- **Zero credential leaks**: Browser session cookies and API keys stay local and are strictly git-ignored.
-- **Markdown vault export**: Exports formatted `.md` compendiums and a master `INDEX.md` ready for NotebookLM re-upload or Obsidian vaults.
+- **Bypass the 300-Source Limit**: Scale-free ingestion partitions massive video backlogs (50 to 1,500+ videos) into balanced domain volumes (Vol. 1, Vol. 2 for 50+ video topics), staying well below NotebookLM's ceiling.
+- **Immutable Master Source Catalog**: Automatically builds `MASTER_SOURCES_CATALOG.md` preserving full provenance (video titles, direct URLs, timestamps, duration, and domain mappings).
+- **Incremental Auto-Append (`append`)**: When a channel releases new videos, append them to existing compendiums without re-distilling the entire channel archive.
+- **Ultra-Low Cost Distillation**: Powered by Gemini Flash with zero search-grounding overhead (~$0.10 to $0.40 per 1,000 video transcripts).
+- **Safe Dry-Run Preview (`dry-run`)**: Inspect video counts, domain clusters, and exact token cost estimates before touching anything in NotebookLM.
+- **100% Automated Self-Verification (`test`)**: Single command `notebook-alchemy test` verifies ingestion, clustering, synthesis, and vault exports locally without credentials or API keys.
+- **Zero Credential Leaks**: Browser session cookies and API keys stay local and are strictly git-ignored.
+- **Obsidian & Markdown Vault Ready**: Generates a clean Markdown vault with standard frontmatter, ready for NotebookLM sync or local knowledge bases.
 
 ---
 
@@ -40,13 +73,13 @@ pip install -e .
 
 ### 1. Verify Pipeline (100% Automated Self-Test)
 
-Run the built-in end-to-end verification test:
+Run the built-in diagnostic test suite:
 
 ```bash
 notebook-alchemy test
 ```
 
-This verifies configuration loading, the 288-source catalog, thematic clustering, compendium synthesis, and vault artifact integrity.
+This verifies configuration loading, multi-source channel cataloging, thematic clustering, compendium synthesis, and vault artifact integrity.
 
 ### 2. Optional: Set your Gemini API key (for live LLM synthesis)
 
@@ -68,23 +101,23 @@ GEMINI_API_KEY=your_key_here
 
 ## Usage
 
-### 1. Distill an Entire YouTube Channel (288, 1,000, or 1,670+ Videos)
+### 1. Distill an Entire YouTube Channel or Playlist (Arbitrary Scale: 50 to 1,500+ Videos)
 
-Pass any channel handle, playlist, or channel URL directly to the CLI:
+Pass any channel handle, playlist URL, or channel link directly to the CLI:
 
 ```bash
 notebook-alchemy run https://www.youtube.com/@Portableentrepreneur
 ```
 
 `notebook-alchemy` will automatically:
-1. Scan the channel and resolve all video IDs, titles, and durations without downloading video bytes.
-2. Fetch or load cached video transcripts.
-3. Group videos into 6–12 authoritative domain clusters.
-4. Synthesize structured Domain Compendiums (batched into volumes like Vol. 1, Vol. 2 for 50+ video topics).
+1. Resolve all video IDs, titles, and durations in seconds using flat metadata extraction (zero video bytes downloaded).
+2. Fetch or load cached video transcripts from local storage (`~/.notebook-alchemy/cache`).
+3. Group videos into 8–15 cohesive domain clusters, automatically splitting topics with 50+ videos into balanced sub-volumes.
+4. Synthesize structured Domain Compendiums formatted with executive summaries, mental models, SOPs, and video citations.
 5. Generate the immutable `MASTER_SOURCES_CATALOG.md` tracking all original video links.
-6. Automatically create the notebook in Google NotebookLM and upload all compendiums as sources.
+6. Create the notebook in Google NotebookLM (if not already created) and upload all compendiums as clean sources.
 
-### 2. Preview a Channel or Notebook First (`dry-run`)
+### 2. Preview Video Counts, Clusters & Token Costs First (`dry-run`)
 
 Inspect video counts, domain clusters, and estimated Gemini Flash token costs without modifying anything:
 
@@ -100,9 +133,8 @@ Output:
 
 ```text
 ╭──────────────────────── Dry-Run Cost & Token Sizing ─────────────────────────╮
-│ Notebook: Portable Entrepreneur (nb_portableentrepreneur) (Live NotebookLM)  │
-│ Total Sources: 363                                                           │
-│ YouTube Video Sources: 363                                                   │
+│ Target Source: https://www.youtube.com/@Portableentrepreneur                 │
+│ Total Videos Discovered: 363                                                 │
 │                                                                              │
 │ Total Estimated Tokens: ~1,633,500                                           │
 │ Estimated Gemini Flash Input Cost: $0.1225 USD                               │
@@ -111,18 +143,18 @@ Output:
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
 Domain Topic Clusters:
-• Lead Generation & Client Acquisition (110 videos)
-• Web Design & Agency Operations (104 videos)
-• SEO & Local Search (53 videos)
+• Lead Generation & Client Acquisition (110 videos) -> Split into Vol. 1 & Vol. 2
+• Web Design & Agency Operations (104 videos)       -> Split into Vol. 1 & Vol. 2
+• SEO & Local Search (53 videos)                    -> Split into Vol. 1 & Vol. 2
 • Solo Operator Systems & Productivity (28 videos)
 • Pricing & Proposal Strategy (15 videos)
 • Client Retention, Onboarding & QBRs (11 videos)
 • General / Specialized Topics (42 videos)
 ```
 
-### 3. Incrementally Append New Videos as They Are Published
+### 3. Incrementally Append Newly Published Videos
 
-When the channel releases a new video, append it to your existing notebook sources without re-synthesizing everything from scratch:
+When a channel publishes new content, append it to your existing notebook sources without re-synthesizing the entire channel archive:
 
 ```bash
 notebook-alchemy append -n "Portable Entrepreneur" \
@@ -137,7 +169,7 @@ notebook-alchemy append -n "Portable Entrepreneur" \
 
 | Command | Description |
 | :--- | :--- |
-| `notebook-alchemy run <URL or name>` | Distill 288 to 1,670+ videos from a YouTube channel into NotebookLM |
+| `notebook-alchemy run <URL or name>` | Distill any YouTube channel or playlist (50 to 1,500+ videos) into NotebookLM |
 | `notebook-alchemy dry-run <URL or name>` | Preview video count, domain clusters, and token cost before running |
 | `notebook-alchemy append` | Incrementally append newly published videos to the Master Catalog and compendiums |
 | `notebook-alchemy sync -n <name>` | Sync generated vault compendiums directly into Google NotebookLM |
@@ -154,11 +186,11 @@ Pull requests and issues are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for
 
 ```bash
 # Run unit & integration test suite
-python -m unittest discover tests
+py -m pytest
 
 # Run linter & formatter
-ruff check .
-ruff format .
+py -m ruff check .
+py -m ruff format .
 ```
 
 ---

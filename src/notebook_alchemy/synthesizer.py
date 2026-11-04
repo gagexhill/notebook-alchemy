@@ -288,7 +288,7 @@ class Synthesizer:
         self,
         compendiums: list[DomainCompendium],
         notebook_title: str = "Portable Entrepreneur",
-        total_sources: int = 288,
+        total_sources: int = 100,
     ) -> str:
         """Generate a master Table of Contents / Index markdown file for all compendiums."""
         now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -325,7 +325,7 @@ class Synthesizer:
                 "\n## How to Use in Google NotebookLM\n",
                 "1. Upload these `.md` compendium files into your NotebookLM notebook.",
                 "2. NotebookLM will ingest each compendium as a clean, high-density source.",
-                "3. You bypass the 300-source limit while preserving 100% of the knowledge, citations, and actionable playbooks.",
+                "3. Scales effortlessly to archives of 50 to 1,500+ videos while keeping your notebook well below NotebookLM's source limit.",
             ]
         )
 
