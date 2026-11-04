@@ -1,13 +1,10 @@
 {
   "name": "Notebook Alchemy domain synthesizer",
   "description": "Synthesizes numbered video transcripts into one domain compendium for Google NotebookLM. Mirrors the request notebook-alchemy sends.",
-  "model": "gemini-2.5-flash-lite",
+  "model": "gemini-3.8-flash",
   "generationConfig": {
     "temperature": 0.2,
-    "maxOutputTokens": 32768,
-    "thinkingConfig": {
-      "thinkingBudget": 0
-    }
+    "maxOutputTokens": 32768
   },
   "systemInstruction": {
     "parts": [

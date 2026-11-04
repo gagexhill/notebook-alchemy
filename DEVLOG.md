@@ -14,10 +14,12 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   `--text` option, and one argument cannot carry a large document on Windows. (#17)
 - **Gemini key in a header, one client for every call.** `gemini.py` owns retries, key scrubbing and the
   price table. Why: `?key=` URLs surfaced in exception text. (#21)
-- **Default model is `gemini-2.5-flash-lite`.** `gemini-2.5-flash` shuts down on 2026-12-01 and its
-  replacement is a different model; Flash-Lite is listed as not deprecated, costs $0.10 / $0.40 per 1M
-  tokens, and handles clustering and per-domain synthesis. `ALCHEMY_GEMINI_MODEL` overrides it. Trade-off:
-  weaker prose than a larger model; pick one with the variable if quality matters more than cost. (#26)
+- **Default model is `gemini-3.8-flash`.** Google lists it as its most capable Flash model at $0.75 input and
+  $3.75 output per 1M tokens. `gemini-2.5-flash` shuts down on 2026-12-01, so it could not stay the default, and
+  a synthesis tool is judged on the quality of the prose. Trade-offs: Gemini 3.x models think by default and
+  thinking bills as output, so a real run costs more than the `dry-run` estimate (which says so), and the tool
+  only zeroes the thinking budget for 2.5-family models. Cheaper choices are one `ALCHEMY_GEMINI_MODEL` setting
+  away (`gemini-3.5-flash-lite`, `gemini-2.5-flash-lite`). (#26)
 - **Offline mode is an index, not a summary.** It lists videos and links and says no summary was made.
   Why: canned text presented as synthesis misleads whoever uploads it. (#22)
 - **Clustering is two-stage and index-based.** Domains from a sample, then every title assigned by
