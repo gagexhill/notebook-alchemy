@@ -52,7 +52,8 @@ class TestEndToEndPipeline(unittest.TestCase):
         self.assertTrue(index_file.exists())
         index_content = index_file.read_text(encoding="utf-8")
         self.assertIn("Master Compendium Index", index_content)
-        self.assertIn("Distilled Domain Compendiums", index_content)
+        self.assertIn("Domain Documents", index_content)
+        self.assertIn("title-only source indexes", index_content)
 
         # Verify individual compendium files
         for comp in report.compendiums:
@@ -61,8 +62,8 @@ class TestEndToEndPipeline(unittest.TestCase):
             txt = comp_path.read_text(encoding="utf-8")
             self.assertTrue(txt.startswith("---"))
             self.assertIn(comp.domain, txt)
-            self.assertIn("## 1. Executive Summary & Strategic Core", txt)
-            self.assertIn("## 3. Actionable Standard Operating Procedures (SOPs)", txt)
+            self.assertIn("Offline title-only index", txt)
+            self.assertIn("## Source Index", txt)
 
 
 if __name__ == "__main__":

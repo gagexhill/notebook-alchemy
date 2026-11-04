@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .analyzer import NotebookAnalyzer
+from .analyzer import NotebookAnalyzer, VideoSourceSummary
 from .client import BaseNotebookClient, SourceDocument
 from .config import AlchemyConfig
 from .synthesizer import DomainCompendium, Synthesizer
@@ -46,6 +46,14 @@ class DistillationReport:
     @property
     def total_tokens(self) -> int:
         return sum(c.token_count for c in self.compendiums)
+
+    @property
+    def warnings(self) -> list[str]:
+        return [
+            f"{c.domain} (vol. {c.volume}): {warning}"
+            for c in self.compendiums
+            for warning in c.warnings
+        ]
 
 
 class AlchemyEngine:
@@ -105,29 +113,41 @@ class AlchemyEngine:
     ) -> DistillationReport:
         """Run the end-to-end distillation pipeline on a notebook's video sources."""
         # 1. Inspect and cluster sources
-        dry_run = self.analyzer.generate_dry_run(notebook_query, use_fallback=True)
+        dry_run = self.analyzer.generate_dry_run(
+            notebook_query, use_fallback=True, allow_llm=not force_offline
+        )
 
         # Map cluster titles back to video source objects
-        videos_by_title = {v.title: v for v in dry_run.youtube_videos}
+        videos_by_title: dict[str, list[VideoSourceSummary]] = {}
+        for video in dry_run.youtube_videos:
+            videos_by_title.setdefault(video.title, []).append(video)
 
         compendiums: list[DomainCompendium] = []
+        used_paths = {"compendiums/index.md", "compendiums/master_sources_catalog.md"}
 
         for domain, titles in dry_run.domain_topic_clusters.items():
             if not titles:
                 continue
 
+            title_offsets: dict[str, int] = {}
+
             # Batch large clusters into volumes of at most max_videos_per_volume
             for vol_idx in range(0, len(titles), max_videos_per_volume):
                 vol_num = (vol_idx // max_videos_per_volume) + 1
                 chunk_titles = titles[vol_idx : vol_idx + max_videos_per_volume]
-                chunk_videos = [
-                    {
-                        "id": getattr(videos_by_title.get(t), "source_id", f"src_{i}"),
-                        "title": t,
-                        "url": getattr(videos_by_title.get(t), "url", "https://youtube.com"),
-                    }
-                    for i, t in enumerate(chunk_titles)
-                ]
+                chunk_videos = []
+                for i, title in enumerate(chunk_titles):
+                    matches = videos_by_title.get(title, [])
+                    offset = title_offsets.get(title, 0)
+                    video = matches[offset % len(matches)] if matches else None
+                    title_offsets[title] = offset + 1
+                    chunk_videos.append(
+                        {
+                            "id": getattr(video, "source_id", f"src_{i}"),
+                            "title": title,
+                            "url": getattr(video, "url", ""),
+                        }
+                    )
 
                 compendium = self.synthesizer.synthesize_cluster(
                     domain=domain,
@@ -137,7 +157,29 @@ class AlchemyEngine:
                     notebook_title=dry_run.notebook_title,
                     notebook_id=dry_run.notebook_id,
                 )
+                path = Path(compendium.relative_path)
+                suffix = 2
+                while compendium.relative_path.casefold() in used_paths:
+                    compendium.relative_path = str(
+                        path.with_name(f"{path.stem}_{suffix}{path.suffix}")
+                    ).replace("\\", "/")
+                    suffix += 1
+                used_paths.add(compendium.relative_path.casefold())
                 compendiums.append(compendium)
+
+        for comp in compendiums:
+            related = [
+                other for other in compendiums if other is not comp and other.domain != comp.domain
+            ]
+            if not comp.is_live_synthesized and related:
+                comp.content += (
+                    "\n## Related Domains\n\n"
+                    + "\n".join(
+                        f"- [{other.domain}]({Path(other.relative_path).name})" for other in related
+                    )
+                    + "\n"
+                )
+                comp.token_count = max(len(comp.content) // 4, 1)
 
         vault_dir = self.vault.vault_path / "compendiums"
         index_file: Path | None = None

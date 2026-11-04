@@ -225,8 +225,8 @@ def dry_run(source: str | None, notebook: str | None, live: bool, limit: int | N
 )
 @click.option(
     "--offline/--live-llm",
-    default=True,
-    help="Force deterministic offline semantic synthesis (default: offline).",
+    default=None,
+    help="Use a title-only index or Gemini synthesis (default: live when a valid key is configured).",
 )
 @click.option(
     "--max-per-vol",
@@ -247,7 +247,7 @@ def run_pipeline(
     source: str | None,
     notebook: str | None,
     notebook_name: str | None,
-    offline: bool,
+    offline: bool | None,
     max_per_vol: int,
     write: bool,
     sync: bool,
@@ -255,6 +255,8 @@ def run_pipeline(
     """Execute end-to-end distillation from a YouTube channel URL or notebook into Domain Compendiums."""
     target = notebook or source or "Portable Entrepreneur"
     engine = AlchemyEngine()
+    if offline is None:
+        offline = not engine.synthesizer._is_valid_api_key()
 
     # Pillar 5: Upfront Login Check if sync is requested
     if sync and write and not engine.client.is_authenticated():
@@ -273,6 +275,9 @@ def run_pipeline(
 
     console.print(
         f"[bold cyan]Starting Notebook Alchemy Distillation for target: '{target}'...[/bold cyan]"
+    )
+    console.print(
+        "Mode: offline source index" if offline else f"Mode: Gemini ({engine.synthesizer.model})"
     )
 
     try:
@@ -307,6 +312,8 @@ def run_pipeline(
         )
 
     console.print(result_table)
+    for warning in report.warnings:
+        console.print(f"[yellow]Warning: {warning}[/yellow]")
 
     summary = (
         f"[bold]Total Videos Processed:[/bold] {report.total_sources_scanned}\n"
@@ -496,14 +503,14 @@ def run_automated_test() -> None:
         valid_frontmatters = 0
         for f in md_files:
             txt = f.read_text(encoding="utf-8")
-            if txt.startswith("---") and "domain:" in txt and "## 1. Executive Summary" in txt:
+            if txt.startswith("---") and "domain:" in txt and "## Source Index" in txt:
                 valid_frontmatters += 1
         if valid_frontmatters >= 6:
             steps.append(
                 (
                     "Vault Artifact Integrity",
                     "PASS",
-                    f"Validated {valid_frontmatters} Markdown compendiums with frontmatter & SOPs",
+                    f"Validated {valid_frontmatters} Markdown source indexes with frontmatter",
                 )
             )
         else:

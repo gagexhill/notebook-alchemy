@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-PORTABLE_ENTREPRENEUR_NOTEBOOK_ID = "6fd9a6b5-5065-4c0f-ba7e-711c712fc3c9"
+PORTABLE_ENTREPRENEUR_NOTEBOOK_ID = ""
 PORTABLE_ENTREPRENEUR_NOTEBOOK_TITLE = "Portable Entrepreneur"
 
 # Realistic catalog of video titles representing the 288 YouTube sources

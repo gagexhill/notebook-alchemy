@@ -5,11 +5,12 @@ from __future__ import annotations
 import datetime
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
+from . import __version__
 from .channel import TranscriptManager
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 GEMINI_API_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 )
+TRANSCRIPT_CHARACTER_BUDGET = 160_000
 
 
 @dataclass
@@ -31,6 +33,7 @@ class DomainCompendium:
     content: str
     token_count: int
     is_live_synthesized: bool = False
+    warnings: list[str] = field(default_factory=list)
 
 
 class Synthesizer:
@@ -60,7 +63,7 @@ class Synthesizer:
         *,
         force_offline: bool = False,
         notebook_title: str = "Portable Entrepreneur",
-        notebook_id: str = "6fd9a6b5-5065-4c0f-ba7e-711c712fc3c9",
+        notebook_id: str = "",
     ) -> DomainCompendium:
         """Synthesize a cluster of video sources into a complete Domain Compendium."""
         titles = [str(v.get("title") or "Untitled") for v in videos]
@@ -74,10 +77,11 @@ class Synthesizer:
 
         content = ""
         is_live = False
+        warnings: list[str] = []
 
         if not force_offline and self._is_valid_api_key():
             try:
-                content = self._call_gemini_api(domain, videos, volume, notebook_title)
+                content, warnings = self._call_gemini_api(domain, videos, volume, notebook_title)
                 is_live = True
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -87,6 +91,7 @@ class Synthesizer:
                 content = self._generate_offline_compendium(
                     domain, videos, volume, notebook_title, notebook_id
                 )
+                warnings.append("Live synthesis failed; generated a title-only index.")
         else:
             content = self._generate_offline_compendium(
                 domain, videos, volume, notebook_title, notebook_id
@@ -104,6 +109,7 @@ class Synthesizer:
             content=content,
             token_count=token_count,
             is_live_synthesized=is_live,
+            warnings=warnings,
         )
 
     def _call_gemini_api(
@@ -112,21 +118,25 @@ class Synthesizer:
         videos: list[dict[str, Any]],
         volume: int,
         notebook_title: str,
-    ) -> str:
+    ) -> tuple[str, list[str]]:
         """Invoke the Google Gemini API to generate the synthesis with full spoken transcript text."""
         url = GEMINI_API_ENDPOINT.format(model=self.model) + f"?key={self.api_key}"
 
         transcript_mgr = TranscriptManager()
         sources_payload = []
-        for v in videos[:35]:
+        warnings: list[str] = []
+        per_video_budget = TRANSCRIPT_CHARACTER_BUDGET // max(len(videos), 1)
+        for v in videos:
             title = v.get("title") or "Untitled"
-            url_str = v.get("url") or "https://youtube.com"
+            url_str = v.get("url") or "(URL unavailable)"
             vid_id = v.get("id") or v.get("source_id") or ""
             raw_text = v.get("transcript") or transcript_mgr.fetch_transcript_text(vid_id, title)
+            if raw_text and len(raw_text) > per_video_budget:
+                warnings.append(f"Transcript truncated to {per_video_budget} characters: {title}")
             snippet = (
-                raw_text[:12000].strip()
+                raw_text[:per_video_budget].strip()
                 if raw_text
-                else "(Transcript unavailable; synthesize from title and domain context)"
+                else "(Transcript unavailable; do not infer content from the title)"
             )
             sources_payload.append(
                 f"### Video: [{title}]({url_str})\nVideo ID: {vid_id}\n\nSpoken Transcript Content:\n{snippet}\n"
@@ -143,6 +153,8 @@ class Synthesizer:
             f"2. Extract deep operational SOPs, mental models, frameworks, and verbal scripts directly from the spoken transcripts.\n"
             f"3. Eliminate conversational filler, sponsor plugs, and intro music.\n"
             f"4. Provide a structured Table of Contents, Executive Summary, Detailed Protocols, Common Pitfalls, and a complete Source Attribution Table.\n\n"
+            f"Transcript budget: {TRANSCRIPT_CHARACTER_BUDGET} characters total, "
+            f"up to {per_video_budget} characters per video.\n\n"
             f"Source Videos & Spoken Transcripts:\n\n{sources_text}"
         )
 
@@ -162,7 +174,24 @@ class Synthesizer:
             if not candidates:
                 raise RuntimeError("Empty response from Gemini API")
             parts = candidates[0].get("content", {}).get("parts", [])
-            return str(parts[0].get("text", ""))
+            if candidates[0].get("finishReason") == "MAX_TOKENS":
+                warnings.append("Gemini output was truncated (MAX_TOKENS).")
+            text = "".join(str(part.get("text", "")) for part in parts)
+            if not text.strip():
+                raise RuntimeError("Empty response from Gemini API")
+            return text + "\n\n" + self._source_table(videos), warnings
+
+    @staticmethod
+    def _source_table(videos: list[dict[str, Any]]) -> str:
+        lines = ["## Source Index", "", "| Title | Source ID | URL |", "| --- | --- | --- |"]
+        for i, video in enumerate(videos):
+            title = str(video.get("title") or "Untitled").replace("|", "\\|").replace("\n", " ")
+            source_id = str(video.get("id") or video.get("source_id") or f"src_{i}").replace(
+                "|", "\\|"
+            )
+            url = str(video.get("url") or "").replace("|", "%7C")
+            lines.append(f"| {title} | {source_id} | {url} |")
+        return "\n".join(lines)
 
     def _generate_offline_compendium(
         self,
@@ -172,76 +201,26 @@ class Synthesizer:
         notebook_title: str,
         notebook_id: str,
     ) -> str:
-        """Generate a structured, rich Markdown reference compendium deterministically."""
+        """Generate an index from available source metadata without inventing content."""
         now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         vol_label = f" (Vol. {volume})" if volume > 1 else ""
-
-        # Build clean frontmatter
         header_lines = [
             "---",
-            f'title: "{domain}{vol_label} - Domain Compendium"',
+            f'title: "{domain}{vol_label} - Source Index"',
             f'domain: "{domain}"',
             f"volume: {volume}",
             f'notebook_title: "{notebook_title}"',
-            f'notebook_id: "{notebook_id}"',
             f"source_count: {len(videos)}",
             f'generated_at: "{now}"',
-            'generator: "Notebook Alchemy v0.1.0"',
-            "tags:",
-            "  - notebooklm",
-            "  - domain-compendium",
-            f"  - {self._safe_filename(domain).lower().replace('_', '-')}",
+            f'generator: "Notebook Alchemy v{__version__}"',
             "---\n",
         ]
-
-        # Domain-specific strategy synthesis
-        executive_summary = self._get_domain_executive_summary(domain)
-        principles = self._get_domain_principles(domain)
-        sops = self._get_domain_sops(domain)
-
-        # Build video index
-        video_entries: list[str] = []
-        for i, v in enumerate(videos, 1):
-            title = v.get("title", f"Video {i}")
-            url = v.get("url", "https://youtube.com")
-            vid_id = v.get("id", f"src_{i}")
-            video_entries.append(
-                f"### {i}. [{title}]({url})\n"
-                f"- **Source ID:** `{vid_id}`\n"
-                f"- **Core Theme:** {domain}\n"
-                f"- **High-Yield Takeaway:** Actionable methodology and proven workflows detailed in this session.\n"
-            )
-
-        source_notebook_line = (
-            f"> **Source Notebook:** [{notebook_title}]"
-            f"(https://notebooklm.google.com/notebook/{notebook_id}) "
-            f"| **Distilled Sources:** {len(videos)} videos\n"
+        return "\n".join(header_lines) + (
+            f"# {domain}{vol_label} — Source Index\n\n"
+            "> Offline title-only index. Transcripts were not synthesized.\n\n"
+            + self._source_table(videos)
+            + "\n"
         )
-        interlinks_section = (
-            "- [[Lead_Generation_Client_Acquisition|Lead Generation & Client Acquisition]]\n"
-            "- [[Web_Design_Agency_Operations|Web Design & Agency Operations]]\n"
-            "- [[SEO_Local_Search|SEO & Local Search]]\n"
-            "- [[Pricing_Proposal_Strategy|Pricing & Proposal Strategy]]\n"
-            "- [[Client_Retention_Onboarding_QBRs|Client Retention, Onboarding & QBRs]]\n"
-            "- [[Solo_Operator_Systems_Productivity|Solo Operator Systems & Productivity]]\n"
-        )
-
-        body = [
-            f"# {domain}{vol_label} — Domain Compendium\n",
-            source_notebook_line,
-            "## 1. Executive Summary & Strategic Core\n",
-            executive_summary,
-            "\n## 2. Foundational Mental Models & Principles\n",
-            principles,
-            "\n## 3. Actionable Standard Operating Procedures (SOPs)\n",
-            sops,
-            "\n## 4. Master Cross-Source Catalog & Video Breakdown\n",
-            "\n".join(video_entries),
-            "\n## 5. Cross-Domain Interlinks\n",
-            interlinks_section,
-        ]
-
-        return "\n".join(header_lines) + "\n".join(body)
 
     def _get_domain_executive_summary(self, domain: str) -> str:
         summaries = {
@@ -312,8 +291,8 @@ class Synthesizer:
         now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
         summary_quote = (
-            f"> Distilled **{total_sources}** YouTube video sources into **{len(compendiums)}** "
-            "authoritative, human-readable Domain Compendiums ready for Google NotebookLM.\n\n"
+            f"> **{total_sources}** video sources grouped into **{len(compendiums)}** "
+            "domain documents. Offline documents are title-only source indexes.\n\n"
         )
 
         lines = [
@@ -321,13 +300,13 @@ class Synthesizer:
             f'title: "{notebook_title} - Master Compendium Index"',
             f'notebook_title: "{notebook_title}"',
             f"total_compendiums: {len(compendiums)}",
-            f"total_sources_distilled: {total_sources}",
+            f"total_sources: {total_sources}",
             f'generated_at: "{now}"',
-            'generator: "Notebook Alchemy v0.1.0"',
+            f'generator: "Notebook Alchemy v{__version__}"',
             "---\n",
             f"# {notebook_title} — Master Compendium Index\n",
             summary_quote,
-            "## Distilled Domain Compendiums\n",
+            "## Domain Documents\n",
             "| Compendium | Volume | Source Count | Est. Tokens | File Link |",
             "| :--- | :---: | :---: | :---: | :--- |",
         ]
@@ -342,8 +321,7 @@ class Synthesizer:
             [
                 "\n## How to Use in Google NotebookLM\n",
                 "1. Upload these `.md` compendium files into your NotebookLM notebook.",
-                "2. NotebookLM will ingest each compendium as a clean, high-density source.",
-                "3. Scales effortlessly to archives of arbitrary scale (dozens, hundreds, or thousands of videos) while keeping your notebook well below NotebookLM's source caps.",
+                "2. Offline indexes contain source metadata, not synthesized transcripts.",
             ]
         )
 
@@ -358,7 +336,7 @@ class Synthesizer:
         now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
         ledger_notice = (
-            "> **NOTICE:** This document is an AI-generated, immutable source ledger tracking all original "
+            "> **NOTICE:** This source ledger tracks all original "
             f"**{len(videos)}** video sources. Do not edit manually; all updates are auto-appended.\n\n"
         )
 
@@ -369,7 +347,7 @@ class Synthesizer:
             f"total_sources: {len(videos)}",
             f'generated_at: "{now}"',
             "immutable: true",
-            'generator: "Notebook Alchemy v0.1.0"',
+            f'generator: "Notebook Alchemy v{__version__}"',
             "tags:",
             "  - notebooklm",
             "  - master-source-ledger",
@@ -383,9 +361,10 @@ class Synthesizer:
         for i, v in enumerate(videos, 1):
             vid_id = v.get("id") or f"src_{i}"
             title = (v.get("title") or f"Video {i}").replace("|", "-")
-            url = v.get("url") or "https://youtube.com"
+            url = v.get("url") or ""
             topic = v.get("topic") or "General"
-            lines.append(f"| {i} | `{vid_id}` | {title} | {topic} | [Link]({url}) |")
+            link = f"[Link]({url})" if url else ""
+            lines.append(f"| {i} | `{vid_id}` | {title} | {topic} | {link} |")
 
         return "\n".join(lines)
 
@@ -415,7 +394,6 @@ class Synthesizer:
                 f"\n### [Auto-Appended] [{title}]({url})\n"
                 f"- **Source ID:** `{vid_id}`\n"
                 f"- **Core Theme:** {domain}\n"
-                f"- **High-Yield Takeaway:** Incremental workflow and newly synthesized methodologies.\n"
             )
 
         append_block = "\n".join(new_entries)

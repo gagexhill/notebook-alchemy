@@ -138,11 +138,14 @@ class NotebookAnalyzer:
         *,
         use_fallback: bool = True,
         limit: int | None = None,
+        allow_llm: bool = True,
     ) -> DryRunReport:
         """Execute a full dry-run analysis for a notebook or YouTube channel URL."""
         scanner = ChannelScanner()
         if scanner.is_youtube_url(notebook_query):
-            return self.scan_channel(notebook_query, limit=limit, force_offline=False)
+            return self.scan_channel(
+                notebook_query, limit=limit, force_offline=False, allow_llm=allow_llm
+            )
 
         sources_raw: list[dict[str, Any]] = []
         nb_id = PORTABLE_ENTREPRENEUR_NOTEBOOK_ID
@@ -200,7 +203,9 @@ class NotebookAnalyzer:
         output_tokens = len(youtube_videos) * 500
         output_cost = (output_tokens / 1_000_000) * GEMINI_FLASH_OUTPUT_COST_PER_M
 
-        topic_clusters = self._cluster_topics([v.title for v in youtube_videos])
+        topic_clusters = self._cluster_topics(
+            [v.title for v in youtube_videos], allow_llm=allow_llm
+        )
 
         return DryRunReport(
             notebook_id=nb_id,
@@ -220,6 +225,7 @@ class NotebookAnalyzer:
         url: str,
         limit: int | None = None,
         force_offline: bool = False,
+        allow_llm: bool = True,
     ) -> DryRunReport:
         """Scan a live YouTube channel or playlist and generate a full DryRunReport."""
         scanner = ChannelScanner()
@@ -241,7 +247,9 @@ class NotebookAnalyzer:
         output_tokens = len(youtube_videos) * 500
         output_cost = (output_tokens / 1_000_000) * GEMINI_FLASH_OUTPUT_COST_PER_M
 
-        topic_clusters = self._cluster_topics([v.title for v in youtube_videos])
+        topic_clusters = self._cluster_topics(
+            [v.title for v in youtube_videos], allow_llm=allow_llm and not force_offline
+        )
         safe_id = re.sub(r"[^\w-]", "", scan_res.channel_name).lower()
 
         return DryRunReport(
@@ -307,9 +315,9 @@ class NotebookAnalyzer:
 
         return {}
 
-    def _cluster_topics(self, titles: list[str]) -> dict[str, list[str]]:
+    def _cluster_topics(self, titles: list[str], *, allow_llm: bool = True) -> dict[str, list[str]]:
         """Group video titles into domain topic themes using LLM induction or multi-domain ontology."""
-        if self.api_key and not self.force_offline:
+        if allow_llm and self.api_key and not self.force_offline:
             llm_clusters = self._cluster_topics_with_gemini(titles)
             if llm_clusters:
                 return llm_clusters
