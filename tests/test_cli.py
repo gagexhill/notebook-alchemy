@@ -46,6 +46,29 @@ class TestCLI(unittest.TestCase):
         self.assertIn("Pipeline Verification Results", result.output)
         self.assertIn("All automated pipeline verification checks PASSED", result.output)
 
+    def test_cli_append(self) -> None:
+        result = self.runner.invoke(
+            cli,
+            [
+                "append",
+                "-n",
+                "Example Notebook",
+                "--title",
+                "How to Price SEO Services ($2,500/mo Retainer Guide)",
+                "--url",
+                "https://youtube.com/watch?v=mock_new_01",
+                "--topic",
+                "Pricing & Proposal Strategy",
+            ],
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Successfully appended to Master Catalog", result.output)
+
+    def test_cli_sync(self) -> None:
+        result = self.runner.invoke(cli, ["sync", "-n", "Example Notebook"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Successfully synced compendiums to notebook", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()

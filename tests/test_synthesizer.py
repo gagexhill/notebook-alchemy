@@ -70,6 +70,37 @@ class TestSynthesizer(unittest.TestCase):
         self.assertIn("SEO & Local Search", index_md)
         self.assertIn("Web Design & Agency Operations", index_md)
 
+    def test_generate_master_sources_catalog(self) -> None:
+        videos = [
+            {"id": "yt_01", "title": "Video One", "url": "https://youtube.com/1", "topic": "SEO"},
+            {
+                "id": "yt_02",
+                "title": "Video Two",
+                "url": "https://youtube.com/2",
+                "topic": "Web Design",
+            },
+        ]
+        cat = self.synthesizer.generate_master_sources_catalog(
+            videos, notebook_title="Example Notebook"
+        )
+        self.assertIn("Master Source Catalog (Immutable Ledger)", cat)
+        self.assertIn("Video One", cat)
+        self.assertIn("Video Two", cat)
+        self.assertIn("total_sources: 2", cat)
+
+    def test_append_to_domain_compendium(self) -> None:
+        initial = (
+            "---\nsource_count: 5\n---\n# SEO\n## 4. Master Cross-Source Catalog & Video Breakdown\n"
+            "### 1. Existing Video\n## 5. Cross-Domain Interlinks\n- Link 1\n"
+        )
+        new_vids = [
+            {"id": "new_01", "title": "Newly Appended Video", "url": "https://youtube.com/new"}
+        ]
+        updated = self.synthesizer.append_to_domain_compendium(initial, new_vids, domain="SEO")
+        self.assertIn("source_count: 6", updated)
+        self.assertIn("[Auto-Appended] [Newly Appended Video]", updated)
+        self.assertIn("## 5. Cross-Domain Interlinks", updated)
+
 
 if __name__ == "__main__":
     unittest.main()

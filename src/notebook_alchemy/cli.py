@@ -258,10 +258,67 @@ def run_pipeline(notebook: str, offline: bool, max_per_vol: int, write: bool) ->
     )
     if report.vault_directory:
         summary += f"[bold]Vault Directory:[/bold] {report.vault_directory}\n"
+        summary += f"[bold cyan]Master Source Catalog:[/bold cyan] {report.vault_directory / 'MASTER_SOURCES_CATALOG.md'}\n"
     if report.index_path:
         summary += f"[bold green]Master Index:[/bold green] {report.index_path}\n"
 
     console.print(Panel(summary, title="Distillation Completed", border_style="green"))
+
+
+@cli.command(name="sync")
+@click.option(
+    "-n",
+    "--notebook",
+    default="Example Notebook",
+    help="Target notebook title to create or update in Google NotebookLM.",
+)
+def sync_to_notebooklm(notebook: str) -> None:
+    """Create target NotebookLM notebook if missing and upload all compendiums as sources."""
+    console.print(
+        f"[bold cyan]Syncing domain compendiums to NotebookLM notebook: '{notebook}'...[/bold cyan]"
+    )
+    engine = AlchemyEngine()
+
+    try:
+        nb_id = engine.sync_to_notebooklm(notebook)
+        console.print(
+            f"[bold green]✓ Successfully synced compendiums to notebook '{notebook}' (ID: {nb_id})![/bold green]"
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[bold red]Sync failed:[/bold red] {exc}")
+        sys.exit(1)
+
+
+@cli.command(name="append")
+@click.option(
+    "-n",
+    "--notebook",
+    default="Example Notebook",
+    help="Target notebook title.",
+)
+@click.option("--title", required=True, help="Title of the new YouTube video.")
+@click.option("--url", required=True, help="URL of the new YouTube video.")
+@click.option("--topic", default="General", help="Domain topic hint (optional).")
+def append_video(notebook: str, title: str, url: str, topic: str) -> None:
+    """Incrementally append a new video to the Master Catalog and matching domain compendium."""
+    console.print(f"[cyan]Appending new video to '{notebook}': {title}...[/cyan]")
+    engine = AlchemyEngine()
+
+    new_video = {
+        "id": f"yt_new_{abs(hash(title)) % 10000:04d}",
+        "title": title,
+        "url": url,
+        "topic": topic,
+    }
+
+    try:
+        updated = engine.append_incremental_sources([new_video], notebook_title=notebook)
+        console.print(
+            f"[bold green]✓ Successfully appended to Master Catalog and updated {updated} domain compendium(s)![/bold green]"
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[bold red]Append failed:[/bold red] {exc}")
+        sys.exit(1)
 
 
 @cli.command(name="test")

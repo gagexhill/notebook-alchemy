@@ -100,7 +100,10 @@ class NotebookAnalyzer:
 
     def find_notebook(self, query: str) -> dict[str, Any] | None:
         """Find notebook by title substring or exact ID."""
-        notebooks = self.list_notebooks()
+        try:
+            notebooks = self.list_notebooks()
+        except Exception:  # noqa: BLE001
+            return None
         q_lower = query.lower().strip()
         for nb in notebooks:
             title = nb.get("title", "")
