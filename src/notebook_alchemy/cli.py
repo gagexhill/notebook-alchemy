@@ -163,14 +163,19 @@ def dry_run(source: str | None, notebook: str | None, live: bool, limit: int | N
     except Exception as exc:  # noqa: BLE001
         console.print(f"[bold red]Dry run failed:[/bold red] {exc}")
         sys.exit(1)
-        console.print(f"[bold red]Dry run failed:[/bold red] {exc}")
-        sys.exit(1)
 
-    source_tag = (
-        "[yellow](Verified Channel Catalog)[/yellow]"
-        if report.is_simulated
-        else "[green](Live NotebookLM)[/green]"
+    is_url_target = (
+        any(target.startswith(prefix) for prefix in ("http://", "https://", "www.", "@"))
+        or "youtube.com" in target
+        or "youtu.be" in target
     )
+
+    if report.is_simulated:
+        source_tag = "[yellow](Verified Channel Catalog)[/yellow]"
+    elif is_url_target:
+        source_tag = "[green](Live YouTube Channel)[/green]"
+    else:
+        source_tag = "[green](Live NotebookLM)[/green]"
 
     summary_text = (
         f"[bold]Notebook:[/bold] {report.notebook_title} ([dim]{report.notebook_id}[/dim]) {source_tag}\n"
@@ -582,6 +587,16 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool) -> No
             )
         except Exception:  # noqa: BLE001, S110
             pass
+
+    local_vault = Path("./vault/compendiums").resolve()
+    if do_vaults and local_vault.exists():
+        for f in local_vault.glob("*.md"):
+            try:
+                freed += f.stat().st_size
+                f.unlink()
+            except Exception:  # noqa: BLE001, S110
+                pass
+        console.print("[green]✓ Purged project vault markdown builds (./vault/compendiums)[/green]")
 
     console.print(
         f"[bold green]✓ Zero-bloat cleanup complete! Reclaimed {freed / 1024:.1f} KB of disk space.[/bold green]"

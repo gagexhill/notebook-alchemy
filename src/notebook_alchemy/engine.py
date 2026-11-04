@@ -146,6 +146,12 @@ class AlchemyEngine:
         if write_to_vault:
             self.vault.ensure_vault()
             vault_dir.mkdir(parents=True, exist_ok=True)
+            # Purge lingering artifacts from prior runs to prevent cross-channel mixing
+            for old_md in vault_dir.glob("*.md"):
+                try:
+                    old_md.unlink()
+                except Exception:  # noqa: BLE001, S110
+                    pass
 
             for comp in compendiums:
                 file_path = self.vault.vault_path / comp.relative_path
