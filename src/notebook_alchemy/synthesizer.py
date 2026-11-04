@@ -330,3 +330,82 @@ class Synthesizer:
         )
 
         return "\n".join(lines)
+
+    def generate_master_sources_catalog(
+        self,
+        videos: list[dict[str, Any]],
+        notebook_title: str = "Portable Entrepreneur",
+    ) -> str:
+        """Generate a single immutable master ledger document of all raw sources."""
+        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+        ledger_notice = (
+            "> **NOTICE:** This document is an AI-generated, immutable source ledger tracking all original "
+            f"**{len(videos)}** video sources. Do not edit manually; all updates are auto-appended.\n\n"
+        )
+
+        lines = [
+            "---",
+            f'title: "{notebook_title} - Master Source Catalog"',
+            f'notebook_title: "{notebook_title}"',
+            f"total_sources: {len(videos)}",
+            f'generated_at: "{now}"',
+            "immutable: true",
+            'generator: "Notebook Alchemy v0.1.0"',
+            "tags:",
+            "  - notebooklm",
+            "  - master-source-ledger",
+            "---\n",
+            f"# {notebook_title} — Master Source Catalog (Immutable Ledger)\n",
+            ledger_notice,
+            "| # | Source ID | Video Title | Domain | URL |",
+            "| :---: | :---: | :--- | :--- | :--- |",
+        ]
+
+        for i, v in enumerate(videos, 1):
+            vid_id = v.get("id") or f"src_{i}"
+            title = (v.get("title") or f"Video {i}").replace("|", "-")
+            url = v.get("url") or "https://youtube.com"
+            topic = v.get("topic") or "General"
+            lines.append(f"| {i} | `{vid_id}` | {title} | {topic} | [Link]({url}) |")
+
+        return "\n".join(lines)
+
+    def append_to_domain_compendium(
+        self,
+        existing_content: str,
+        new_videos: list[dict[str, Any]],
+        domain: str = "General",
+    ) -> str:
+        """Incrementally append newly distilled video entries into an existing domain compendium."""
+        if not new_videos:
+            return existing_content
+
+        # Update source count in YAML frontmatter if present
+        updated_content = re.sub(
+            r"source_count:\s*(\d+)",
+            lambda m: f"source_count: {int(m.group(1)) + len(new_videos)}",
+            existing_content,
+        )
+
+        new_entries: list[str] = []
+        for i, v in enumerate(new_videos, 1):
+            title = v.get("title", f"New Video {i}")
+            url = v.get("url", "https://youtube.com")
+            vid_id = v.get("id", f"new_src_{i}")
+            new_entries.append(
+                f"\n### [Auto-Appended] [{title}]({url})\n"
+                f"- **Source ID:** `{vid_id}`\n"
+                f"- **Core Theme:** {domain}\n"
+                f"- **High-Yield Takeaway:** Incremental workflow and newly synthesized methodologies.\n"
+            )
+
+        append_block = "\n".join(new_entries)
+
+        # Insert before section 5 if present, otherwise append at end
+        if "## 5. Cross-Domain Interlinks" in updated_content:
+            return updated_content.replace(
+                "## 5. Cross-Domain Interlinks",
+                f"{append_block}\n## 5. Cross-Domain Interlinks",
+            )
+        return updated_content + "\n" + append_block

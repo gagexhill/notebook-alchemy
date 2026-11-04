@@ -163,6 +163,24 @@ class AlchemyEngine:
             index_file.write_text(index_content, encoding="utf-8")
             logger.info("Saved master index: %s", index_file)
 
+            # Master Immutable Source Catalog
+            catalog_videos = [
+                {
+                    "id": v.source_id,
+                    "title": v.title,
+                    "url": v.url,
+                    "topic": "Distilled Source",
+                }
+                for v in dry_run.youtube_videos
+            ]
+            catalog_content = self.synthesizer.generate_master_sources_catalog(
+                videos=catalog_videos,
+                notebook_title=dry_run.notebook_title,
+            )
+            catalog_file = vault_dir / "MASTER_SOURCES_CATALOG.md"
+            catalog_file.write_text(catalog_content, encoding="utf-8")
+            logger.info("Saved immutable master catalog: %s", catalog_file)
+
         return DistillationReport(
             notebook_title=dry_run.notebook_title,
             notebook_id=dry_run.notebook_id,
@@ -172,3 +190,92 @@ class AlchemyEngine:
             index_path=index_file,
             is_live_session=not dry_run.is_simulated,
         )
+
+    def sync_to_notebooklm(
+        self,
+        notebook_title: str = "Portable Entrepreneur",
+    ) -> str:
+        """Create target NotebookLM notebook if it does not exist, and upload compendiums as sources."""
+        # 1. Locate or create destination notebook
+        nb_id = self.client.create_notebook(notebook_title)
+
+        # 2. Upload master catalog and all generated compendiums as clean text sources
+        vault_dir = self.vault.vault_path / "compendiums"
+        if not vault_dir.exists():
+            self.run_distillation(notebook_title, force_offline=True, write_to_vault=True)
+
+        uploaded_count = 0
+        for md_file in sorted(vault_dir.glob("*.md")):
+            doc = SourceDocument(
+                source_id=md_file.stem,
+                title=md_file.stem.replace("_", " "),
+                content=md_file.read_text(encoding="utf-8"),
+                source_type="compendium",
+            )
+            self.client.add_source_document(nb_id, doc)
+            uploaded_count += 1
+
+        logger.info(
+            "Synced %d compendiums to NotebookLM notebook '%s' (%s)",
+            uploaded_count,
+            notebook_title,
+            nb_id,
+        )
+        return nb_id
+
+    def append_incremental_sources(
+        self,
+        new_videos: list[dict[str, Any]],
+        notebook_title: str = "Portable Entrepreneur",
+    ) -> int:
+        """Incrementally append new videos to the Master Catalog and corresponding domain compendiums."""
+        vault_dir = self.vault.vault_path / "compendiums"
+        vault_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Update Master Sources Catalog
+        catalog_file = vault_dir / "MASTER_SOURCES_CATALOG.md"
+        if catalog_file.exists():
+            existing_catalog = catalog_file.read_text(encoding="utf-8")
+            append_lines = []
+            for v in new_videos:
+                vid_id = v.get("id") or "new_yt"
+                title = (v.get("title") or "New Video").replace("|", "-")
+                url = v.get("url") or "https://youtube.com"
+                topic = v.get("topic") or "General"
+                append_lines.append(f"| + | `{vid_id}` | {title} | {topic} | [Link]({url}) |")
+            catalog_file.write_text(
+                existing_catalog + "\n" + "\n".join(append_lines) + "\n", encoding="utf-8"
+            )
+        else:
+            cat_content = self.synthesizer.generate_master_sources_catalog(
+                new_videos, notebook_title
+            )
+            catalog_file.write_text(cat_content, encoding="utf-8")
+
+        # 2. Cluster new videos and auto-append to domain compendiums
+        titles = [str(v.get("title", "")) for v in new_videos]
+        clusters = self.analyzer._cluster_topics(titles)
+        updated_compendiums = 0
+
+        for domain, d_titles in clusters.items():
+            if not d_titles:
+                continue
+            safe_name = self.synthesizer._safe_filename(domain)
+            target_comp = vault_dir / f"{safe_name}.md"
+            matching_videos = [v for v in new_videos if v.get("title") in d_titles]
+
+            if target_comp.exists():
+                old_text = target_comp.read_text(encoding="utf-8")
+                new_text = self.synthesizer.append_to_domain_compendium(
+                    old_text, matching_videos, domain=domain
+                )
+                target_comp.write_text(new_text, encoding="utf-8")
+                updated_compendiums += 1
+            else:
+                comp = self.synthesizer.synthesize_cluster(
+                    domain, matching_videos, volume=1, force_offline=True
+                )
+                target_comp.write_text(comp.content, encoding="utf-8")
+                updated_compendiums += 1
+
+        return updated_compendiums
