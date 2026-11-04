@@ -1,82 +1,86 @@
-"""Portable Entrepreneur 288-video benchmark dataset for testing and dry-run."""
+"""Synthetic sample catalog used only when the user passes --mock.
+
+Every id starts with `mock_` and every URL points at a nonexistent video, so a sample record can
+never be mistaken for a real source.
+"""
 
 from __future__ import annotations
 
-PORTABLE_ENTREPRENEUR_NOTEBOOK_ID = "6fd9a6b5-5065-4c0f-ba7e-711c712fc3c9"
-PORTABLE_ENTREPRENEUR_NOTEBOOK_TITLE = "Portable Entrepreneur"
+MOCK_NOTEBOOK_ID = "mock_notebook_0000"
+MOCK_NOTEBOOK_TITLE = "Sample Catalog (mock data)"
 
-# Realistic catalog of video titles representing the 288 YouTube sources
-PORTABLE_ENTREPRENEUR_VIDEOS: list[dict[str, str]] = [
+# Sample titles, clustered by theme; ids and URLs are synthetic.
+SAMPLE_VIDEOS: list[dict[str, str]] = [
     {
-        "id": "yt_001",
+        "id": "mock_001",
         "title": "💻📕✈️ How I Have Time to Run a Business, Homeschool My Kids & Travel Regularly",
-        "url": "https://www.youtube.com/watch?v=mock001",
+        "url": "https://www.youtube.com/watch?v=mock_001",
         "topic": "Solo Operator Systems & Productivity",
     },
     {
-        "id": "yt_002",
+        "id": "mock_002",
         "title": "🤔 How You're Building Websites Could Be Completely Wrong",
-        "url": "https://www.youtube.com/watch?v=mock002",
+        "url": "https://www.youtube.com/watch?v=mock_002",
         "topic": "Web Design & Agency Operations",
     },
     {
-        "id": "yt_003",
+        "id": "mock_003",
         "title": "😲 Quarterly Business Reviews: Get MORE Work From PAST & CURRENT Clients",
-        "url": "https://www.youtube.com/watch?v=mock003",
+        "url": "https://www.youtube.com/watch?v=mock_003",
         "topic": "Client Retention, Onboarding & QBRs",
     },
     {
-        "id": "yt_004",
+        "id": "mock_004",
         "title": "😲 This SEO tool has a CRM, Task Manager, Marketing Calendar, Client Portal & More",
-        "url": "https://www.youtube.com/watch?v=mock004",
+        "url": "https://www.youtube.com/watch?v=mock_004",
         "topic": "Solo Operator Systems & Productivity",
     },
     {
-        "id": "yt_005",
+        "id": "mock_005",
         "title": "🚀 The 1 Lead Generation Strategy That Helped My Business Takeoff",
-        "url": "https://www.youtube.com/watch?v=mock005",
+        "url": "https://www.youtube.com/watch?v=mock_005",
         "topic": "Lead Generation & Client Acquisition",
     },
     {
-        "id": "yt_006",
+        "id": "mock_006",
         "title": "🚨 Beware of This GBP Scam (Don’t Let Your Clients Fall for It)",
-        "url": "https://www.youtube.com/watch?v=mock006",
+        "url": "https://www.youtube.com/watch?v=mock_006",
         "topic": "SEO & Local Search",
     },
     {
-        "id": "yt_007",
+        "id": "mock_007",
         "title": "How to Price Website Projects ($3k to $10k Website Pricing Guide)",
-        "url": "https://www.youtube.com/watch?v=mock007",
+        "url": "https://www.youtube.com/watch?v=mock_007",
         "topic": "Pricing & Proposal Strategy",
     },
     {
-        "id": "yt_008",
+        "id": "mock_008",
         "title": "Cold Email Outreach Scripts That Actually Book High-Ticket Web Design Clients",
-        "url": "https://www.youtube.com/watch?v=mock008",
+        "url": "https://www.youtube.com/watch?v=mock_008",
         "topic": "Lead Generation & Client Acquisition",
     },
     {
-        "id": "yt_009",
+        "id": "mock_009",
         "title": "Google Business Profile Optimization Blueprint: Rank #1 in Local 3-Pack",
-        "url": "https://www.youtube.com/watch?v=mock009",
+        "url": "https://www.youtube.com/watch?v=mock_009",
         "topic": "SEO & Local Search",
     },
     {
-        "id": "yt_010",
+        "id": "mock_010",
         "title": "Monthly SEO Retainers: How to Sell $1,500/mo Maintenance Packages",
-        "url": "https://www.youtube.com/watch?v=mock010",
+        "url": "https://www.youtube.com/watch?v=mock_010",
         "topic": "Pricing & Proposal Strategy",
     },
     {
-        "id": "yt_011",
+        "id": "mock_011",
         "title": "Agency Client Onboarding Workflow: The Exact Process From Contract to Kickoff",
-        "url": "https://www.youtube.com/watch?v=mock011",
+        "url": "https://www.youtube.com/watch?v=mock_011",
         "topic": "Client Retention, Onboarding & QBRs",
     },
     {
-        "id": "yt_012",
+        "id": "mock_012",
         "title": "Local Service Ads (LSA) vs Google Ads: Which Delivers Better ROI for Local Businesses",
-        "url": "https://www.youtube.com/watch?v=mock012",
+        "url": "https://www.youtube.com/watch?v=mock_012",
         "topic": "SEO & Local Search",
     },
 ]
@@ -147,17 +151,17 @@ _THEME_TEMPLATES = [
     ),
 ]
 
-_idx = len(PORTABLE_ENTREPRENEUR_VIDEOS) + 1
-while len(PORTABLE_ENTREPRENEUR_VIDEOS) < 288:
+_idx = len(SAMPLE_VIDEOS) + 1
+while len(SAMPLE_VIDEOS) < 288:
     for theme, templates in _THEME_TEMPLATES:
-        if len(PORTABLE_ENTREPRENEUR_VIDEOS) >= 288:
+        if len(SAMPLE_VIDEOS) >= 288:
             break
-        tmpl = templates[len(PORTABLE_ENTREPRENEUR_VIDEOS) % len(templates)]
-        variant = len(PORTABLE_ENTREPRENEUR_VIDEOS) // len(templates) + 1
+        tmpl = templates[len(SAMPLE_VIDEOS) % len(templates)]
+        variant = len(SAMPLE_VIDEOS) // len(templates) + 1
         title = f"{tmpl} (Vol. {variant})"
-        PORTABLE_ENTREPRENEUR_VIDEOS.append(
+        SAMPLE_VIDEOS.append(
             {
-                "id": f"yt_{_idx:03d}",
+                "id": f"mock_{_idx:03d}",
                 "title": title,
                 "url": f"https://www.youtube.com/watch?v=mock_{_idx:03d}",
                 "topic": theme,
@@ -167,5 +171,5 @@ while len(PORTABLE_ENTREPRENEUR_VIDEOS) < 288:
 
 
 def get_mock_sources() -> list[dict[str, str]]:
-    """Return all 288 simulated YouTube video sources."""
-    return list(PORTABLE_ENTREPRENEUR_VIDEOS)
+    """Return every synthetic sample source."""
+    return list(SAMPLE_VIDEOS)

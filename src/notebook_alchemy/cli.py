@@ -1,610 +1,725 @@
-"""Command Line Interface for Notebook Alchemy."""
+"""Command line interface for Notebook Alchemy."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
+from textwrap import shorten
 
 import click
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-# Ensure UTF-8 console output on Windows to prevent UnicodeEncodeError with emojis
-if sys.platform == "win32":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:  # noqa: BLE001, S110
-        pass
-
-from . import __version__
-from .analyzer import NotebookAnalyzer
+from . import __version__, ui
+from .channel import video_id_from_url
+from .client import NotebookLMClient
 from .config import AlchemyConfig
 from .engine import AlchemyEngine
+from .errors import AlchemyError, NotebookLMError, SessionError, VaultError
+from .ui import esc, handle_errors
 
-logger = logging.getLogger(__name__)
-console = Console(legacy_windows=False)
+MOCK_NOTE = (
+    "This run uses the bundled sample catalog, not a real source. Its output is for trying the tool "
+    "and is never uploaded to NotebookLM."
+)
 
 
-def _safe_str(text: str) -> str:
-    """Strip or normalize characters that cause legacy Windows console crashes."""
-    return text.encode("ascii", "replace").decode("ascii")
+class OrderedGroup(click.Group):
+    """Lists commands in the order they are defined, which follows a first-run path."""
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        return list(self.commands)
 
 
-@click.group()
+def _config() -> AlchemyConfig:
+    return AlchemyConfig.from_env()
+
+
+def _engine() -> AlchemyEngine:
+    return AlchemyEngine(_config())
+
+
+def _target(source: str | None, notebook: str | None, mock: bool) -> str:
+    target = notebook or source
+    if target:
+        return target
+    if mock:
+        return "sample catalog"
+    raise click.UsageError(
+        "Give a YouTube channel, playlist or video URL (or an existing notebook), or pass --mock "
+        "to try the sample catalog.\n\nExample: notebook-alchemy dry-run https://www.youtube.com/@Hyperplexed"
+    )
+
+
+def _short(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(Path.cwd()))
+    except ValueError:
+        return str(path)
+
+
+def _source_dir(engine: AlchemyEngine, notebook: str | None, source_dir: Path | None) -> Path:
+    if source_dir:
+        return source_dir
+    if not notebook:
+        raise click.UsageError("Pass --notebook NAME (the source's name) or --source-dir PATH.")
+    candidate = engine.vault.compendium_dir(notebook)
+    if candidate.is_dir():
+        return candidate
+    available = [str(p.parent.name) for p in engine.vault.existing_compendium_dirs()]
+    raise VaultError(
+        f"No compendiums found for '{notebook}' at {candidate}.",
+        hint=(
+            "Available sources: " + ", ".join(available) + ". Use --source-dir with one of them."
+            if available
+            else "Run `notebook-alchemy run <source>` first."
+        ),
+    )
+
+
+def _cost_line(report) -> str:
+    return (
+        f"~{report.total_estimated_tokens:,} transcript tokens, estimated "
+        f"${report.total_estimated_cost_usd:.4f} with {esc(report.model)}"
+    )
+
+
+@click.group(
+    cls=OrderedGroup,
+    context_settings={"help_option_names": ["-h", "--help"], "max_content_width": 100},
+    epilog=(
+        "\b\nFirst run:\n"
+        "  notebook-alchemy test                    check the install, no network needed\n"
+        "  notebook-alchemy dry-run <youtube-url>   preview videos, domains and cost\n"
+        "  notebook-alchemy run <youtube-url>       build compendiums (and upload them)\n"
+        "\nDocs: https://github.com/gagexhill/notebook-alchemy"
+    ),
+)
 @click.version_option(version=__version__, prog_name="notebook-alchemy")
-def cli() -> None:
-    """Notebook Alchemy: Distill massive YouTube channels & playlists into self-organizing Domain Compendiums."""
+@click.option("-q", "--quiet", is_flag=True, help="Only print errors and final results.")
+@click.option("-v", "--verbose", count=True, help="Show log output (-v) or debug detail (-vv).")
+@click.option("--no-color", is_flag=True, help="Disable colour (the NO_COLOR variable also works).")
+@click.option("--debug", is_flag=True, help="Print full tracebacks for unexpected errors.")
+def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
+    """Notebook Alchemy: turn a YouTube channel into NotebookLM-ready domain compendiums.
+
+    It discovers every video, groups them into subject domains, synthesizes one document per
+    domain (with Gemini, or as an offline index), and uploads the set to a NotebookLM notebook so a
+    large archive fits in a few sources.
+    """
+    ui.configure(quiet=quiet, no_color=no_color or bool(os.getenv("NO_COLOR")), debug=debug)
+    level = logging.DEBUG if verbose > 1 else logging.INFO if verbose else logging.WARNING
+    if quiet:
+        level = logging.ERROR
+    logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
+    for noisy in ("httpx", "httpcore", "yt_dlp", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
-@cli.command()
-@click.option(
-    "--browser",
-    default="chromium",
-    type=click.Choice(["chromium", "chrome", "msedge"]),
-    help="Browser engine to launch for interactive login.",
+# --- run -----------------------------------------------------------------------------------------
+
+
+@cli.command(
+    name="run",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy run https://www.youtube.com/@Hyperplexed\n"
+        "  notebook-alchemy run @Hyperplexed --no-sync          build locally, upload nothing\n"
+        '  notebook-alchemy run <url> -N "CSS Course" --yes     name the notebook, skip prompts\n'
+        "  notebook-alchemy run --mock --no-sync                try the sample catalog\n"
+    ),
 )
-@click.option(
-    "--browser-cookies",
-    type=click.Choice(["chrome", "edge", "firefox", "auto"]),
-    help="Extract cookies directly from an installed browser without launching a GUI window.",
-)
-@click.option(
-    "--check",
-    is_flag=True,
-    help="Check whether current stored session credentials are valid without logging in.",
-)
-@click.option(
-    "--timeout",
-    default=30,
-    help="Timeout in seconds for interactive login before aborting (default: 30s).",
-)
-def login(browser: str, browser_cookies: str | None, check: bool, timeout: int) -> None:
-    """Authenticate with Google NotebookLM safely without indefinite hanging."""
-    if check:
-        console.print("[cyan]Verifying existing NotebookLM session...[/cyan]")
-        analyzer = NotebookAnalyzer()
-        try:
-            notebooks = analyzer.list_notebooks()
-            console.print(
-                f"[bold green]✓ Session is active and authenticated! Found {len(notebooks)} notebook(s).[/bold green]"
-            )
-            return
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"[bold yellow]Session check failed:[/bold yellow] {exc}")
-            console.print("[dim]Re-authentication is required.[/dim]")
-            sys.exit(1)
-
-    if browser_cookies:
-        target = "edge" if browser_cookies in ("edge", "auto") else browser_cookies
-        console.print(f"[cyan]Attempting non-interactive cookie import from {target}...[/cyan]")
-        cmd = ["notebooklm", "login", "--browser-cookies", target]
-        try:
-            res = subprocess.run(cmd, check=False, capture_output=True, text=True, encoding="utf-8")
-            if res.returncode == 0:
-                console.print(
-                    f"[bold green]✓ Cookies successfully imported from {target}![/bold green]"
-                )
-                return
-            console.print(f"[yellow]Notice from cookie import:[/yellow] {res.stderr or res.stdout}")
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"[bold red]Cookie extraction failed:[/bold red] {exc}")
-            sys.exit(1)
-
-    console.print(
-        f"[cyan]Initiating Google NotebookLM authentication using {browser} (timeout: {timeout}s)...[/cyan]"
-    )
-    cmd = ["notebooklm", "login", "--browser", browser, "--browser-timeout", str(timeout)]
-    try:
-        subprocess.run(cmd, check=True)
-        console.print(
-            "[bold green]✓ Successfully authenticated with Google NotebookLM![/bold green]"
-        )
-    except subprocess.CalledProcessError as err:
-        console.print(
-            f"[bold red]Authentication failed or timed out with exit code {err.returncode}.[/bold red]\n"
-            "[yellow]Tip:[/yellow] If running in a headless or automated terminal, use:\n"
-            "  1. notebook-alchemy login --browser-cookies edge\n"
-            "  2. Or set the NOTEBOOKLM_AUTH_JSON environment variable with exported session cookies."
-        )
-        sys.exit(err.returncode)
-
-
-@cli.command()
-def status() -> None:
-    """Inspect local engine configuration, session state, and vault path."""
-    engine = AlchemyEngine()
-    stat = engine.status()
-
-    table = Table(title="Notebook Alchemy Status", show_header=True, header_style="bold magenta")
-    table.add_column("Property", style="dim", width=15)
-    table.add_column("Value")
-
-    for k, v in stat.items():
-        table.add_row(k, str(v))
-
-    console.print(table)
-
-
-@cli.command()
-@click.argument("source", required=False, default=None)
-@click.option(
-    "-n",
-    "--notebook",
-    default=None,
-    help="Title or ID of the notebook, or YouTube channel/playlist URL.",
-)
-@click.option(
-    "--live/--fallback",
-    default=False,
-    help="Strictly enforce live NotebookLM connection (default: auto-fallback).",
-)
-@click.option(
-    "--limit",
-    type=int,
-    default=None,
-    help="Limit number of videos to scan (e.g. 50, 200, 1000).",
-)
-def dry_run(source: str | None, notebook: str | None, live: bool, limit: int | None) -> None:
-    """Run a pre-flight inspection and token/cost analysis on a YouTube channel URL or notebook."""
-    target = notebook or source or "Portable Entrepreneur"
-    console.print(f"[bold cyan]Running dry-run analysis for target: '{target}'...[/bold cyan]")
-    analyzer = NotebookAnalyzer()
-
-    try:
-        report = analyzer.generate_dry_run(
-            notebook_query=target,
-            use_fallback=not live,
-            limit=limit,
-        )
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[bold red]Dry run failed:[/bold red] {exc}")
-        sys.exit(1)
-
-    is_url_target = (
-        any(target.startswith(prefix) for prefix in ("http://", "https://", "www.", "@"))
-        or "youtube.com" in target
-        or "youtu.be" in target
-    )
-
-    if report.is_simulated:
-        source_tag = "[yellow](Verified Channel Catalog)[/yellow]"
-    elif is_url_target:
-        source_tag = "[green](Live YouTube Channel)[/green]"
-    else:
-        source_tag = "[green](Live NotebookLM)[/green]"
-
-    summary_text = (
-        f"[bold]Notebook:[/bold] {report.notebook_title} ([dim]{report.notebook_id}[/dim]) {source_tag}\n"
-        f"[bold]Total Sources:[/bold] {report.total_sources}\n"
-        f"[bold]YouTube Video Sources:[/bold] {len(report.youtube_videos)}\n"
-        f"[bold]Other Documents/Notes:[/bold] {len(report.other_sources)}\n\n"
-        f"[bold]Total Estimated Tokens:[/bold] ~{report.total_estimated_tokens:,}\n"
-        f"[bold]Estimated Gemini Flash Input Cost:[/bold] ${report.estimated_input_cost_usd:.4f} USD\n"
-        f"[bold]Estimated Synthesis Output Cost:[/bold] ${report.estimated_synthesis_output_cost_usd:.4f} USD\n"
-        f"[bold green]Total Estimated Cost:[/bold green] ${report.total_estimated_cost_usd:.4f} USD"
-    )
-
-    console.print(Panel(summary_text, title="Dry-Run Cost & Token Sizing", border_style="cyan"))
-
-    topic_table = Table(
-        title="Human-Readable Domain Topic Clusters (Preview)",
-        show_header=True,
-        header_style="bold green",
-    )
-    topic_table.add_column("Domain Topic", style="cyan", width=38)
-    topic_table.add_column("Video Count", justify="right", width=12)
-    topic_table.add_column("Sample Titles", style="dim")
-
-    for topic, titles in report.domain_topic_clusters.items():
-        clean_titles = [_safe_str(t) for t in titles[:2]]
-        sample = " - " + " - ".join(clean_titles)
-        if len(titles) > 2:
-            sample += f" ... (+{len(titles) - 2} more)"
-        topic_table.add_row(topic, str(len(titles)), sample)
-
-    console.print(topic_table)
-
-
-@cli.command(name="run")
-@click.argument("source", required=False, default=None)
-@click.option(
-    "-n",
-    "--notebook",
-    default=None,
-    help="Title or ID of the notebook, or YouTube channel/playlist URL.",
-)
-@click.option(
-    "--notebook-name",
-    "-N",
-    default=None,
-    help="Explicit name for the created Google NotebookLM notebook.",
-)
-@click.option(
-    "--offline/--live-llm",
-    default=True,
-    help="Force deterministic offline semantic synthesis (default: offline).",
-)
+@click.argument("source", required=False)
+@click.option("-n", "--notebook", help="YouTube URL or existing notebook (alternative to SOURCE).")
+@click.option("-N", "--notebook-name", help="Name for the destination NotebookLM notebook.")
+@click.option("--offline", is_flag=True, help="No Gemini calls: keyword clustering, offline indexes.")
+@click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real source.")
+@click.option("--limit", type=click.IntRange(min=1), help="Only scan the first N videos.")
 @click.option(
     "--max-per-vol",
+    type=click.IntRange(min=1),
     default=50,
-    help="Maximum videos grouped per compendium volume (default: 50).",
+    show_default=True,
+    help="Most videos per compendium volume.",
 )
-@click.option(
-    "--write/--preview-only",
-    default=True,
-    help="Write markdown notes to the local vault (default: write).",
-)
-@click.option(
-    "--sync/--no-sync",
-    default=True,
-    help="Upload generated compendiums into Google NotebookLM (default: sync).",
-)
+@click.option("--write/--preview-only", default=True, help="Write the vault (default) or preview only.")
+@click.option("--sync/--no-sync", default=True, help="Upload to NotebookLM (default) or build locally.")
+@click.option("-y", "--yes", is_flag=True, help="Accept defaults without prompting.")
+@handle_errors
 def run_pipeline(
     source: str | None,
     notebook: str | None,
     notebook_name: str | None,
     offline: bool,
+    mock: bool,
+    limit: int | None,
     max_per_vol: int,
     write: bool,
     sync: bool,
+    yes: bool,
 ) -> None:
-    """Execute end-to-end distillation from a YouTube channel URL or notebook into Domain Compendiums."""
-    target = notebook or source or "Portable Entrepreneur"
-    engine = AlchemyEngine()
+    """Distill a YouTube channel, playlist or video into domain compendiums."""
+    target = _target(source, notebook, mock)
+    engine = _engine()
+    console = ui.console
 
-    # Pillar 5: Upfront Login Check if sync is requested
-    if sync and write and not engine.client.is_authenticated():
-        console.print(
-            Panel(
-                "[bold red]Google NotebookLM Authentication Required[/bold red]\n\n"
-                "You are not currently logged in to Google NotebookLM.\n"
-                "To authenticate, run:\n"
-                "  [bold cyan]notebook-alchemy login[/bold cyan]\n\n"
-                "To generate local Markdown vault compendiums without uploading, pass [bold yellow]--no-sync[/bold yellow].",
-                title="Login Required",
-                border_style="red",
+    if mock and sync:
+        sync = False
+        ui.warn("Sample data is never uploaded; continuing with --no-sync.")
+    do_sync = sync and write
+
+    if do_sync:
+        with console.status("Checking your NotebookLM session..."):
+            session = engine.client.check_session()
+        if not session.ok:
+            raise SessionError(
+                session.detail,
+                hint="Run `notebook-alchemy login`, or add --no-sync to build files without uploading.",
             )
+        ui.success(f"NotebookLM session is active ({session.notebooks} notebook(s)).")
+
+    total_steps = 3 if do_sync else 2
+    live = engine.config.has_gemini_key and not offline
+
+    ui.step(1, total_steps, "Discover and group videos")
+    with ui.Reporter() as reporter:
+        report = engine.analyzer_for(offline).generate_dry_run(
+            target, use_mock=mock, limit=limit, progress=reporter
         )
-        sys.exit(1)
-
-    console.print(
-        f"[bold cyan]Starting Notebook Alchemy Distillation for target: '{target}'...[/bold cyan]"
+    if report.is_mock:
+        ui.banner("Sample data", MOCK_NOTE)
+    ui.info(
+        f"  [bold]{esc(report.notebook_title)}[/bold]: {len(report.youtube_videos)} videos in "
+        f"{len(report.domain_videos)} domains ({report.cluster_method} clustering)"
     )
+    ui.info(f"  {_cost_line(report)}")
+    ui.info(
+        "  Mode: "
+        + (
+            f"Gemini synthesis ({esc(engine.config.gemini_model)})"
+            if live
+            else "offline index (titles only, no summaries)"
+        )
+    )
+    if not live and not offline:
+        ui.warn("GEMINI_API_KEY is not set, so volumes are offline indexes. See `notebook-alchemy status`.")
+    for note in report.notes:
+        ui.warn(esc(note))
 
-    try:
-        report = engine.run_distillation(
-            notebook_query=target,
+    final_name = notebook_name or report.notebook_title
+    if do_sync and not notebook_name and not yes and sys.stdin.isatty():
+        console.print()
+        final_name = click.prompt("NotebookLM notebook name", default=report.notebook_title).strip() or (
+            report.notebook_title
+        )
+
+    ui.step(2, total_steps, "Build compendiums")
+    with ui.Reporter() as reporter:
+        result = engine.run_distillation(
             force_offline=offline,
             max_videos_per_volume=max_per_vol,
             write_to_vault=write,
+            dry_run=report,
+            progress=reporter,
         )
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[bold red]Distillation failed:[/bold red] {exc}")
-        sys.exit(1)
 
-    result_table = Table(
-        title="Generated Domain Compendiums",
-        show_header=True,
-        header_style="bold green",
-    )
-    result_table.add_column("Domain Compendium", style="cyan", width=38)
-    result_table.add_column("Vol", justify="center", width=5)
-    result_table.add_column("Sources", justify="right", width=8)
-    result_table.add_column("Est. Tokens", justify="right", width=12)
-    result_table.add_column("Vault Path", style="dim")
-
-    for c in report.compendiums:
-        result_table.add_row(
-            c.domain,
+    table = Table(title="Compendiums", header_style="bold green", title_justify="left")
+    table.add_column("Domain", style="cyan", overflow="fold")
+    table.add_column("Vol", justify="right")
+    table.add_column("Videos", justify="right")
+    table.add_column("Tokens", justify="right")
+    table.add_column("Mode")
+    for c in result.compendiums:
+        table.add_row(
+            esc(c.domain),
             str(c.volume),
             str(len(c.titles)),
             f"~{c.token_count:,}",
-            c.relative_path,
+            "gemini" if c.is_live_synthesized else "offline",
         )
+    console.print(table)
+    for w in result.warnings:
+        if w not in report.notes:
+            ui.warn(esc(w))
 
-    console.print(result_table)
-
-    summary = (
-        f"[bold]Total Videos Processed:[/bold] {report.total_sources_scanned}\n"
-        f"[bold]Compendiums Created:[/bold] {report.total_compendiums}\n"
-        f"[bold]Total Synthesized Tokens:[/bold] ~{report.total_tokens:,}\n"
+    where = (
+        f"{_short(result.vault_directory)}  (index: INDEX.md)"
+        if result.vault_directory
+        else "not written (--preview-only)"
     )
-    if report.vault_directory:
-        summary += f"[bold]Vault Directory:[/bold] {report.vault_directory}\n"
-        summary += f"[bold cyan]Master Source Catalog:[/bold cyan] {report.vault_directory / 'MASTER_SOURCES_CATALOG.md'}\n"
-    if report.index_path:
-        summary += f"[bold green]Master Index:[/bold green] {report.index_path}\n"
-
-    console.print(Panel(summary, title="Distillation Completed", border_style="green"))
-
-    # Pillar 5: Interactive Notebook Naming and Direct Sync
-    if sync and write:
-        proposed_name = notebook_name or report.notebook_title or target
-        if not notebook_name and sys.stdin.isatty():
-            console.print("\n[bold cyan]Google NotebookLM Destination[/bold cyan]")
-            user_choice = click.prompt(
-                "Proposed Notebook Name",
-                default=proposed_name,
-                show_default=True,
-            )
-            final_nb_name = user_choice.strip() or proposed_name
-        else:
-            final_nb_name = proposed_name
-
-        console.print(
-            f"[cyan]Syncing compendiums to Google NotebookLM notebook: '{final_nb_name}'...[/cyan]"
-        )
-        try:
-            nb_id = engine.sync_to_notebooklm(final_nb_name)
-            console.print(
-                Panel(
-                    f"[bold green]✓ Successfully uploaded {len(report.compendiums)} compendiums + Master Catalog to Google NotebookLM![/bold green]\n\n"
-                    f"Notebook Title: [bold]{final_nb_name}[/bold] ([dim]{nb_id}[/dim])\n"
-                    f"Open in your browser to use Audio Overview, Quizzes & Study Guides:\n"
-                    f"[bold cyan]https://notebooklm.google.com[/bold cyan]",
-                    title="NotebookLM Sync Succeeded",
-                    border_style="green",
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"[bold red]Sync to NotebookLM failed:[/bold red] {exc}")
-
-
-@cli.command(name="sync")
-@click.option(
-    "-n",
-    "--notebook",
-    default="Portable Entrepreneur",
-    help="Target notebook title to create or update in Google NotebookLM.",
-)
-def sync_to_notebooklm(notebook: str) -> None:
-    """Create target NotebookLM notebook if missing and upload all compendiums as sources."""
     console.print(
-        f"[bold cyan]Syncing domain compendiums to NotebookLM notebook: '{notebook}'...[/bold cyan]"
-    )
-    engine = AlchemyEngine()
-
-    try:
-        nb_id = engine.sync_to_notebooklm(notebook)
-        console.print(
-            f"[bold green]✓ Successfully synced compendiums to notebook '{notebook}' (ID: {nb_id})![/bold green]"
+        Panel(
+            f"[bold]{result.total_compendiums}[/bold] compendiums from "
+            f"[bold]{result.total_sources_scanned}[/bold] videos, ~{result.total_tokens:,} tokens\n"
+            f"Saved to: {esc(where)}",
+            title="Build complete",
+            border_style="green",
+            padding=(0, 2),
         )
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[bold red]Sync failed:[/bold red] {exc}")
-        sys.exit(1)
+    )
+
+    if do_sync:
+        ui.step(3, total_steps, f"Upload to NotebookLM: {final_name}")
+        if result.vault_directory is None:
+            raise AlchemyError("Nothing was written, so there is nothing to upload.")
+        with ui.Reporter() as reporter:
+            synced = engine.sync_to_notebooklm(final_name, result.vault_directory, progress=reporter)
+        action = "Created" if synced.created else "Updated"
+        console.print(
+            Panel(
+                f"{action} notebook [bold]{esc(final_name)}[/bold]\n"
+                f"Uploaded {synced.uploaded} files"
+                + (f", replaced {synced.replaced} existing sources" if synced.replaced else "")
+                + "\n\nOpen https://notebooklm.google.com to use Audio Overview, Study Guides and Quizzes.",
+                title="Upload complete",
+                border_style="green",
+                padding=(0, 2),
+            )
+        )
+    elif write and not report.is_mock:
+        ui.info(
+            "\n[dim]Upload later with:[/dim] notebook-alchemy sync -n " + esc(f'"{report.notebook_title}"')
+        )
 
 
-@cli.command(name="append")
+# --- dry-run -------------------------------------------------------------------------------------
+
+
+@cli.command(
+    name="dry-run",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy dry-run https://www.youtube.com/@Hyperplexed\n"
+        "  notebook-alchemy dry-run @Hyperplexed --limit 50 --offline\n"
+        "  notebook-alchemy dry-run --mock\n"
+    ),
+)
+@click.argument("source", required=False)
+@click.option("-n", "--notebook", help="YouTube URL or existing notebook (alternative to SOURCE).")
+@click.option("--limit", type=click.IntRange(min=1), help="Only scan the first N videos.")
+@click.option("--offline", is_flag=True, help="No Gemini calls: keyword clustering only.")
+@click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real source.")
+@handle_errors
+def dry_run(source: str | None, notebook: str | None, limit: int | None, offline: bool, mock: bool) -> None:
+    """Preview videos, domains and cost. Writes and uploads nothing."""
+    target = _target(source, notebook, mock)
+    engine = _engine()
+    console = ui.console
+    ui.info(f"[bold cyan]Analyzing[/bold cyan] {esc(target)}")
+    with ui.Reporter() as reporter:
+        report = engine.analyzer_for(offline).generate_dry_run(
+            target, use_mock=mock, limit=limit, progress=reporter
+        )
+    if report.is_mock:
+        ui.banner("Sample data", MOCK_NOTE)
+
+    origin = {"youtube": "YouTube", "notebooklm": "NotebookLM notebook", "mock": "sample catalog"}[
+        report.origin
+    ]
+    total_videos = max(len(report.youtube_videos), 1)
+    summary = (
+        f"[bold]Source:[/bold] {esc(report.notebook_title)}"
+        + ("" if report.is_mock else f" [dim]({origin})[/dim]")
+        + "\n"
+        f"[bold]Videos:[/bold] {len(report.youtube_videos)}"
+        + (f"   [bold]Other sources:[/bold] {len(report.other_sources)}" if report.other_sources else "")
+        + f"\n[bold]Domains:[/bold] {len(report.domain_videos)} ({report.cluster_method} clustering)\n\n"
+        f"[bold]Transcript tokens:[/bold] ~{report.total_estimated_tokens:,}\n"
+        f"[bold]Input cost:[/bold] ${report.estimated_input_cost_usd:.4f}   "
+        f"[bold]Output cost:[/bold] ${report.estimated_synthesis_output_cost_usd:.4f}\n"
+        f"[bold green]Estimated total:[/bold green] ${report.total_estimated_cost_usd:.4f} "
+        f"[dim]({esc(report.model)}; an estimate from video length)[/dim]"
+    )
+    console.print(Panel(summary, title="Dry run", border_style="cyan", padding=(0, 2)))
+
+    table = Table(title="Domains", header_style="bold green", title_justify="left")
+    table.add_column("Domain", style="cyan", overflow="fold")
+    table.add_column("Videos", justify="right")
+    table.add_column("Share")
+    table.add_column("Examples", style="dim", overflow="fold")
+    for domain, vids in sorted(report.domain_videos.items(), key=lambda kv: -len(kv[1])):
+        share = len(vids) / total_videos
+        samples = "; ".join(esc(shorten(v.title, 50, placeholder="…")) for v in vids[:2])
+        table.add_row(esc(domain), str(len(vids)), f"{'█' * max(1, round(share * 12))} {share:.0%}", samples)
+    console.print(table)
+    for note in report.notes:
+        ui.warn(esc(note))
+    if not report.is_mock:
+        ui.info(f"\n[dim]Next:[/dim] notebook-alchemy run {esc(target)}")
+
+
+# --- status / login ------------------------------------------------------------------------------
+
+
+@cli.command(name="status")
+@handle_errors
+def status() -> None:
+    """Check this install: NotebookLM CLI, session file, Gemini key, vault and cache."""
+    engine = _engine()
+    facts = engine.status()
+    has_cli = not str(facts["notebooklm_cli"]).startswith("not found")
+    has_session = not str(facts["session_file"]).startswith("none")
+    has_key = facts["gemini_api_key"] == "set"
+
+    table = Table(title="Notebook Alchemy", header_style="bold magenta", title_justify="left")
+    table.add_column("", width=1)
+    table.add_column("Check", style="bold")
+    table.add_column("Value", overflow="fold")
+    rows = [
+        (has_cli, "notebooklm CLI", facts["notebooklm_cli"]),
+        (has_session, "NotebookLM session file", facts["session_file"]),
+        (has_key, "Gemini API key", facts["gemini_api_key"]),
+        (None, "Gemini model", facts["gemini_model"]),
+        (None, "Vault", facts["vault_path"]),
+        (None, "Transcript cache", facts["cache_dir"]),
+        (None, "Parallel fetches", facts["max_concurrency"]),
+        (None, "Environment", facts["environment"]),
+    ]
+    for ok, name, value in rows:
+        glyph = "[green]✓[/green]" if ok else "[red]✗[/red]" if ok is False else "[dim]-[/dim]"
+        table.add_row(glyph, name, esc(value))
+    ui.console.print(table)
+
+    next_steps = []
+    if not has_cli:
+        next_steps.append("pip install notebooklm-py")
+    if not has_session:
+        next_steps.append("notebook-alchemy login")
+    if not has_key:
+        next_steps.append(
+            "set GEMINI_API_KEY in .env for synthesized compendiums (offline indexes work without it)"
+        )
+    if next_steps:
+        ui.console.print("\n[bold]Next:[/bold]\n" + "\n".join(f"  - {esc(s)}" for s in next_steps))
+    else:
+        ui.console.print("\n[green]Ready.[/green] A session file exists. `login --check` confirms it works.")
+
+
+@cli.command(
+    name="login",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy login                        sign in through a browser window\n"
+        "  notebook-alchemy login --browser-cookies edge reuse an Edge sign-in, no window\n"
+        "  notebook-alchemy login --check                is the stored session still valid?\n"
+    ),
+)
+@click.option(
+    "--browser",
+    default="chromium",
+    show_default=True,
+    type=click.Choice(["chromium", "chrome", "msedge"]),
+    help="Browser to open for interactive sign-in.",
+)
+@click.option(
+    "--browser-cookies",
+    type=click.Choice(["chrome", "edge", "firefox"]),
+    help="Reuse an installed browser's sign-in instead of opening a window.",
+)
+@click.option("--check", is_flag=True, help="Verify the stored session without signing in.")
+@click.option(
+    "--timeout",
+    type=click.IntRange(min=30),
+    default=300,
+    show_default=True,
+    help="Seconds to wait for you to finish signing in.",
+)
+@handle_errors
+def login(browser: str, browser_cookies: str | None, check: bool, timeout: int) -> None:
+    """Sign in to Google NotebookLM (uses the `notebooklm` CLI)."""
+    client = NotebookLMClient(_config())
+    if check:
+        with ui.console.status("Checking your NotebookLM session..."):
+            result = client.check_session()
+        if not result.ok:
+            raise SessionError(result.detail, hint="Run `notebook-alchemy login`.")
+        ui.success(f"Session is active ({result.notebooks} notebook(s) visible).")
+        return
+
+    if browser_cookies:
+        cmd = ["notebooklm", "login", "--browser-cookies", browser_cookies]
+        ui.info(f"Importing your {browser_cookies} sign-in...")
+    else:
+        cmd = ["notebooklm", "login", "--browser", browser, "--browser-timeout", str(timeout)]
+        ui.info(f"A {browser} window will open. Sign in to Google; this closes by itself when done.")
+    try:
+        proc = subprocess.run(
+            cmd, check=False, capture_output=bool(browser_cookies), text=True, encoding="utf-8"
+        )
+    except FileNotFoundError as exc:
+        raise NotebookLMError(
+            "The `notebooklm` command was not found.",
+            hint="Install it with: pip install notebooklm-py",
+        ) from exc
+    if proc.returncode != 0:
+        detail = ((proc.stderr or proc.stdout or "") if browser_cookies else "").strip()
+        raise NotebookLMError(
+            f"Sign-in did not complete (exit code {proc.returncode})."
+            + (f" {' '.join(detail.split())[:300]}" if detail else ""),
+            hint=(
+                "Try `notebook-alchemy login --browser-cookies edge`, or set NOTEBOOKLM_AUTH_JSON "
+                "with exported session cookies."
+            ),
+        )
+    with ui.console.status("Confirming the session works..."):
+        result = client.check_session()
+    if result.ok:
+        ui.success("Signed in to NotebookLM.")
+    else:
+        ui.warn(f"Sign-in finished but the session check failed: {esc(result.detail)}")
+
+
+# --- sync / append -------------------------------------------------------------------------------
+
+
+@cli.command(
+    name="sync",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy sync -n Hyperplexed\n"
+        '  notebook-alchemy sync -n "CSS Course" --source-dir vault/hyperplexed/compendiums\n'
+    ),
+)
 @click.option(
     "-n",
     "--notebook",
-    default="Portable Entrepreneur",
-    help="Target notebook title.",
+    help="NotebookLM notebook to create or update (also selects the vault folder).",
 )
-@click.option("--title", required=True, help="Title of the new YouTube video.")
-@click.option("--url", required=True, help="URL of the new YouTube video.")
-@click.option("--topic", default="General", help="Domain topic hint (optional).")
-def append_video(notebook: str, title: str, url: str, topic: str) -> None:
-    """Incrementally append a new video to the Master Catalog and matching domain compendium."""
-    console.print(f"[cyan]Appending new video to '{notebook}': {title}...[/cyan]")
-    engine = AlchemyEngine()
+@click.option(
+    "--source-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Folder of compendiums to upload (default: the vault folder named after --notebook).",
+)
+@handle_errors
+def sync_to_notebooklm(notebook: str | None, source_dir: Path | None) -> None:
+    """Upload built compendiums to a notebook, replacing same-titled sources."""
+    engine = _engine()
+    directory = _source_dir(engine, notebook, source_dir)
+    name = notebook or directory.parent.name
+    ui.info(f"Uploading {esc(_short(directory))} to notebook [bold]{esc(name)}[/bold]")
+    with ui.Reporter() as reporter:
+        result = engine.sync_to_notebooklm(name, directory, progress=reporter)
+    ui.success(
+        f"{'Created' if result.created else 'Updated'} notebook '{esc(name)}': "
+        f"uploaded {result.uploaded}, replaced {result.replaced}."
+    )
 
-    new_video = {
-        "id": f"yt_new_{abs(hash(title)) % 10000:04d}",
-        "title": title,
-        "url": url,
-        "topic": topic,
-    }
 
-    try:
-        updated = engine.append_incremental_sources([new_video], notebook_title=notebook)
-        console.print(
-            f"[bold green]✓ Successfully appended to Master Catalog and updated {updated} domain compendium(s)![/bold green]"
+@cli.command(
+    name="append",
+    epilog=(
+        "\b\nExample:\n"
+        '  notebook-alchemy append -n Hyperplexed --title "New video" '
+        "--url https://youtu.be/dQw4w9WgXcQ\n"
+    ),
+)
+@click.option("-n", "--notebook", help="Source name; selects the vault folder.")
+@click.option("--source-dir", type=click.Path(file_okay=False, path_type=Path), help="Compendium folder.")
+@click.option("--title", required=True, help="Title of the new video.")
+@click.option("--url", required=True, help="URL of the new video.")
+@click.option("--topic", help="Domain to file it under (default: clustered automatically).")
+@handle_errors
+def append_video(
+    notebook: str | None, source_dir: Path | None, title: str, url: str, topic: str | None
+) -> None:
+    """Add one new video to the catalog and its domain compendium without a full rebuild."""
+    engine = _engine()
+    directory = _source_dir(engine, notebook, source_dir)
+    video = {"id": video_id_from_url(url), "title": title, "url": url}
+    result = engine.append_incremental_sources(
+        [video], directory, domain=topic, notebook_title=notebook or directory.parent.name
+    )
+    if result.added:
+        ui.success(f"Added to the catalog and updated: {esc(', '.join(result.updated_files))}")
+        ui.info("[dim]Run `notebook-alchemy sync` to upload the change.[/dim]")
+    else:
+        ui.warn("That video is already in the catalog; nothing changed.")
+
+
+# --- clean / test --------------------------------------------------------------------------------
+
+
+def _remove(path: Path) -> int:
+    """Delete a file or directory tree; return the bytes it held. Raises OSError on failure."""
+    size = (
+        sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+        if path.is_dir()
+        else path.stat().st_size
+    )
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+    return size
+
+
+@cli.command(
+    name="clean",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy clean                  clear the transcript cache\n"
+        "  notebook-alchemy clean --vaults         delete built compendiums (asks first)\n"
+        "  notebook-alchemy clean --all --yes      both, without asking\n"
+    ),
+)
+@click.option("--all", "clean_all", is_flag=True, help="Clear the cache and delete built vaults.")
+@click.option("--cache", "clean_cache", is_flag=True, help="Clear the transcript cache.")
+@click.option("--vaults", "clean_vaults", is_flag=True, help="Delete built compendium folders.")
+@click.option("-y", "--yes", is_flag=True, help="Do not ask before deleting.")
+@handle_errors
+def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: bool) -> None:
+    """Reclaim disk space from the transcript cache and built vaults."""
+    config = _config()
+    engine = AlchemyEngine(config)
+    do_vaults = clean_all or clean_vaults
+    do_cache = clean_all or clean_cache or not do_vaults
+
+    targets: list[tuple[str, Path]] = []
+    if do_cache and config.cache_dir.is_dir():
+        targets += [("cache", p) for p in sorted(config.cache_dir.iterdir())]
+    if do_vaults:
+        targets += [("vault", p) for p in engine.vault.existing_compendium_dirs()]
+    if not targets:
+        ui.success("Nothing to clean.")
+        return
+
+    vault_targets = [p for kind, p in targets if kind == "vault"]
+    if vault_targets and not yes:
+        ui.console.print("[bold]These built vault folders will be deleted:[/bold]")
+        for p in vault_targets:
+            ui.console.print(f"  {esc(p)}")
+        if not click.confirm("Delete them?", default=False):
+            ui.warn("Cancelled. Nothing was deleted.")
+            return
+
+    freed, failed = 0, []
+    for _kind, path in targets:
+        try:
+            freed += _remove(path)
+        except OSError as exc:
+            failed.append(f"{path}: {exc}")
+    for p in vault_targets:  # drop the now-empty per-source parent
+        with contextlib.suppress(OSError):  # not empty or already gone; it was only a container
+            p.parent.rmdir()
+
+    if failed:
+        raise AlchemyError(
+            f"{len(failed)} items could not be deleted: " + "; ".join(failed[:3]),
+            hint="Close programs using those files and run the command again.",
         )
-    except Exception as exc:  # noqa: BLE001
-        console.print(f"[bold red]Append failed:[/bold red] {exc}")
-        sys.exit(1)
+    ui.success(f"Removed {len(targets)} items, freed {ui.human_bytes(freed)}.")
 
 
 @cli.command(name="test")
+@handle_errors
 def run_automated_test() -> None:
-    """Run an automated end-to-end test of the entire ingestion & synthesis pipeline."""
-    console.print(
-        "[bold cyan]══════════════════════════════════════════════════════════════════[/bold cyan]"
-    )
-    console.print(
-        "[bold cyan]           Notebook Alchemy - Automated Pipeline Verification      [/bold cyan]"
-    )
-    console.print(
-        "[bold cyan]══════════════════════════════════════════════════════════════════[/bold cyan]\n"
-    )
+    """Self-test the whole pipeline on sample data. No network, no credentials, nothing kept."""
+    started = time.monotonic()
+    cwd_vault = Path.cwd() / "vault"
+    existed_before = cwd_vault.exists()
+    results: list[tuple[str, bool, str]] = []
 
-    steps: list[tuple[str, str, str]] = []
+    def record(name: str, ok: bool, detail: str) -> None:
+        results.append((name, ok, detail))
 
-    # Step 1: Configuration check
     try:
         config = AlchemyConfig.from_env()
-        steps.append(("Configuration Loader", "PASS", f"Environment: {config.env}"))
-    except Exception as exc:  # noqa: BLE001
-        steps.append(("Configuration Loader", "FAIL", str(exc)))
+        record("Configuration loads", True, f"environment: {config.env}")
+    except AlchemyError as exc:
+        record("Configuration loads", False, exc.message)
 
-    # Step 2: Analyzer & Catalog Ingestion
-    try:
-        analyzer = NotebookAnalyzer()
-        dry_run_rep = analyzer.generate_dry_run("Portable Entrepreneur", use_fallback=True)
-        vid_count = len(dry_run_rep.youtube_videos)
-        if vid_count > 0:
-            steps.append(("Source Ingestion", "PASS", f"Scanned {vid_count} video sources"))
-        else:
-            steps.append(("Source Ingestion", "FAIL", "No video sources found"))
-    except Exception as exc:  # noqa: BLE001
-        steps.append(("Source Ingestion", "FAIL", str(exc)))
-
-    # Step 3: Domain Clustering & Cost Modeling
-    try:
-        clusters = dry_run_rep.domain_topic_clusters
-        cluster_count = len(clusters)
-        cost = dry_run_rep.total_estimated_cost_usd
-        if cluster_count >= 5 and cost > 0:
-            steps.append(
-                (
-                    "Thematic Decomposition",
-                    "PASS",
-                    f"{cluster_count} domain clusters, est. cost ${cost:.4f}",
-                )
-            )
-        else:
-            steps.append(("Thematic Decomposition", "FAIL", f"Invalid clusters ({cluster_count})"))
-    except Exception as exc:  # noqa: BLE001
-        steps.append(("Thematic Decomposition", "FAIL", str(exc)))
-
-    # Step 4: Vault & Distillation Generation
-    try:
-        engine = AlchemyEngine()
-        dist_rep = engine.run_distillation(
-            "Portable Entrepreneur",
-            force_offline=True,
-            write_to_vault=True,
+    with tempfile.TemporaryDirectory(prefix="notebook-alchemy-test-") as tmp:
+        tmp_path = Path(tmp)
+        test_config = AlchemyConfig(
+            env="test",
+            vault_path=tmp_path / "vault",
+            state_dir=tmp_path / "state",
+            cache_dir=tmp_path / "cache",
+            gemini_api_key="",
         )
-        if dist_rep.total_compendiums >= 6 and dist_rep.index_path and dist_rep.index_path.exists():
-            steps.append(
-                (
-                    "Compendium Synthesis Engine",
-                    "PASS",
-                    f"Generated {dist_rep.total_compendiums} compendiums + master INDEX.md",
-                )
+        engine = AlchemyEngine(test_config)
+        report = None
+        try:
+            report = engine.analyzer_for(True).generate_dry_run("sample", use_mock=True)
+            ok = len(report.youtube_videos) > 0
+            record("Sample catalog loads", ok, f"{len(report.youtube_videos)} sample videos")
+            domains = len(report.domain_videos)
+            record("Videos group into domains", domains >= 3, f"{domains} domains (keyword method)")
+        except AlchemyError as exc:
+            record("Sample catalog loads", False, exc.message)
+
+        built = None
+        if report:
+            try:
+                built = engine.run_distillation(force_offline=True, dry_run=report, write_to_vault=True)
+                ok = built.total_compendiums >= 3 and bool(built.index_path and built.index_path.exists())
+                record("Compendiums build", ok, f"{built.total_compendiums} compendiums plus INDEX.md")
+            except AlchemyError as exc:
+                record("Compendiums build", False, exc.message)
+
+        if built and built.vault_directory:
+            files = [
+                f
+                for f in built.vault_directory.glob("*.md")
+                if f.name not in ("INDEX.md", "MASTER_SOURCES_CATALOG.md")
+            ]
+            valid = sum(
+                1
+                for f in files
+                if (t := f.read_text(encoding="utf-8")).startswith("---")
+                and "domain:" in t
+                and "## 2. Video Index" in t
             )
-        else:
-            steps.append(
-                (
-                    "Compendium Synthesis Engine",
-                    "FAIL",
-                    f"Compendiums: {dist_rep.total_compendiums}",
-                )
+            catalog = (built.vault_directory / "MASTER_SOURCES_CATALOG.md").read_text(encoding="utf-8")
+            rows = sum(1 for line in catalog.splitlines() if line.startswith("| ") and "`" in line)
+            ok = (
+                bool(files)
+                and valid == len(files)
+                and report is not None
+                and rows == len(report.youtube_videos)
             )
-    except Exception as exc:  # noqa: BLE001
-        steps.append(("Compendium Synthesis Engine", "FAIL", str(exc)))
-
-    # Step 5: Vault Artifact Validation
-    try:
-        comp_dir = engine.vault.vault_path / "compendiums"
-        md_files = list(comp_dir.glob("*.md"))
-        valid_frontmatters = 0
-        for f in md_files:
-            txt = f.read_text(encoding="utf-8")
-            if txt.startswith("---") and "domain:" in txt and "## 1. Executive Summary" in txt:
-                valid_frontmatters += 1
-        if valid_frontmatters >= 6:
-            steps.append(
-                (
-                    "Vault Artifact Integrity",
-                    "PASS",
-                    f"Validated {valid_frontmatters} Markdown compendiums with frontmatter & SOPs",
-                )
+            record(
+                "Vault files are valid",
+                ok,
+                f"{valid}/{len(files)} compendiums, {rows} catalog rows",
             )
-        else:
-            steps.append(
-                (
-                    "Vault Artifact Integrity",
-                    "FAIL",
-                    f"Only {valid_frontmatters}/{len(md_files)} passed validation",
-                )
-            )
-    except Exception as exc:  # noqa: BLE001
-        steps.append(("Vault Artifact Integrity", "FAIL", str(exc)))
 
-    # Display test results
-    test_table = Table(title="Pipeline Verification Results", show_header=True)
-    test_table.add_column("Verification Step", style="bold")
-    test_table.add_column("Status", justify="center", width=8)
-    test_table.add_column("Details", style="dim")
+    left_behind = cwd_vault.exists() and not existed_before
+    record("Nothing written outside the temp folder", not left_behind, "working directory untouched")
 
-    all_passed = True
-    for step_name, status, details in steps:
-        style = "bold green" if status == "PASS" else "bold red"
-        if status != "PASS":
-            all_passed = False
-        test_table.add_row(step_name, f"[{style}]{status}[/{style}]", details)
+    table = Table(title="Self-test", header_style="bold", title_justify="left")
+    table.add_column("", width=1)
+    table.add_column("Check", style="bold")
+    table.add_column("Result", style="dim", overflow="fold")
+    for name, ok, detail in results:
+        table.add_row("[green]✓[/green]" if ok else "[red]✗[/red]", name, esc(detail))
+    ui.console.print(table)
 
-    console.print(test_table)
-
-    if all_passed:
-        console.print(
-            "\n[bold green]✓ All automated pipeline verification checks PASSED (100%)![/bold green]"
-        )
+    elapsed = time.monotonic() - started
+    if all(ok for _n, ok, _d in results):
+        ui.success(f"All {len(results)} checks passed in {elapsed:.1f}s.")
     else:
-        console.print("\n[bold red]✗ Some pipeline verification checks FAILED.[/bold red]")
+        failed = sum(1 for _n, ok, _d in results if not ok)
+        ui.console.print(
+            f"\n[bold red]{failed} of {len(results)} checks failed.[/bold red] Run with --debug for detail."
+        )
         sys.exit(1)
 
 
-@cli.command(name="clean")
-@click.option(
-    "--all",
-    "clean_all",
-    is_flag=True,
-    help="Purge all cached transcripts, temporary files, and local vaults.",
-)
-@click.option(
-    "--cache",
-    "clean_cache",
-    is_flag=True,
-    help="Purge cached transcripts (~/.notebook-alchemy/cache).",
-)
-@click.option("--vaults", "clean_vaults", is_flag=True, help="Purge local vault markdown builds.")
-def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool) -> None:
-    """Clean up temporary caches and build artifacts to reclaim disk space."""
-    import shutil
-
-    cache_dir = Path.home() / ".notebook-alchemy" / "cache"
-    vaults_dir = Path.home() / ".notebook-alchemy" / "vaults"
-    freed = 0
-
-    do_cache = clean_all or clean_cache or (not clean_cache and not clean_vaults)
-    do_vaults = clean_all or clean_vaults
-
-    if do_cache and cache_dir.exists():
-        for f in cache_dir.glob("*"):
-            if f.is_file():
-                try:
-                    freed += f.stat().st_size
-                    f.unlink()
-                except Exception:  # noqa: BLE001, S110
-                    pass
-        console.print(
-            "[green]✓ Purged temporary transcript cache (~/.notebook-alchemy/cache)[/green]"
-        )
-
-    if do_vaults and vaults_dir.exists():
-        try:
-            shutil.rmtree(vaults_dir, ignore_errors=True)
-            vaults_dir.mkdir(parents=True, exist_ok=True)
-            console.print(
-                "[green]✓ Purged local vault markdown builds (~/.notebook-alchemy/vaults)[/green]"
-            )
-        except Exception:  # noqa: BLE001, S110
-            pass
-
-    local_vault = Path("./vault/compendiums").resolve()
-    if do_vaults and local_vault.exists():
-        for f in local_vault.glob("*.md"):
-            try:
-                freed += f.stat().st_size
-                f.unlink()
-            except Exception:  # noqa: BLE001, S110
-                pass
-        console.print("[green]✓ Purged project vault markdown builds (./vault/compendiums)[/green]")
-
-    console.print(
-        f"[bold green]✓ Zero-bloat cleanup complete! Reclaimed {freed / 1024:.1f} KB of disk space.[/bold green]"
-    )
-
-
 def main() -> None:
-    """Entry point for notebook-alchemy CLI."""
+    """Entry point for the notebook-alchemy command."""
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            # a redirected stream (for example under a test) may not support reconfigure
+            with contextlib.suppress(AttributeError, OSError, ValueError):
+                stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
     cli()
 
 

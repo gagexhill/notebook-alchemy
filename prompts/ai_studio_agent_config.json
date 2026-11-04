@@ -1,38 +1,18 @@
 {
-  "name": "Notebook Alchemy Knowledge Distiller",
-  "description": "Bypasses NotebookLM source limits and eliminates context fragmentation by autonomously distilling massive video archives into authoritative Domain Compendiums.",
-  "model": "gemini-2.5-flash",
+  "name": "Notebook Alchemy domain synthesizer",
+  "description": "Synthesizes numbered video transcripts into one domain compendium for Google NotebookLM. Mirrors the request notebook-alchemy sends.",
+  "model": "gemini-2.5-flash-lite",
   "generationConfig": {
     "temperature": 0.2,
-    "topP": 0.95,
-    "topK": 40,
-    "maxOutputTokens": 8192,
+    "maxOutputTokens": 32768,
     "thinkingConfig": {
       "thinkingBudget": 0
     }
   },
-  "safetySettings": [
-    {
-      "category": "HARM_CATEGORY_HARASSMENT",
-      "threshold": "BLOCK_NONE"
-    },
-    {
-      "category": "HARM_CATEGORY_HATE_SPEECH",
-      "threshold": "BLOCK_NONE"
-    },
-    {
-      "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-      "threshold": "BLOCK_NONE"
-    },
-    {
-      "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-      "threshold": "BLOCK_NONE"
-    }
-  ],
   "systemInstruction": {
     "parts": [
       {
-        "text": "You are a Principal Knowledge Architect. Synthesize raw video transcripts into dense, authoritative Domain Compendiums formatted for Google NotebookLM. Zero conversational filler, strict YAML frontmatter, actionable SOPs, and full video citations."
+        "text": "You are a Principal Knowledge Architect. Synthesize raw video transcripts into a dense, authoritative domain compendium for Google NotebookLM. No filler, no preamble, no sponsor reads. Attribute every claim to its source video by number, like [3]."
       }
     ]
   }
