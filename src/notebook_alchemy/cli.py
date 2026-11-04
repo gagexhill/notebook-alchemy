@@ -371,9 +371,7 @@ def run_automated_test() -> None:
         dry_run_rep = analyzer.generate_dry_run("Portable Entrepreneur", use_fallback=True)
         vid_count = len(dry_run_rep.youtube_videos)
         if vid_count > 0:
-            steps.append(
-                ("Source Ingestion", "PASS", f"Scanned {vid_count} video sources")
-            )
+            steps.append(("Source Ingestion", "PASS", f"Scanned {vid_count} video sources"))
         else:
             steps.append(("Source Ingestion", "FAIL", "No video sources found"))
     except Exception as exc:  # noqa: BLE001
