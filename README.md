@@ -171,6 +171,7 @@ notebook-alchemy append -n "Portable Entrepreneur" \
 | :--- | :--- |
 | `notebook-alchemy run <URL or name>` | Distill any YouTube channel or playlist (50 to 1,500+ videos) into NotebookLM |
 | `notebook-alchemy dry-run <URL or name>` | Preview video count, domain clusters, and token cost before running |
+| `notebook-alchemy clean` | Zero-bloat cleanup: purge cached transcripts and local build artifacts |
 | `notebook-alchemy append` | Incrementally append newly published videos to the Master Catalog and compendiums |
 | `notebook-alchemy sync -n <name>` | Sync generated vault compendiums directly into Google NotebookLM |
 | `notebook-alchemy test` | Run 100% automated self-verification of the entire pipeline |

@@ -61,6 +61,17 @@ class TestTranscriptManager(unittest.TestCase):
             text = manager.fetch_transcript_text("test_vid")
             self.assertEqual(text, "Cached transcript sample.")
 
+    def test_transcript_local_text_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            # Create a mock .txt transcript file
+            txt_file = tmp_path / "vid_123.txt"
+            txt_file.write_text("Local text transcript for vid 123.", encoding="utf-8")
+
+            manager = TranscriptManager(transcripts_dir=tmp_path)
+            text = manager.fetch_transcript_text("vid_123")
+            self.assertEqual(text, "Local text transcript for vid 123.")
+
 
 if __name__ == "__main__":
     unittest.main()

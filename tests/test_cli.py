@@ -69,6 +69,11 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Successfully synced compendiums to notebook", result.output)
 
+    def test_cli_clean(self) -> None:
+        result = self.runner.invoke(cli, ["clean", "--cache"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Zero-bloat cleanup complete", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()

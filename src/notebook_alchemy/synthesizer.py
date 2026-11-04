@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from .channel import TranscriptManager
+
 logger = logging.getLogger(__name__)
 
 GEMINI_API_ENDPOINT = (
@@ -111,21 +113,37 @@ class Synthesizer:
         volume: int,
         notebook_title: str,
     ) -> str:
-        """Invoke the Google Gemini API to generate the synthesis."""
+        """Invoke the Google Gemini API to generate the synthesis with full spoken transcript text."""
         url = GEMINI_API_ENDPOINT.format(model=self.model) + f"?key={self.api_key}"
 
-        video_list_str = "\n".join(
-            f"- [{v.get('title')}]({v.get('url', 'https://youtube.com')})" for v in videos[:50]
-        )
+        transcript_mgr = TranscriptManager()
+        sources_payload = []
+        for v in videos[:35]:
+            title = v.get("title") or "Untitled"
+            url_str = v.get("url") or "https://youtube.com"
+            vid_id = v.get("id") or v.get("source_id") or ""
+            raw_text = v.get("transcript") or transcript_mgr.fetch_transcript_text(vid_id, title)
+            snippet = (
+                raw_text[:12000].strip()
+                if raw_text
+                else "(Transcript unavailable; synthesize from title and domain context)"
+            )
+            sources_payload.append(
+                f"### Video: [{title}]({url_str})\nVideo ID: {vid_id}\n\nSpoken Transcript Content:\n{snippet}\n"
+            )
+
+        sources_text = "\n---\n".join(sources_payload)
 
         prompt = (
-            f"You are a Principal Knowledge Architect. Synthesize the following {len(videos)} video sources "
-            f"from the '{notebook_title}' collection for the domain '{domain}' (Volume {volume}).\n\n"
+            f"You are a Principal Knowledge Architect and Information Alchemist.\n"
+            f"Synthesize the following {len(videos)} video sources from '{notebook_title}' into an authoritative, "
+            f"high-density Domain Compendium for the domain '{domain}' (Volume {volume}) for Google NotebookLM.\n\n"
             f"Requirements:\n"
-            f"1. Produce a high-density, authoritative Markdown Domain Compendium.\n"
-            f"2. Include Executive Summary, Foundational Principles, Actionable SOPs, and Video-by-Video Breakdown.\n"
-            f"3. Ensure the document is formatted for Google NotebookLM ingestion.\n\n"
-            f"Sources:\n{video_list_str}"
+            f"1. Produce a high-density Markdown Domain Compendium designed specifically for Google NotebookLM ingestion.\n"
+            f"2. Extract deep operational SOPs, mental models, frameworks, and verbal scripts directly from the spoken transcripts.\n"
+            f"3. Eliminate conversational filler, sponsor plugs, and intro music.\n"
+            f"4. Provide a structured Table of Contents, Executive Summary, Detailed Protocols, Common Pitfalls, and a complete Source Attribution Table.\n\n"
+            f"Source Videos & Spoken Transcripts:\n\n{sources_text}"
         )
 
         payload = {
@@ -136,7 +154,7 @@ class Synthesizer:
             },
         }
 
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=60.0) as client:
             resp = client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()

@@ -157,10 +157,17 @@ class ChannelScanner:
 
 
 class TranscriptManager:
-    """Fetches, parses, and caches YouTube video transcripts for synthesis."""
+    """Multi-source resolver for YouTube transcripts (local text files, API, and audio)."""
 
-    def __init__(self, cache_dir: Path | None = None) -> None:
-        self.cache_dir = cache_dir
+    def __init__(
+        self,
+        cache_dir: Path | None = None,
+        transcripts_dir: Path | None = None,
+        api_key: str | None = None,
+    ) -> None:
+        self.cache_dir = cache_dir or (Path.home() / ".notebook-alchemy" / "cache")
+        self.transcripts_dir = transcripts_dir
+        self.api_key = api_key
 
     def _get_cache_path(self, video_id: str) -> Path | None:
         if not self.cache_dir:
@@ -168,28 +175,78 @@ class TranscriptManager:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         return self.cache_dir / f"{video_id}.json"
 
-    def fetch_transcript_text(self, video_id: str) -> str:
-        """Fetch full transcript text for a video, checking local cache first."""
+    def _check_local_text_files(self, video_id: str, title: str = "") -> str | None:
+        """Check for user-supplied .txt, .vtt, or .srt transcript files."""
+        dirs_to_check = [Path("transcripts"), Path.home() / ".notebook-alchemy" / "transcripts"]
+        if self.transcripts_dir:
+            dirs_to_check.insert(0, self.transcripts_dir)
+
+        safe_title = re.sub(r"[^\w\s-]", "", title).strip() if title else ""
+
+        for d in dirs_to_check:
+            if not d.is_dir():
+                continue
+            candidates = [
+                d / f"{video_id}.txt",
+                d / f"{video_id}.vtt",
+                d / f"{video_id}.srt",
+            ]
+            if safe_title:
+                candidates.extend(
+                    [
+                        d / f"{safe_title}.txt",
+                        d / f"{safe_title}.vtt",
+                    ]
+                )
+
+            for cand in candidates:
+                if cand.is_file():
+                    try:
+                        raw = cand.read_text(encoding="utf-8", errors="replace")
+                        # Basic VTT/SRT timestamp line cleaning
+                        cleaned = re.sub(
+                            r"(\d{2}:)?\d{2}:\d{2}[.,]\d{3}\s*-->\s*(\d{2}:)?\d{2}:\d{2}[.,]\d{3}",
+                            "",
+                            raw,
+                        )
+                        cleaned = re.sub(r"^\d+\s*$", "", cleaned, flags=re.MULTILINE)
+                        return " ".join(cleaned.split())
+                    except Exception:  # noqa: BLE001, S110
+                        pass
+        return None
+
+    def fetch_transcript_text(self, video_id: str, title: str = "") -> str:
+        """Fetch full transcript text checking local text files, cache, and YouTube API."""
+        # 1. Check local text files (.txt / .vtt / .srt)
+        local_text = self._check_local_text_files(video_id, title)
+        if local_text:
+            return local_text
+
+        # 2. Check local JSON cache
         cache_path = self._get_cache_path(video_id)
         if cache_path and cache_path.is_file():
             try:
                 data = json.loads(cache_path.read_text(encoding="utf-8"))
-                return str(data.get("full_text", ""))
+                cached = str(data.get("full_text", "")).strip()
+                if cached:
+                    return cached
             except Exception:  # noqa: BLE001, S110
                 pass
 
+        # 3. Fetch from YouTube Transcript API
         try:
             api = YouTubeTranscriptApi()
             transcript_data = api.fetch(video_id)
-            full_text = " ".join(t.text for t in transcript_data)
+            full_text = " ".join(t.text for t in transcript_data).strip()
 
-            if cache_path:
+            if full_text and cache_path:
                 cache_path.write_text(
-                    json.dumps({"video_id": video_id, "full_text": full_text}),
+                    json.dumps({"video_id": video_id, "title": title, "full_text": full_text}),
                     encoding="utf-8",
                 )
 
             return full_text
         except Exception as exc:  # noqa: BLE001
-            logger.debug("Could not fetch live transcript for %s: %s", video_id, exc)
-            return ""
+            logger.debug("YouTubeTranscriptApi failed for %s: %s", video_id, exc)
+
+        return ""
