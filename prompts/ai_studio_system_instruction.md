@@ -12,13 +12,13 @@ The settings and the system instruction below are mirrored in `ai_studio_agent_c
 | Setting | Value | Why |
 | :-- | :-- | :-- |
 | Model | `gemini-3.8-flash` (the tool's default, `ALCHEMY_GEMINI_MODEL`) | Google's most capable Flash model, not scheduled for shutdown. `gemini-2.5-flash` shuts down on 2026-12-01 |
-| Thinking | Leave at the model's default | Gemini 3.x models set their own thinking; the tool only zeroes the budget on 2.5-family models, where it is supported |
-| Temperature | 0.2 | Keeps the output close to the transcript |
+| Thinking level | Low | Extraction from a transcript needs little reasoning, and thinking tokens bill at the output rate |
+| Temperature | Not set | AI Studio offers no temperature control for this model, so the tool sends none |
 | Max output tokens | 32768 | A compendium covers up to 50 videos |
 | Grounding and code execution | Off | The transcripts are the only source |
 
-Cheaper choices: `gemini-3.5-flash-lite` and `gemini-2.5-flash-lite`. Thinking tokens bill at the output rate, so
-a thinking model costs more than the `dry-run` output estimate shows.
+Cheaper choices: `gemini-3.5-flash-lite` and `gemini-2.5-flash-lite`. Thinking tokens bill at the output rate, so a
+real run costs somewhat more than the `dry-run` output estimate shows.
 
 Check current rates on the [pricing page](https://ai.google.dev/gemini-api/docs/pricing) before estimating
 a large run. `notebook-alchemy dry-run <url>` does the arithmetic from video lengths.

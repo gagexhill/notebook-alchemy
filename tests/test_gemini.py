@@ -93,7 +93,7 @@ def test_no_candidates_is_an_error() -> None:
     assert "SAFETY" in err.value.message
 
 
-def test_thinking_is_disabled_only_for_2_5_models() -> None:
+def test_thinking_and_temperature_follow_the_model_family() -> None:
     bodies: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -101,9 +101,27 @@ def test_thinking_is_disabled_only_for_2_5_models() -> None:
         return httpx.Response(200, json=_ok())
 
     _client(handler, model="gemini-2.5-flash").generate("hi", json_mode=True)
-    _client(handler, model="gemini-3.5-flash-lite").generate("hi")
-    assert bodies[0]["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
-    assert bodies[0]["generationConfig"]["responseMimeType"] == "application/json"
+    _client(handler, model="gemini-3.8-flash").generate("hi")
+    _client(handler, model="gemini-test-model").generate("hi")
+    old, new, other = (b["generationConfig"] for b in bodies)
+    assert old["thinkingConfig"] == {"thinkingBudget": 0} and old["temperature"] == 0.2
+    assert old["responseMimeType"] == "application/json"
+    assert new["thinkingConfig"] == {"thinkingLevel": "low"}
+    assert "temperature" not in new  # AI Studio offers no temperature control for Gemini 3.x
+    assert "thinkingConfig" not in other and other["temperature"] == 0.2
+
+
+def test_a_rejected_thinking_setting_is_dropped_and_retried_once() -> None:
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if "thinkingConfig" in bodies[-1]["generationConfig"]:
+            return httpx.Response(400, json={"error": {"message": "Unknown field thinkingLevel"}})
+        return httpx.Response(200, json=_ok())
+
+    result = _client(handler, model="gemini-3.8-flash", retries=0).generate("hi")
+    assert result.text == "hello" and len(bodies) == 2
     assert "thinkingConfig" not in bodies[1]["generationConfig"]
 
 
