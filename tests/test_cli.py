@@ -264,10 +264,12 @@ def test_login_cookie_failure_does_not_fall_through(
 def _seed_cache_and_vault(env) -> tuple[Path, Path]:
     cache = env.home / ".notebook-alchemy" / "cache"
     cache.mkdir(parents=True)
-    (cache / "abc.json").write_text(json.dumps({"full_text": "x" * 2048}), encoding="utf-8")
+    record = {"video_id": "abc", "full_text": "x" * 2048}
+    (cache / "abc.json").write_text(json.dumps(record), encoding="utf-8")
     vault = env.work / "vault" / "chan" / "compendiums"
     vault.mkdir(parents=True)
     (vault / "A.md").write_text("built", encoding="utf-8")
+    (vault / "INDEX.md").write_text("index", encoding="utf-8")
     return cache, vault
 
 
@@ -304,6 +306,40 @@ def test_clean_reports_real_failures(
     monkeypatch.setattr("notebook_alchemy.cli.shutil.rmtree", locked)
     result = runner.invoke(cli, ["clean", "--vaults", "--yes"])
     assert result.exit_code == 1 and "could not be deleted" in result.output and "in use" in result.output
+
+
+def test_clean_only_touches_this_tools_own_files(runner: CliRunner, isolated_environment) -> None:
+    cache, _vault = _seed_cache_and_vault(isolated_environment)
+    (cache / "notes.txt").write_text("not ours", encoding="utf-8")
+    (cache / "other.json").write_text(json.dumps({"hello": "world"}), encoding="utf-8")
+    (cache / "sub").mkdir()
+    (cache / "sub" / "deep.json").write_text(json.dumps({"video_id": "x"}), encoding="utf-8")
+    result = runner.invoke(cli, ["clean"])
+    assert result.exit_code == 0 and "Skipped" in result.output
+    assert not (cache / "abc.json").exists()
+    assert (cache / "notes.txt").exists() and (cache / "other.json").exists()
+    assert (cache / "sub" / "deep.json").exists()  # never recurses into subfolders
+
+
+def test_clean_asks_before_clearing_a_custom_cache_folder(
+    runner: CliRunner, isolated_environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    custom = isolated_environment.work / "my-docs"
+    custom.mkdir()
+    (custom / "abc.json").write_text(json.dumps({"video_id": "abc"}), encoding="utf-8")
+    monkeypatch.setenv("ALCHEMY_CACHE_DIR", str(custom))
+    declined = runner.invoke(cli, ["clean"], input="n\n")
+    assert "custom cache folder" in declined.output and (custom / "abc.json").exists()
+    assert runner.invoke(cli, ["clean", "--yes"]).exit_code == 0
+    assert not (custom / "abc.json").exists()
+
+
+def test_clean_skips_vault_folders_without_marker_files(runner: CliRunner, isolated_environment) -> None:
+    stray = isolated_environment.work / "vault" / "mine" / "compendiums"
+    stray.mkdir(parents=True)
+    (stray / "important.md").write_text("hand-written", encoding="utf-8")
+    result = runner.invoke(cli, ["clean", "--vaults", "--yes"])
+    assert "Skipped" in result.output and (stray / "important.md").exists()
 
 
 def test_clean_with_nothing_to_do(runner: CliRunner) -> None:

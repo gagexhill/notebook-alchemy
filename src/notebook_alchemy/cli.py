@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import shutil
@@ -546,6 +547,15 @@ def append_video(
 # --- clean / test --------------------------------------------------------------------------------
 
 
+def _is_cache_record(path: Path) -> bool:
+    """True for a transcript cache file this tool wrote (JSON object with a video_id)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and "video_id" in data
+
+
 def _remove(path: Path) -> int:
     """Delete a file or directory tree; return the bytes it held. Raises OSError on failure."""
     size = (
@@ -582,20 +592,41 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: 
     do_cache = clean_all or clean_cache or not do_vaults
 
     targets: list[tuple[str, Path]] = []
+    skipped: list[str] = []
+    custom_cache = config.cache_dir != AlchemyConfig().cache_dir
     if do_cache and config.cache_dir.is_dir():
-        targets += [("cache", p) for p in sorted(config.cache_dir.iterdir())]
+        # Only this tool's own cache records, directly in the folder: never other files, never subfolders.
+        for f in sorted(config.cache_dir.glob("*.json")):
+            if _is_cache_record(f):
+                targets.append(("cache", f))
+            else:
+                skipped.append(f.name)
     if do_vaults:
-        targets += [("vault", p) for p in engine.vault.existing_compendium_dirs()]
+        for d in engine.vault.existing_compendium_dirs():
+            if (d / "INDEX.md").is_file() or (d / "MASTER_SOURCES_CATALOG.md").is_file():
+                targets.append(("vault", d))
+            else:
+                skipped.append(str(d))
+    for item in skipped:
+        ui.warn(f"Skipped {esc(item)}: it does not look like Notebook Alchemy output.")
     if not targets:
         ui.success("Nothing to clean.")
         return
 
+    cache_targets = [p for kind, p in targets if kind == "cache"]
     vault_targets = [p for kind, p in targets if kind == "vault"]
-    if vault_targets and not yes:
-        ui.console.print("[bold]These built vault folders will be deleted:[/bold]")
-        for p in vault_targets:
-            ui.console.print(f"  {esc(p)}")
-        if not click.confirm("Delete them?", default=False):
+    ask = (vault_targets or (cache_targets and custom_cache)) and not yes
+    if ask:
+        if cache_targets and custom_cache:
+            ui.console.print(
+                f"[bold]{len(cache_targets)} cache files in a custom cache folder "
+                f"({esc(config.cache_dir)}) will be deleted.[/bold]"
+            )
+        if vault_targets:
+            ui.console.print("[bold]These built vault folders will be deleted:[/bold]")
+            for p in vault_targets:
+                ui.console.print(f"  {esc(p)}")
+        if not click.confirm("Continue?", default=False):
             ui.warn("Cancelled. Nothing was deleted.")
             return
 
