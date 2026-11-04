@@ -1,55 +1,72 @@
-"""Markdown vault management and synchronization."""
+"""Local vault layout and atomic output replacement."""
 
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
-from typing import Any
 
 from .config import AlchemyConfig
+from .errors import VaultError
+from .synthesizer import safe_filename
 
 logger = logging.getLogger(__name__)
 
 
+def source_slug(title: str) -> str:
+    """Directory name for one source (a channel, playlist or notebook)."""
+    return safe_filename(title).lower()
+
+
 class VaultManager:
-    """Manages reading and writing structured markdown artifacts in the local vault."""
+    """Output lives in `<vault>/<source-slug>/compendiums/`, one directory per source."""
 
     def __init__(self, config: AlchemyConfig) -> None:
         self.config = config
         self.vault_path = config.vault_path
 
-    def ensure_vault(self) -> Path:
-        """Ensure vault path exists."""
-        self.vault_path.mkdir(parents=True, exist_ok=True)
-        return self.vault_path
+    def compendium_dir(self, title: str) -> Path:
+        return self.vault_path / source_slug(title) / "compendiums"
 
-    def write_note(
-        self,
-        relative_path: str,
-        content: str,
-        frontmatter: dict[str, Any] | None = None,
-    ) -> Path:
-        """Write a synthesized markdown note to the vault with optional YAML frontmatter."""
-        self.ensure_vault()
-        target_path = self.vault_path / relative_path
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-
-        full_content = ""
-        if frontmatter:
-            yaml_lines = ["---"]
-            for key, val in frontmatter.items():
-                yaml_lines.append(f"{key}: {val}")
-            yaml_lines.append("---\n")
-            full_content = "\n".join(yaml_lines)
-
-        full_content += content
-
-        target_path.write_text(full_content, encoding="utf-8")
-        logger.info("Saved note to vault: %s", target_path)
-        return target_path
-
-    def list_notes(self) -> list[Path]:
-        """List all markdown files within the vault."""
-        if not self.vault_path.exists():
+    def existing_compendium_dirs(self) -> list[Path]:
+        """Every generated compendium directory, including the pre-namespacing layout."""
+        if not self.vault_path.is_dir():
             return []
-        return sorted(self.vault_path.glob("**/*.md"))
+        found = [p for p in sorted(self.vault_path.glob("*/compendiums")) if p.is_dir()]
+        legacy = self.vault_path / "compendiums"
+        if legacy.is_dir():
+            found.insert(0, legacy)
+        return found
+
+    @staticmethod
+    def stage_dir(final: Path) -> Path:
+        """A fresh sibling directory to build into."""
+        stage = final.with_name(final.name + ".tmp")
+        if stage.exists():
+            shutil.rmtree(stage)
+        stage.mkdir(parents=True)
+        return stage
+
+    @staticmethod
+    def replace_dir(staged: Path, final: Path) -> None:
+        """Swap a fully built directory into place. The old one is restored if the swap fails."""
+        backup = final.with_name(final.name + ".old")
+        if backup.exists():
+            shutil.rmtree(backup)
+        had_old = final.exists()
+        try:
+            if had_old:
+                final.rename(backup)
+            staged.rename(final)
+        except OSError as exc:
+            if had_old and backup.exists() and not final.exists():
+                backup.rename(final)
+            raise VaultError(
+                f"Could not write the vault directory {final}: {exc}",
+                hint="Close programs that have files in it open (editors, sync tools) and retry.",
+            ) from exc
+        if had_old:
+            try:
+                shutil.rmtree(backup)
+            except OSError as exc:
+                logger.warning("Could not remove the previous build %s: %s", backup, exc)

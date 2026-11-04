@@ -1,27 +1,90 @@
-"""Domain Compendium synthesis engine for Notebook Alchemy."""
+"""Domain compendium generation: live Gemini synthesis, or an honest offline index."""
 
 from __future__ import annotations
 
 import datetime
+import hashlib
+import json
 import logging
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
-
-from .channel import TranscriptManager
+from . import __version__
+from .channel import TranscriptManager, TranscriptResult
+from .config import DEFAULT_GEMINI_MODEL, is_usable_api_key
+from .errors import GeminiError
+from .gemini import GeminiClient
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_ENDPOINT = (
-    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+SECTION_RELATED = "## Related Domains"
+# Prompt budget in characters (about 4 per token): well inside a 1M-token context window.
+MAX_PROMPT_CHARS = 1_600_000
+MAX_CHARS_PER_VIDEO = 60_000
+LIVE_MAX_OUTPUT_TOKENS = 32_768
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+_WINDOWS_RESERVED = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+
+SYSTEM_PROMPT = (
+    "You are a Principal Knowledge Architect. Synthesize raw video transcripts into a dense, "
+    "authoritative domain compendium for Google NotebookLM. No filler, no preamble, no sponsor "
+    "reads. Attribute every claim to its source video by number, like [3]."
 )
+
+ProgressFn = Callable[[str, int, int], None]
+
+
+def yaml_str(value: object) -> str:
+    """A YAML double-quoted scalar (JSON strings are valid YAML)."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def safe_filename(text: str) -> str:
+    """Filesystem-safe stem: never empty, never a Windows reserved name, at most 80 characters."""
+    cleaned = re.sub(r"[^\w\s-]", "", text).strip()
+    stem = re.sub(r"[-\s]+", "_", cleaned).strip("_")[:80].strip("_")
+    if not stem:
+        stem = "domain"
+    if stem.lower() in _WINDOWS_RESERVED:
+        stem = f"{stem}_"
+    return stem
+
+
+def unique_slugs(domains: list[str]) -> dict[str, str]:
+    """One distinct slug per domain; later collisions get a short stable hash suffix."""
+    slugs: dict[str, str] = {}
+    taken: set[str] = set()
+    for domain in domains:
+        base = safe_filename(domain)
+        slug = base
+        if slug.lower() in taken:
+            slug = f"{base[:72]}_{hashlib.sha256(domain.encode('utf-8')).hexdigest()[:6]}"
+        taken.add(slug.lower())
+        slugs[domain] = slug
+    return slugs
+
+
+def notebook_url(notebook_id: str) -> str:
+    """A NotebookLM link only for a real notebook id; synthetic ids get no link."""
+    return f"https://notebooklm.google.com/notebook/{notebook_id}" if _UUID_RE.match(notebook_id) else ""
+
+
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 @dataclass
 class DomainCompendium:
-    """Represents a fully synthesized domain reference compendium."""
+    """One generated compendium volume."""
 
     domain: str
     volume: int
@@ -31,26 +94,42 @@ class DomainCompendium:
     content: str
     token_count: int
     is_live_synthesized: bool = False
+    warnings: list[str] = field(default_factory=list)
 
 
 class Synthesizer:
-    """Synthesizes clusters of video transcripts into structured Domain Compendiums."""
+    """Builds compendiums from clustered videos."""
 
-    def __init__(self, api_key: str | None = None, model: str = "gemini-2.5-flash") -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str = DEFAULT_GEMINI_MODEL,
+        *,
+        gemini: GeminiClient | None = None,
+        transcripts: TranscriptManager | None = None,
+    ) -> None:
         self.api_key = api_key or ""
         self.model = model
+        self._gemini = gemini
+        self._transcripts = transcripts
 
     def _is_valid_api_key(self) -> bool:
-        """Check whether the provided API key is genuine or a placeholder."""
-        key = self.api_key.strip()
-        if not key or key == "your_gemini_api_key_here" or key.startswith("your_"):
-            return False
-        return len(key) >= 15
+        return is_usable_api_key(self.api_key)
 
     def _safe_filename(self, text: str) -> str:
-        """Convert domain text to a clean filesystem-safe name."""
-        cleaned = re.sub(r"[^\w\s-]", "", text).strip()
-        return re.sub(r"[-\s]+", "_", cleaned)
+        return safe_filename(text)
+
+    def _client(self) -> GeminiClient:
+        if self._gemini is None:
+            self._gemini = GeminiClient(self.api_key, self.model)
+        return self._gemini
+
+    def _transcript_manager(self) -> TranscriptManager:
+        if self._transcripts is None:
+            self._transcripts = TranscriptManager()
+        return self._transcripts
+
+    # -- compendium --
 
     def synthesize_cluster(
         self,
@@ -59,41 +138,36 @@ class Synthesizer:
         volume: int = 1,
         *,
         force_offline: bool = False,
-        notebook_title: str = "Example Notebook",
-        notebook_id: str = "00000000-0000-4000-8000-0000000000aa",
+        notebook_title: str = "Untitled",
+        notebook_id: str = "",
+        slug: str | None = None,
+        related_domains: list[tuple[str, str]] | None = None,
+        progress: ProgressFn | None = None,
     ) -> DomainCompendium:
-        """Synthesize a cluster of video sources into a complete Domain Compendium."""
+        """Return one compendium. Live synthesis falls back to the offline index with a warning."""
         titles = [str(v.get("title") or "Untitled") for v in videos]
-        source_ids = [
-            str(v.get("id") or v.get("source_id") or f"src_{i}") for i, v in enumerate(videos)
-        ]
-
-        safe_name = self._safe_filename(domain)
+        source_ids = [str(v.get("id") or v.get("source_id") or f"src_{i}") for i, v in enumerate(videos)]
         vol_suffix = f"_Vol_{volume}" if volume > 1 else ""
-        rel_path = f"compendiums/{safe_name}{vol_suffix}.md"
+        rel_path = f"compendiums/{slug or safe_filename(domain)}{vol_suffix}.md"
 
+        warnings: list[str] = []
         content = ""
         is_live = False
-
         if not force_offline and self._is_valid_api_key():
             try:
-                content = self._call_gemini_api(domain, videos, volume, notebook_title)
+                content = self._synthesize_live(
+                    domain, videos, volume, notebook_title, notebook_id, warnings, progress
+                )
                 is_live = True
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Live Gemini API synthesis encountered error (%s); falling back to offline semantic synthesis.",
-                    exc,
+            except GeminiError as exc:
+                warnings.append(
+                    f"{domain} (Vol. {volume}): live synthesis failed ({exc.message}); "
+                    "wrote the offline index instead."
                 )
-                content = self._generate_offline_compendium(
-                    domain, videos, volume, notebook_title, notebook_id
-                )
-        else:
-            content = self._generate_offline_compendium(
-                domain, videos, volume, notebook_title, notebook_id
+        if not is_live:
+            content = self._offline_compendium(
+                domain, videos, volume, notebook_title, notebook_id, related_domains or []
             )
-
-        # Rough token approximation (4 characters per token)
-        token_count = max(len(content) // 4, 1)
 
         return DomainCompendium(
             domain=domain,
@@ -102,292 +176,265 @@ class Synthesizer:
             source_ids=source_ids,
             relative_path=rel_path,
             content=content,
-            token_count=token_count,
+            token_count=max(len(content) // 4, 1),
             is_live_synthesized=is_live,
+            warnings=warnings,
         )
 
-    def _call_gemini_api(
+    def _frontmatter(
         self,
         domain: str,
-        videos: list[dict[str, Any]],
         volume: int,
+        count: int,
         notebook_title: str,
+        notebook_id: str,
+        mode: str,
     ) -> str:
-        """Invoke the Google Gemini API to generate the synthesis with full spoken transcript text."""
-        url = GEMINI_API_ENDPOINT.format(model=self.model) + f"?key={self.api_key}"
+        vol_label = f" (Vol. {volume})" if volume > 1 else ""
+        tag = safe_filename(domain).lower().replace("_", "-")
+        lines = [
+            "---",
+            f"title: {yaml_str(f'{domain}{vol_label} - Domain Compendium')}",
+            f"domain: {yaml_str(domain)}",
+            f"volume: {volume}",
+            f"notebook_title: {yaml_str(notebook_title)}",
+        ]
+        if notebook_id:
+            lines.append(f"notebook_id: {yaml_str(notebook_id)}")
+        lines += [
+            f"source_count: {count}",
+            f"synthesis: {yaml_str(mode)}",
+            f"generated_at: {yaml_str(_now())}",
+            f"generator: {yaml_str(f'Notebook Alchemy v{__version__}')}",
+            "tags:",
+            "  - notebooklm",
+            "  - domain-compendium",
+            f"  - {tag}",
+            "---",
+            "",
+        ]
+        return "\n".join(lines)
 
-        transcript_mgr = TranscriptManager()
-        sources_payload = []
-        for v in videos[:35]:
-            title = v.get("title") or "Untitled"
-            url_str = v.get("url") or "https://youtube.com"
-            vid_id = v.get("id") or v.get("source_id") or ""
-            raw_text = v.get("transcript") or transcript_mgr.fetch_transcript_text(vid_id, title)
-            snippet = (
-                raw_text[:12000].strip()
-                if raw_text
-                else "(Transcript unavailable; synthesize from title and domain context)"
-            )
-            sources_payload.append(
-                f"### Video: [{title}]({url_str})\nVideo ID: {vid_id}\n\nSpoken Transcript Content:\n{snippet}\n"
-            )
+    @staticmethod
+    def _source_table(videos: list[dict[str, Any]], status: dict[str, str] | None = None) -> str:
+        rows = ["| # | Title | Source ID | Transcript |", "| :-: | :-- | :-- | :-- |"]
+        for i, v in enumerate(videos, 1):
+            vid = str(v.get("id") or v.get("source_id") or f"src_{i}")
+            title = str(v.get("title") or f"Video {i}").replace("|", "-")
+            url = str(v.get("url") or "")
+            link = f"[{title}]({url})" if url else title
+            rows.append(f"| {i} | {link} | `{vid}` | {(status or {}).get(vid, 'n/a')} |")
+        return "\n".join(rows)
 
-        sources_text = "\n---\n".join(sources_payload)
-
-        prompt = (
-            f"You are a Principal Knowledge Architect and Information Alchemist.\n"
-            f"Synthesize the following {len(videos)} video sources from '{notebook_title}' into an authoritative, "
-            f"high-density Domain Compendium for the domain '{domain}' (Volume {volume}) for Google NotebookLM.\n\n"
-            f"Requirements:\n"
-            f"1. Produce a high-density Markdown Domain Compendium designed specifically for Google NotebookLM ingestion.\n"
-            f"2. Extract deep operational SOPs, mental models, frameworks, and verbal scripts directly from the spoken transcripts.\n"
-            f"3. Eliminate conversational filler, sponsor plugs, and intro music.\n"
-            f"4. Provide a structured Table of Contents, Executive Summary, Detailed Protocols, Common Pitfalls, and a complete Source Attribution Table.\n\n"
-            f"Source Videos & Spoken Transcripts:\n\n{sources_text}"
-        )
-
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.2,
-                "maxOutputTokens": 8192,
-            },
-        }
-
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise RuntimeError("Empty response from Gemini API")
-            parts = candidates[0].get("content", {}).get("parts", [])
-            return str(parts[0].get("text", ""))
-
-    def _generate_offline_compendium(
+    def _synthesize_live(
         self,
         domain: str,
         videos: list[dict[str, Any]],
         volume: int,
         notebook_title: str,
         notebook_id: str,
+        warnings: list[str],
+        progress: ProgressFn | None,
     ) -> str:
-        """Generate a structured, rich Markdown reference compendium deterministically."""
-        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        vol_label = f" (Vol. {volume})" if volume > 1 else ""
+        label = f"{domain} (Vol. {volume})"
+        items = [(str(v.get("id") or v.get("source_id") or ""), str(v.get("title") or "")) for v in videos]
+        results: dict[str, TranscriptResult] = self._transcript_manager().fetch_many(
+            items,
+            progress=(lambda d, t: progress(f"Reading transcripts: {label}", d, t)) if progress else None,
+        )
 
-        # Build clean frontmatter
-        header_lines = [
-            "---",
-            f'title: "{domain}{vol_label} - Domain Compendium"',
-            f'domain: "{domain}"',
-            f"volume: {volume}",
-            f'notebook_title: "{notebook_title}"',
-            f'notebook_id: "{notebook_id}"',
-            f"source_count: {len(videos)}",
-            f'generated_at: "{now}"',
-            'generator: "Notebook Alchemy v0.1.0"',
-            "tags:",
-            "  - notebooklm",
-            "  - domain-compendium",
-            f"  - {self._safe_filename(domain).lower().replace('_', '-')}",
-            "---\n",
-        ]
+        per_video = max(1_000, min(MAX_CHARS_PER_VIDEO, MAX_PROMPT_CHARS // max(len(videos), 1)))
+        blocks: list[str] = []
+        status: dict[str, str] = {}
+        shortened = 0
+        for n, v in enumerate(videos, 1):
+            vid = str(v.get("id") or v.get("source_id") or "")
+            res = results.get(vid) or TranscriptResult(vid)
+            text = res.text
+            if text:
+                status[vid] = f"{res.source}" + (" (shortened)" if len(text) > per_video else "")
+                if len(text) > per_video:
+                    shortened += 1
+                    text = text[:per_video]
+                body = text
+            else:
+                status[vid] = f"none ({res.detail or res.source})"
+                body = "(No transcript available. Use only the title; do not invent content.)"
+            blocks.append(f"### [{n}] {v.get('title') or 'Untitled'}\n{body}\n")
 
-        # Domain-specific strategy synthesis
-        executive_summary = self._get_domain_executive_summary(domain)
-        principles = self._get_domain_principles(domain)
-        sops = self._get_domain_sops(domain)
-
-        # Build video index
-        video_entries: list[str] = []
-        for i, v in enumerate(videos, 1):
-            title = v.get("title", f"Video {i}")
-            url = v.get("url", "https://youtube.com")
-            vid_id = v.get("id", f"src_{i}")
-            video_entries.append(
-                f"### {i}. [{title}]({url})\n"
-                f"- **Source ID:** `{vid_id}`\n"
-                f"- **Core Theme:** {domain}\n"
-                f"- **High-Yield Takeaway:** Actionable methodology and proven workflows detailed in this session.\n"
+        no_text = sum(1 for s in status.values() if s.startswith("none"))
+        if no_text:
+            warnings.append(f"{label}: {no_text} of {len(videos)} videos had no transcript (title only).")
+        if shortened:
+            warnings.append(f"{label}: {shortened} transcripts were shortened to {per_video:,} characters.")
+        blocked = [r for r in results.values() if r.source == "blocked"]
+        if blocked:
+            warnings.append(
+                f"{label}: YouTube blocked {len(blocked)} transcript requests; retry later or add "
+                "local transcript files."
             )
 
-        source_notebook_line = (
-            f"> **Source Notebook:** [{notebook_title}]"
-            f"(https://notebooklm.google.com/notebook/{notebook_id}) "
-            f"| **Distilled Sources:** {len(videos)} videos\n"
+        prompt = (
+            f"Synthesize the {len(videos)} numbered videos below, from '{notebook_title}', into one "
+            f"Markdown compendium for the domain '{domain}' (volume {volume}).\n\n"
+            "Rules:\n"
+            "1. Do not write YAML frontmatter, a title line, or a source table; those are added for you.\n"
+            "2. Use these sections: ## Executive Summary, ## Key Concepts and Mental Models, "
+            "## Procedures and Frameworks, ## Common Pitfalls.\n"
+            "3. Extract concrete steps, frameworks and examples the speakers actually give. "
+            "Cite the source video number after each claim, like [3].\n"
+            "4. Remove filler, sponsor reads and intros. Do not invent facts that are not in a "
+            "transcript.\n\n"
+            "Sources:\n\n" + "\n".join(blocks)
         )
-        interlinks_section = (
-            "- [[Lead_Generation_Client_Acquisition|Lead Generation & Client Acquisition]]\n"
-            "- [[Web_Design_Agency_Operations|Web Design & Agency Operations]]\n"
-            "- [[SEO_Local_Search|SEO & Local Search]]\n"
-            "- [[Pricing_Proposal_Strategy|Pricing & Proposal Strategy]]\n"
-            "- [[Client_Retention_Onboarding_QBRs|Client Retention, Onboarding & QBRs]]\n"
-            "- [[Solo_Operator_Systems_Productivity|Solo Operator Systems & Productivity]]\n"
+        result = self._client().generate(
+            prompt,
+            system=SYSTEM_PROMPT,
+            max_output_tokens=LIVE_MAX_OUTPUT_TOKENS,
+            temperature=0.2,
+        )
+        if result.truncated:
+            warnings.append(
+                f"{label}: Gemini stopped at its output limit, so the synthesis may end early. "
+                "Lower --max-per-vol to give it less to cover."
+            )
+        body = result.text.strip()
+        fenced = re.match(r"^```(?:markdown|md)?\s*\n(.*)\n```$", body, re.DOTALL)
+        if fenced:
+            body = fenced.group(1).strip()
+
+        vol_label = f" (Vol. {volume})" if volume > 1 else ""
+        link = notebook_url(notebook_id)
+        header = f"# {domain}{vol_label} — Domain Compendium\n\n"
+        if link:
+            header += f"> **Source Notebook:** [{notebook_title}]({link}) | **Sources:** {len(videos)}\n\n"
+        return (
+            self._frontmatter(
+                domain,
+                volume,
+                len(videos),
+                notebook_title,
+                notebook_id,
+                f"gemini:{self._client().model}",
+            )
+            + header
+            + body
+            + "\n\n## Sources\n\n"
+            + self._source_table(videos, status)
+            + "\n"
         )
 
-        body = [
-            f"# {domain}{vol_label} — Domain Compendium\n",
-            source_notebook_line,
-            "## 1. Executive Summary & Strategic Core\n",
-            executive_summary,
-            "\n## 2. Foundational Mental Models & Principles\n",
-            principles,
-            "\n## 3. Actionable Standard Operating Procedures (SOPs)\n",
-            sops,
-            "\n## 4. Master Cross-Source Catalog & Video Breakdown\n",
-            "\n".join(video_entries),
-            "\n## 5. Cross-Domain Interlinks\n",
-            interlinks_section,
+    def _offline_compendium(
+        self,
+        domain: str,
+        videos: list[dict[str, Any]],
+        volume: int,
+        notebook_title: str,
+        notebook_id: str,
+        related: list[tuple[str, str]],
+    ) -> str:
+        """A title-only index. It states plainly that nothing was summarized."""
+        vol_label = f" (Vol. {volume})" if volume > 1 else ""
+        sample = "; ".join(str(v.get("title") or "Untitled") for v in videos[:3])
+        more = f" (+{len(videos) - 3} more)" if len(videos) > 3 else ""
+        offline_note = (
+            "> **Offline index.** No transcripts were read and no summary was generated. Run without "
+            "`--offline` and with `GEMINI_API_KEY` set to synthesize this volume.\n"
+        )
+        body = [f"# {domain}{vol_label} — Domain Compendium (Offline Index)\n", offline_note]
+        link = notebook_url(notebook_id)
+        if link:
+            body.append(f"> **Source Notebook:** [{notebook_title}]({link})\n")
+        body += [
+            "## 1. Summary\n",
+            f'This volume indexes {len(videos)} videos grouped under "{domain}": {sample}{more}.\n',
+            "## 2. Video Index\n",
         ]
+        for i, v in enumerate(videos, 1):
+            title = str(v.get("title") or f"Video {i}")
+            url = str(v.get("url") or "")
+            heading = f"[{title}]({url})" if url else title
+            body.append(
+                f"### {i}. {heading}\n- **Source ID:** `{v.get('id') or v.get('source_id') or f'src_{i}'}`\n"
+            )
+        if related:
+            body.append(f"{SECTION_RELATED}\n")
+            body.extend(f"- [[{slug}|{name}]]" for slug, name in related)
+            body.append("")
+        return self._frontmatter(
+            domain, volume, len(videos), notebook_title, notebook_id, "offline-index"
+        ) + "\n".join(body)
 
-        return "\n".join(header_lines) + "\n".join(body)
-
-    def _get_domain_executive_summary(self, domain: str) -> str:
-        summaries = {
-            "Lead Generation & Client Acquisition": (
-                "Systematic client acquisition for boutique service agencies and solo operators. "
-                "Replaces sporadic cold outreach with compounding inbound authority, hyper-targeted "
-                "local audits, and high-converting video pitch methodologies. Prioritizes pre-qualified "
-                "prospecting over volume spray-and-pray."
-            ),
-            "Web Design & Agency Operations": (
-                "End-to-end operational blueprint for modern web design practices. Covers technical "
-                "stack selection (WordPress, Webflow), wireframing, client deliverable scoping, and "
-                "eliminating scope creep through structured milestone sign-offs."
-            ),
-            "Client Retention, Onboarding & QBRs": (
-                "Systematized client lifecycle management designed to maximize Lifetime Value (LTV). "
-                "Focuses on structured 90-day Quarterly Business Reviews (QBRs), transparent client "
-                "reporting portals, and turning one-off build projects into recurring retainers."
-            ),
-            "Pricing & Proposal Strategy": (
-                "Value-based pricing architecture shifting away from billable hourly models toward "
-                "high-tier package tiers ($3,000–$10,000+). Includes proposal psychology, anchor pricing, "
-                "and closing friction reduction."
-            ),
-            "SEO & Local Search": (
-                "Local search domination playbook centered on Google Business Profile (GBP) optimization, "
-                "Local 3-Pack rank acceleration, geo-grid tracking, citations, schema markup, and "
-                "packaging $1,500/mo local SEO recurring retainers."
-            ),
-            "Solo Operator Systems & Productivity": (
-                "Architectural frameworks for running a 6-figure agency as an un-leveraged solo founder. "
-                "Combines calendar time-blocking, automated invoicing/contract workflows, and proactive "
-                "burnout mitigation."
-            ),
-        }
-        return summaries.get(
-            domain,
-            f"Comprehensive distillation of strategic workflows, operational playbooks, and tactical frameworks for {domain}.",
-        )
-
-    def _get_domain_principles(self, domain: str) -> str:
-        return (
-            "- **The Rule of Specificity:** Generic offers trigger price comparison; domain-specific solutions command premium fees.\n"
-            "- **Asset-Driven Delivery:** Build once, deploy repeatedly using documented SOPs and battle-tested component libraries.\n"
-            "- **Asynchronous Client Guardrails:** Protect focus by establishing clear communication protocols and eliminating unscheduled calls.\n"
-            "- **Outcome-Anchored Positioning:** Frame all deliverables in terms of revenue growth, lead capture, and customer retention."
-        )
-
-    def _get_domain_sops(self, domain: str) -> str:
-        return (
-            "### SOP-01: Pre-Engagement Discovery & Scoping\n"
-            "1. Deliver standard 5-question asynchronous intake audit.\n"
-            "2. Identify client revenue bottlenecks and primary conversion goals.\n"
-            "3. Issue 3-tier proposal with clear boundary exclusions.\n\n"
-            "### SOP-02: Deliverable Execution & Milestone Sign-Off\n"
-            "1. Deploy staging environment and deliver wireframe milestone.\n"
-            "2. Secure asynchronous client sign-off via annotated Loom/review portal.\n"
-            "3. Launch live deployment and initiate post-launch care retainer onboarding."
-        )
+    # -- index, catalog, append --
 
     def generate_index(
         self,
         compendiums: list[DomainCompendium],
-        notebook_title: str = "Example Notebook",
-        total_sources: int = 100,
+        notebook_title: str = "Untitled",
+        total_sources: int = 0,
     ) -> str:
-        """Generate a master Table of Contents / Index markdown file for all compendiums."""
-        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-        summary_quote = (
-            f"> Distilled **{total_sources}** YouTube video sources into **{len(compendiums)}** "
-            "authoritative, human-readable Domain Compendiums ready for Google NotebookLM.\n\n"
+        """Table of contents for every generated volume."""
+        live = sum(1 for c in compendiums if c.is_live_synthesized)
+        summary_line = (
+            f"> {total_sources} videos grouped into {len(compendiums)} compendium volumes "
+            f"({live} synthesized with Gemini, {len(compendiums) - live} offline indexes).\n"
         )
-
         lines = [
             "---",
-            f'title: "{notebook_title} - Master Compendium Index"',
-            f'notebook_title: "{notebook_title}"',
+            f"title: {yaml_str(f'{notebook_title} - Master Compendium Index')}",
+            f"notebook_title: {yaml_str(notebook_title)}",
             f"total_compendiums: {len(compendiums)}",
             f"total_sources_distilled: {total_sources}",
-            f'generated_at: "{now}"',
-            'generator: "Notebook Alchemy v0.1.0"',
-            "---\n",
+            f"generated_at: {yaml_str(_now())}",
+            f"generator: {yaml_str(f'Notebook Alchemy v{__version__}')}",
+            "---",
+            "",
             f"# {notebook_title} — Master Compendium Index\n",
-            summary_quote,
-            "## Distilled Domain Compendiums\n",
-            "| Compendium | Volume | Source Count | Est. Tokens | File Link |",
-            "| :--- | :---: | :---: | :---: | :--- |",
+            summary_line,
+            "## Compendiums\n",
+            "| Compendium | Volume | Videos | Est. Tokens | Mode | File |",
+            "| :-- | :-: | :-: | :-: | :-- | :-- |",
         ]
-
         for c in compendiums:
             filename = c.relative_path.split("/")[-1]
+            mode = "gemini" if c.is_live_synthesized else "offline index"
             lines.append(
-                f"| **{c.domain}** | Vol. {c.volume} | {len(c.titles)} videos | ~{c.token_count:,} | [{filename}]({filename}) |"
+                f"| **{c.domain}** | {c.volume} | {len(c.titles)} | ~{c.token_count:,} | {mode} "
+                f"| [{filename}]({filename}) |"
             )
-
-        lines.extend(
-            [
-                "\n## How to Use in Google NotebookLM\n",
-                "1. Upload these `.md` compendium files into your NotebookLM notebook.",
-                "2. NotebookLM will ingest each compendium as a clean, high-density source.",
-                "3. Scales effortlessly to archives of arbitrary scale (dozens, hundreds, or thousands of videos) while keeping your notebook well below NotebookLM's source caps.",
-            ]
-        )
-
-        return "\n".join(lines)
+        return "\n".join(lines) + "\n"
 
     def generate_master_sources_catalog(
         self,
         videos: list[dict[str, Any]],
-        notebook_title: str = "Example Notebook",
+        notebook_title: str = "Untitled",
     ) -> str:
-        """Generate a single immutable master ledger document of all raw sources."""
-        now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-        ledger_notice = (
-            "> **NOTICE:** This document is an AI-generated, immutable source ledger tracking all original "
-            f"**{len(videos)}** video sources. Do not edit manually; all updates are auto-appended.\n\n"
-        )
-
+        """Ledger of every source video and its domain."""
         lines = [
             "---",
-            f'title: "{notebook_title} - Master Source Catalog"',
-            f'notebook_title: "{notebook_title}"',
+            f"title: {yaml_str(f'{notebook_title} - Master Source Catalog')}",
+            f"notebook_title: {yaml_str(notebook_title)}",
             f"total_sources: {len(videos)}",
-            f'generated_at: "{now}"',
-            "immutable: true",
-            'generator: "Notebook Alchemy v0.1.0"',
+            f"generated_at: {yaml_str(_now())}",
+            f"generator: {yaml_str(f'Notebook Alchemy v{__version__}')}",
             "tags:",
             "  - notebooklm",
             "  - master-source-ledger",
-            "---\n",
+            "---",
+            "",
             f"# {notebook_title} — Master Source Catalog (Immutable Ledger)\n",
-            ledger_notice,
+            f"> Ledger of all {len(videos)} source videos. Appended entries are marked `+`.\n",
             "| # | Source ID | Video Title | Domain | URL |",
-            "| :---: | :---: | :--- | :--- | :--- |",
+            "| :-: | :-: | :-- | :-- | :-- |",
         ]
-
         for i, v in enumerate(videos, 1):
-            vid_id = v.get("id") or f"src_{i}"
-            title = (v.get("title") or f"Video {i}").replace("|", "-")
-            url = v.get("url") or "https://youtube.com"
-            topic = v.get("topic") or "General"
-            lines.append(f"| {i} | `{vid_id}` | {title} | {topic} | [Link]({url}) |")
-
-        return "\n".join(lines)
+            vid = v.get("id") or f"src_{i}"
+            title = str(v.get("title") or f"Video {i}").replace("|", "-")
+            url = v.get("url") or ""
+            topic = str(v.get("topic") or "General").replace("|", "-")
+            link = f"[Link]({url})" if url else ""
+            lines.append(f"| {i} | `{vid}` | {title} | {topic} | {link} |")
+        return "\n".join(lines) + "\n"
 
     def append_to_domain_compendium(
         self,
@@ -395,35 +442,26 @@ class Synthesizer:
         new_videos: list[dict[str, Any]],
         domain: str = "General",
     ) -> str:
-        """Incrementally append newly distilled video entries into an existing domain compendium."""
+        """Add newly published videos to an existing compendium and bump its source count."""
         if not new_videos:
             return existing_content
-
-        # Update source count in YAML frontmatter if present
-        updated_content = re.sub(
-            r"source_count:\s*(\d+)",
+        updated = re.sub(
+            r"^source_count:\s*(\d+)",
             lambda m: f"source_count: {int(m.group(1)) + len(new_videos)}",
             existing_content,
+            count=1,
+            flags=re.MULTILINE,
         )
-
-        new_entries: list[str] = []
+        entries = []
         for i, v in enumerate(new_videos, 1):
-            title = v.get("title", f"New Video {i}")
-            url = v.get("url", "https://youtube.com")
-            vid_id = v.get("id", f"new_src_{i}")
-            new_entries.append(
-                f"\n### [Auto-Appended] [{title}]({url})\n"
-                f"- **Source ID:** `{vid_id}`\n"
-                f"- **Core Theme:** {domain}\n"
-                f"- **High-Yield Takeaway:** Incremental workflow and newly synthesized methodologies.\n"
+            title = str(v.get("title") or f"New Video {i}")
+            url = str(v.get("url") or "")
+            heading = f"[{title}]({url})" if url else title
+            entries.append(
+                f"\n### [Added] {heading}\n- **Source ID:** `{v.get('id') or f'new_src_{i}'}`\n"
+                f"- **Domain:** {domain}\n"
             )
-
-        append_block = "\n".join(new_entries)
-
-        # Insert before section 5 if present, otherwise append at end
-        if "## 5. Cross-Domain Interlinks" in updated_content:
-            return updated_content.replace(
-                "## 5. Cross-Domain Interlinks",
-                f"{append_block}\n## 5. Cross-Domain Interlinks",
-            )
-        return updated_content + "\n" + append_block
+        block = "\n".join(entries)
+        if SECTION_RELATED in updated:
+            return updated.replace(SECTION_RELATED, f"{block}\n{SECTION_RELATED}", 1)
+        return updated.rstrip("\n") + "\n" + block

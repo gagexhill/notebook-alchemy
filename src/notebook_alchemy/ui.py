@@ -1,0 +1,175 @@
+"""Terminal presentation: consistent steps, progress, errors, and safe text output."""
+
+from __future__ import annotations
+
+import sys
+import traceback
+from collections.abc import Callable
+from functools import wraps
+from typing import Any, TypeVar
+
+import click
+from rich.console import Console
+from rich.markup import escape
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TextColumn,
+    TimeElapsedColumn,
+)
+
+from .errors import AlchemyError, SyncError
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+console = Console(highlight=False)
+err_console = Console(stderr=True, highlight=False)
+
+EXIT_INTERRUPTED = 130
+EXIT_UNEXPECTED = 70
+
+
+class UiState:
+    quiet = False
+    debug = False
+
+
+def esc(value: object) -> str:
+    """Escape text from outside this program (titles, errors, paths) for Rich markup."""
+    return escape(str(value))
+
+
+def configure(*, quiet: bool = False, no_color: bool = False, debug: bool = False) -> None:
+    global console, err_console
+    UiState.quiet, UiState.debug = quiet, debug
+    if no_color:
+        console = Console(highlight=False, no_color=True)
+        err_console = Console(stderr=True, highlight=False, no_color=True)
+
+
+def info(message: str) -> None:
+    if not UiState.quiet:
+        console.print(message)
+
+
+def step(number: int, total: int, label: str) -> None:
+    """A numbered step heading, e.g. `[2/4] Building compendiums`."""
+    if not UiState.quiet:
+        console.print(f"\n[bold cyan][{number}/{total}][/bold cyan] [bold]{esc(label)}[/bold]")
+
+
+def success(message: str) -> None:
+    info(f"[green]✓[/green] {message}")
+
+
+def warn(message: str) -> None:
+    info(f"[yellow]![/yellow] {message}")
+
+
+def banner(title: str, body: str, *, style: str = "yellow") -> None:
+    console.print(Panel(body, title=title, border_style=style, padding=(0, 2)))
+
+
+def print_error(exc: AlchemyError) -> None:
+    """What failed, why, and the next action."""
+    lines = [f"[bold red]{esc(exc.message)}[/bold red]"]
+    if isinstance(exc, SyncError):
+        lines += [f"  [red]-[/red] {esc(item)}" for item in exc.failed[:10]]
+        if len(exc.failed) > 10:
+            lines.append(f"  ... and {len(exc.failed) - 10} more")
+    if exc.hint:
+        lines.append(f"\n[bold]Next:[/bold] {esc(exc.hint)}")
+    err_console.print(Panel("\n".join(lines), title="Error", border_style="red", padding=(0, 2)))
+
+
+def handle_errors(func: F) -> F:
+    """Turn typed errors into a readable panel and a stable exit code; never a raw traceback."""
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except AlchemyError as exc:
+            print_error(exc)
+            if UiState.debug:
+                err_console.print(esc(traceback.format_exc()))
+            sys.exit(exc.exit_code)
+        except KeyboardInterrupt:
+            err_console.print("\n[yellow]Interrupted. Nothing was left half-written.[/yellow]")
+            sys.exit(EXIT_INTERRUPTED)
+        except (
+            SystemExit,
+            EOFError,
+            click.ClickException,
+            click.exceptions.Abort,
+            click.exceptions.Exit,
+        ):
+            raise
+        except Exception as exc:  # noqa: BLE001 - last-resort boundary for the CLI
+            if UiState.debug:
+                err_console.print(esc(traceback.format_exc()))
+            err_console.print(
+                Panel(
+                    f"[bold red]Unexpected error: {esc(type(exc).__name__)}: {esc(exc)}[/bold red]\n\n"
+                    "[bold]Next:[/bold] Re-run with [bold]--debug[/bold] for the traceback, and "
+                    "include it in a bug report.",
+                    title="Error",
+                    border_style="red",
+                    padding=(0, 2),
+                )
+            )
+            sys.exit(EXIT_UNEXPECTED)
+
+    return wrapper  # type: ignore[return-value]
+
+
+class Reporter:
+    """Progress callback `(stage, done, total)`: bars on a terminal, one line per stage otherwise."""
+
+    def __init__(self) -> None:
+        self._progress: Progress | None = None
+        self._tasks: dict[str, TaskID] = {}
+        self._seen: set[str] = set()
+
+    def __enter__(self) -> Reporter:
+        if console.is_terminal and not UiState.quiet:
+            self._progress = Progress(
+                SpinnerColumn(),
+                TextColumn("{task.description}"),
+                BarColumn(bar_width=28),
+                MofNCompleteColumn(),
+                TimeElapsedColumn(),
+                console=console,
+                transient=True,
+            )
+            self._progress.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._progress:
+            self._progress.stop()
+
+    def __call__(self, stage: str, done: int, total: int) -> None:
+        if UiState.quiet:
+            return
+        if self._progress is not None:
+            if stage not in self._tasks:
+                self._tasks[stage] = self._progress.add_task(esc(stage), total=max(total, 1))
+            self._progress.update(self._tasks[stage], completed=done, total=max(total, 1))
+            return
+        if done >= total and stage not in self._seen:
+            self._seen.add(stage)
+            console.print(f"  {esc(stage)}: {done}/{total}")
+
+
+def human_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{n} B"

@@ -4,50 +4,72 @@ build-backend = "hatchling.build"
 
 [project]
 name = "notebook-alchemy"
-version = "0.1.0"
-description = "Orchestration and synthesis engine bridging source documents, audio overviews, and knowledge vaults."
+dynamic = ["version"]
+description = "Turn a YouTube channel into NotebookLM-ready domain compendiums."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
     { name = "gagexhill" }
 ]
-keywords = ["notebooklm", "knowledge-base", "synthesis", "obsidian", "rag"]
+keywords = ["notebooklm", "gemini", "youtube", "transcripts", "yt-dlp", "knowledge-base", "cli"]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "pydantic>=2.0.0",
+    "click>=8.1.0",
     "httpx>=0.25.0",
     "rich>=13.0.0",
-    "click>=8.1.0",
-    "yt-dlp>=2024.0.0",
-    "youtube-transcript-api>=0.6.0",
+    "yt-dlp>=2025.1.0",
+    "youtube-transcript-api>=1.0.0",
+    "notebooklm-py[browser,cookies]>=0.8.6",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "ruff>=0.1.0",
+    "ruff>=0.6.0",
+    "pip-audit>=2.7.0",
 ]
 
 [project.scripts]
 notebook-alchemy = "notebook_alchemy.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/gagexhill/notebook-alchemy"
+Issues = "https://github.com/gagexhill/notebook-alchemy/issues"
+Source = "https://github.com/gagexhill/notebook-alchemy"
+
+[tool.hatch.version]
+path = "src/notebook_alchemy/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/notebook_alchemy"]
 
 [tool.ruff]
-line-length = 100
+line-length = 110
 target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "BLE", "S"]
+ignore = [
+    "S603", # subprocess calls run the notebooklm CLI with an argument list, never a shell string
+    "S607", # `notebooklm` is resolved from PATH on purpose: it is the installed dependency
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S105", "S106", "BLE001", "SIM117"]
+# the sample titles keep their original punctuation
+"src/notebook_alchemy/mock_data.py" = ["RUF001"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
