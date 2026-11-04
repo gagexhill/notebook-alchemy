@@ -55,6 +55,10 @@ def scrub(text: str, api_key: str) -> str:
     return cleaned
 
 
+class _ThinkingRejected(Exception):
+    """The API refused the thinking setting we sent."""
+
+
 @dataclass
 class GeminiResult:
     text: str
@@ -100,12 +104,17 @@ class GeminiClient:
         max_output_tokens: int,
         temperature: float,
     ) -> dict:
-        config: dict = {"temperature": temperature, "maxOutputTokens": max_output_tokens}
+        config: dict = {"maxOutputTokens": max_output_tokens}
+        if not self.model.startswith("gemini-3"):
+            # AI Studio offers no temperature control for Gemini 3.x models, so none is sent.
+            config["temperature"] = temperature
         if json_mode:
             config["responseMimeType"] = "application/json"
+        # Thinking tokens bill at the output rate; extraction and synthesis need little of them.
         if self.model.startswith("gemini-2.5"):
-            # Thinking tokens bill at the output rate; extraction and synthesis do not need them.
             config["thinkingConfig"] = {"thinkingBudget": 0}
+        elif self.model.startswith("gemini-3"):
+            config["thinkingConfig"] = {"thinkingLevel": "low"}
         body: dict = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
@@ -129,8 +138,16 @@ class GeminiClient:
             temperature=temperature,
         )
         headers = {"x-goog-api-key": self._api_key, "content-type": "application/json"}
-        last_error = "no response"
+        try:
+            return self._send(body, headers)
+        except _ThinkingRejected:
+            # The model does not accept this thinking setting; use its default and send again.
+            del body["generationConfig"]["thinkingConfig"]
+            logger.warning("Gemini rejected the thinking setting; retrying with the model default.")
+            return self._send(body, headers)
 
+    def _send(self, body: dict, headers: dict) -> GeminiResult:
+        last_error = "no response"
         for attempt in range(self._retries + 1):
             try:
                 with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
@@ -142,6 +159,8 @@ class GeminiClient:
                 if response.status_code == 200:
                     return self._parse(response)
                 last_error = self._describe(response)
+                if self._thinking_rejected(response, body):
+                    raise _ThinkingRejected
                 if response.status_code not in RETRY_STATUSES:
                     raise GeminiError(
                         f"Gemini rejected the request ({last_error}).",
@@ -163,6 +182,13 @@ class GeminiClient:
             f"Gemini did not succeed after {self._retries + 1} attempts ({last_error}).",
             hint="Check your network and quota, or run with --offline.",
         )
+
+    @staticmethod
+    def _thinking_rejected(response: httpx.Response, body: dict) -> bool:
+        """A 400 that names the thinking field, while we sent one."""
+        if response.status_code != 400 or "thinkingConfig" not in body["generationConfig"]:
+            return False
+        return "thinking" in response.text.lower()
 
     @staticmethod
     def _delay(response: httpx.Response | None, attempt: int) -> float:

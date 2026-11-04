@@ -15,10 +15,12 @@ def test_agent_config_matches_the_code() -> None:
     config = json.loads((ROOT / "prompts" / "ai_studio_agent_config.json").read_text(encoding="utf-8"))
     assert config["model"] == DEFAULT_GEMINI_MODEL
     assert config["generationConfig"]["maxOutputTokens"] == LIVE_MAX_OUTPUT_TOKENS
-    if DEFAULT_GEMINI_MODEL.startswith("gemini-2.5"):  # only the 2.5 family takes a thinking budget
-        assert config["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
-    else:
-        assert "thinkingConfig" not in config["generationConfig"]
+    thinking = config["generationConfig"].get("thinkingConfig")
+    if DEFAULT_GEMINI_MODEL.startswith("gemini-3"):
+        assert thinking == {"thinkingLevel": "low"}
+        assert "temperature" not in config["generationConfig"]  # not offered for Gemini 3.x
+    elif DEFAULT_GEMINI_MODEL.startswith("gemini-2.5"):
+        assert thinking == {"thinkingBudget": 0}
     assert config["systemInstruction"]["parts"][0]["text"] == SYSTEM_PROMPT
 
 

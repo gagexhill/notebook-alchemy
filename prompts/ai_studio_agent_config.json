@@ -3,8 +3,10 @@
   "description": "Synthesizes numbered video transcripts into one domain compendium for Google NotebookLM. Mirrors the request notebook-alchemy sends.",
   "model": "gemini-3.8-flash",
   "generationConfig": {
-    "temperature": 0.2,
-    "maxOutputTokens": 32768
+    "maxOutputTokens": 32768,
+    "thinkingConfig": {
+      "thinkingLevel": "low"
+    }
   },
   "systemInstruction": {
     "parts": [
