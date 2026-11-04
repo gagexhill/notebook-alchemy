@@ -360,3 +360,19 @@ def test_fetch_many_runs_all_items(tmp_path: Path) -> None:
     out = tm.fetch_many([(f"video{i:06d}", "") for i in range(7)], progress=lambda d, t: seen.append((d, t)))
     assert len(out) == 7 and all(r.text.startswith("text ") for r in out.values())
     assert seen[-1] == (7, 7)
+
+
+def test_other_language_is_used_when_english_is_missing(tmp_path: Path) -> None:
+    class _Transcript:
+        def fetch(self):
+            return [_Snippet(text="hola"), _Snippet(text="mundo")]
+
+    class _SpanishOnly(_Api):
+        def fetch(self, video_id: str, languages=("en",)):
+            raise NoTranscriptFound(video_id, tuple(languages), None)
+
+        def list(self, video_id: str):
+            return iter([_Transcript()])
+
+    result = _manager(tmp_path, _SpanishOnly(lambda vid: None)).resolve("abcdefghijk")
+    assert (result.text, result.source) == ("hola mundo", "youtube")
