@@ -3,6 +3,7 @@
 [![CI](https://github.com/gagexhill/notebook-alchemy/actions/workflows/ci.yml/badge.svg)](https://github.com/gagexhill/notebook-alchemy/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 A developer-first CLI tool to bypass Google NotebookLM's 300-source limit. Autonomously distill massive YouTube channels and playlists (50 to 1,500+ videos) into self-organizing, high-density Domain Compendiums.
 
@@ -12,52 +13,107 @@ A developer-first CLI tool to bypass Google NotebookLM's 300-source limit. Auton
 
 Google NotebookLM enforces a strict hard ceiling of **300 sources per notebook**. 
 
-When you attempt to ingest an entire YouTube channel backlog, course archive, or conference playlist, you hit this ceiling almost immediately. Worse, dumping hundreds of raw, individual video links causes severe practical issues:
-- **Notebook Capacity Exhaustion**: A single 300-video channel consumes 100% of your source slots, leaving zero room for user notes, PDFs, or research documents.
+When you attempt to ingest an entire YouTube channel backlog, course archive, or conference playlist, you hit this ceiling almost immediately. Dumping hundreds of raw, individual video links causes severe structural issues:
+- **Notebook Capacity Exhaustion**: A single 300-video channel consumes 100% of your source quota, leaving zero room for user notes, PDFs, or research documents.
 - **RAG Retrieval Degradation**: Querying across hundreds of fragmented, conversational transcripts produces shallow, disjointed answers.
-- **Context Fragmentation**: Critical principles and SOPs scattered across multiple videos never get synthesized into a cohesive playbook.
+- **Context Fragmentation**: Critical principles, mental models, and step-by-step SOPs scattered across multiple videos never get synthesized into a cohesive playbook.
+- **Sub-Optimal Audio Overviews**: NotebookLM's Studio features (Audio Overviews / Deep Dive podcasts, Study Guides, Quizzes) perform best when given rich, high-signal topical textbooks rather than disconnected video snippets.
 
 ```text
 Massive Video Archive (50 to 1,500+ Videos)
                     │
                     ▼
-         [ 1. Channel Discovery ]  yt-dlp flat metadata extraction (<5s)
+         [ 1. Channel Discovery ]      yt-dlp flat metadata extraction (<5s, 0 media bytes)
                     │
                     ▼
-       [ 2. Transcript Cache ]     youtube-transcript-api (SHA-256 local cache)
+        [ 2. Transcript Resolver ]     Multi-source: local .txt/.vtt/.srt + cache + YouTube captions
                     │
                     ▼
-     [ 3. Thematic Clustering ]    Dynamic domain grouping & volume balancing
+      [ 3. Emergent Clustering ]       Zero-shot Gemini Flash domain induction + deterministic regex
                     │
                     ▼
-  [ 4. Information Alchemist ]    Gemini Flash synthesis (Zero Search Grounding)
+   [ 4. Information Alchemist ]        Full transcript synthesis into Gemini Flash 1M context window
                     │
                     ▼
-   [ 5. Artifact Generation ]     8–15 Domain Compendiums + Master Source Catalog
+    [ 5. Artifact Generation ]         8–18 Domain Compendiums + Master Source Catalog (INDEX.md)
                     │
                     ▼
-    [ 6. Google NotebookLM ]      Fits comfortably under 300-source limit (280+ free slots)
+     [ 6. Google NotebookLM ]          Fits comfortably under 300-source limit (260–290+ free slots)
 ```
 
-`notebook-alchemy` solves this at arbitrary scale: it scans channel transcripts, clusters related videos into coherent domain themes, and condenses hundreds to thousands of videos into a curated collection of structured Domain Compendiums—complete with actionable SOPs, mental models, video citations, and an immutable Master Source Catalog.
+`notebook-alchemy` solves this at arbitrary scale: it scans channel transcripts, clusters related videos into cohesive domain themes, and condenses hundreds to thousands of videos into a curated collection of structured Domain Compendiums—complete with actionable SOPs, mental models, video citations, and an immutable Master Source Catalog.
 
 ```text
-50 to 1,500+ Raw YouTube Links  ──►  notebook-alchemy  ──►  8–15 Domain Compendiums + Master Catalog
-(exceeds or fills 300-source cap)                          (280+ free slots remaining in NotebookLM)
+50 to 1,500+ Raw YouTube Links  ──►  notebook-alchemy  ──►  8–18 Domain Compendiums + Master Catalog
+(exceeds or fills 300-source cap)                          (260–290+ free slots remaining in NotebookLM)
 ```
 
 ---
 
-## Features
+## Core Features & Architectural Pillars
 
-- **Bypass the 300-Source Limit**: Scale-free ingestion partitions massive video backlogs (50 to 1,500+ videos) into balanced domain volumes (Vol. 1, Vol. 2 for 50+ video topics), staying well below NotebookLM's ceiling.
-- **Immutable Master Source Catalog**: Automatically builds `MASTER_SOURCES_CATALOG.md` preserving full provenance (video titles, direct URLs, timestamps, duration, and domain mappings).
-- **Incremental Auto-Append (`append`)**: When a channel releases new videos, append them to existing compendiums without re-distilling the entire channel archive.
-- **Ultra-Low Cost Distillation**: Powered by Gemini Flash with zero search-grounding overhead (~$0.10 to $0.40 per 1,000 video transcripts).
-- **Safe Dry-Run Preview (`dry-run`)**: Inspect video counts, domain clusters, and exact token cost estimates before touching anything in NotebookLM.
-- **100% Automated Self-Verification (`test`)**: Single command `notebook-alchemy test` verifies ingestion, clustering, synthesis, and vault exports locally without credentials or API keys.
-- **Zero Credential Leaks**: Browser session cookies and API keys stay local and are strictly git-ignored.
-- **Obsidian & Markdown Vault Ready**: Generates a clean Markdown vault with standard frontmatter, ready for NotebookLM sync or local knowledge bases.
+### 1. Universal Zero-Shot Emergent Domain Discovery
+Unlike rigid category tools, `notebook-alchemy` dynamically adapts to **any subject matter or genre**. Whether your target channel focuses on:
+- Software engineering, DevOps, or web architecture
+- Early childhood development and parenting
+- Relationship dynamics and psychology
+- Astrophysics, biology, or medicine
+- Small business agency growth and lead generation
+
+The engine leverages Gemini Flash for zero-shot domain induction, clustering titles and concepts into 6–15 natural thematic pillars with dynamic volume splitting (`Vol. 1`, `Vol. 2` for topics exceeding 40–50 videos). Offline deterministic regex classification is built-in as an instant fallback.
+
+### 2. Multi-Source Transcript Resolver
+Never lose insights to missing captions. The transcript engine resolves transcripts through a resilient waterfall:
+1. **Local Transcript Files**: Scans local directories for `.txt`, `.vtt`, or `.srt` files matching video IDs or sanitized titles.
+2. **Persistent SHA-256 Cache**: Checks `~/.notebook-alchemy/cache` to eliminate redundant network requests.
+3. **YouTube Captions API**: Ingests official or auto-generated caption tracks via `youtube-transcript-api`.
+4. **Lightweight Audio Stream Fallback**: Available for channels where caption tracks are unavailable.
+
+### 3. Direct Full-Transcript Synthesis (1M Token Context)
+Compendiums are synthesized by streaming full verbatim spoken dialogue (~120,000+ tokens per domain volume) directly into Gemini Flash's 1-million-token context window. Instead of superficial one-paragraph summaries, the alchemist extracts:
+- **Verbatim Frameworks & Mental Models**: The creator's exact mental models and strategic taxonomies.
+- **Step-by-Step SOPs**: Actionable, executable operational procedures with code snippets, prompts, or checklists.
+- **Common Anti-Patterns & Traps**: Explicit "what NOT to do" callouts.
+- **Immutable Provenance Citations**: Every principle links back directly to the source video and timestamp.
+
+### 4. NotebookLM Studio Ready
+Engineered specifically to maximize Google NotebookLM's flagship Studio capabilities:
+- **Audio Overviews (Deep Dive Podcast)**: High-density compendiums give the dual AI hosts rich, structured narratives to discuss rather than repeating disjointed intro banter.
+- **Study Guides & Briefing Docs**: Cohesive domain volumes provide clean section hierarchies for structured study guides.
+- **Quizzes & FAQs**: Compendiums preserve nuanced operational details needed for rigorous self-assessment.
+
+### 5. Upfront Safety Gates & Interactive Confirmation
+- **Upfront Authentication Check**: The CLI checks NotebookLM session credentials *before* running compute or LLM synthesis, preventing wasted API quota. Use `--no-sync` or `--preview-only` to run purely local builds anytime.
+- **Interactive Notebook Naming**: Displays the detected channel name and lets you accept or customize the destination Google NotebookLM notebook name right from the terminal.
+
+### 6. Zero-Bloat Ephemeral Cleanup (`clean`)
+Keep your local machine lean. Reclaim disk space by purging cached transcripts or local markdown builds with a single flag:
+```bash
+notebook-alchemy clean --all       # Purges transcript cache and local vaults
+notebook-alchemy clean --cache     # Purges ~/.notebook-alchemy/cache
+notebook-alchemy clean --vaults    # Purges ~/.notebook-alchemy/vaults
+```
+
+---
+
+## Empirical Benchmark & Scale Verification
+
+The pipeline has been empirically benchmarked across three channel tiers to guarantee performance, slot conservation, and cost efficiency:
+
+| Metric | Tier 1: Small (`@Hyperplexed`) | Tier 2: Medium (`@Portableentrepreneur`) | Tier 3: Large (`@TraversyMedia`) |
+| :--- | :--- | :--- | :--- |
+| **Discovered Video Count** | **52 videos** | **363 videos** | **1,037 videos** |
+| **Channel Genre** | Frontend UI / Creative CSS | Agency Growth / SEO / Web | Full-Stack Web Dev / DevOps |
+| **Flat Discovery Speed** | **1.21s** | **5.39s** | **14.61s** |
+| **Total Estimated Tokens** | ~234,000 tokens | ~1,633,500 tokens | ~4,666,500 tokens |
+| **Gemini Flash Distillation Cost** | **$0.0253 USD** | **$0.1769 USD** | **$0.5055 USD** |
+| **Active Domain Clusters** | 6 clusters | 13 clusters | 14 clusters |
+| **Synthesized Compendium Volumes** | 6 volumes | 18 volumes | 33 volumes |
+| **NotebookLM Source Footprint** | 7 sources (6 vols + Catalog) | 19 sources (18 vols + Catalog) | 34 sources (33 vols + Catalog) |
+| **NotebookLM Slot Conservation** | **86.5% reduction** (293 slots free) | **94.8% reduction** (281 slots free) | **96.7% reduction** (266 slots free) |
+| **Unclassified Leakage Rate** | 21.2% (11 videos) | 16.5% (60 videos) | 15.9% (165 videos) |
+
+*Full evaluation criteria and methodology are documented in [`test_benchmark_matrix.md`](test_benchmark_matrix.md).*
 
 ---
 
@@ -73,7 +129,7 @@ pip install -e .
 
 ### 1. Verify Pipeline (100% Automated Self-Test)
 
-Run the built-in diagnostic test suite:
+Run the built-in diagnostic test suite without needing credentials or API keys:
 
 ```bash
 notebook-alchemy test
@@ -81,9 +137,9 @@ notebook-alchemy test
 
 This verifies configuration loading, multi-source channel cataloging, thematic clustering, compendium synthesis, and vault artifact integrity.
 
-### 2. Optional: Set your Gemini API key (for live LLM synthesis)
+### 2. Optional: Set your Gemini API Key
 
-Create a local `.env` file (this is strictly git-ignored):
+Create a local `.env` file (strictly git-ignored):
 
 ```bash
 cp .env.example .env
@@ -95,13 +151,28 @@ Add your Gemini API key from [Google AI Studio](https://aistudio.google.com/app/
 GEMINI_API_KEY=your_key_here
 ```
 
-*(If no key is set or if `--offline` is passed, `notebook-alchemy` uses deterministic semantic distillation).*
+*(If no key is set or `--offline` is passed, `notebook-alchemy` runs deterministic semantic distillation).*
+
+### 3. Authenticate with Google NotebookLM
+
+Import session cookies from your default browser or launch a secure browser instance:
+
+```bash
+# Non-interactive cookie import from Edge or Chrome
+notebook-alchemy login --browser-cookies edge
+
+# Or launch interactive Chromium login
+notebook-alchemy login --browser chromium
+
+# Verify session authentication
+notebook-alchemy login --check
+```
 
 ---
 
 ## Usage
 
-### 1. Distill an Entire YouTube Channel or Playlist (Arbitrary Scale: 50 to 1,500+ Videos)
+### 1. Distill an Entire YouTube Channel or Playlist
 
 Pass any channel handle, playlist URL, or channel link directly to the CLI:
 
@@ -109,15 +180,22 @@ Pass any channel handle, playlist URL, or channel link directly to the CLI:
 notebook-alchemy run https://www.youtube.com/@Portableentrepreneur
 ```
 
-`notebook-alchemy` will automatically:
-1. Resolve all video IDs, titles, and durations in seconds using flat metadata extraction (zero video bytes downloaded).
-2. Fetch or load cached video transcripts from local storage (`~/.notebook-alchemy/cache`).
-3. Group videos into 8–15 cohesive domain clusters, automatically splitting topics with 50+ videos into balanced sub-volumes.
-4. Synthesize structured Domain Compendiums formatted with executive summaries, mental models, SOPs, and video citations.
-5. Generate the immutable `MASTER_SOURCES_CATALOG.md` tracking all original video links.
-6. Create the notebook in Google NotebookLM (if not already created) and upload all compendiums as clean sources.
+Interactive confirmation prompt:
+```text
+[?] Target NotebookLM notebook name [Portable Entrepreneur]:
+```
+Press **Enter** to accept the default or type a custom notebook name.
 
-### 2. Preview Video Counts, Clusters & Token Costs First (`dry-run`)
+`notebook-alchemy` will:
+1. Validate your NotebookLM login upfront.
+2. Resolve all video metadata in seconds (flat extraction, zero video downloads).
+3. Ingest transcripts from local files, cache, or captions API.
+4. Cluster videos into coherent domain pillars, splitting 40+ video clusters into balanced volumes.
+5. Synthesize rich Markdown compendiums with mental models, SOPs, and source attribution.
+6. Generate the immutable `MASTER_SOURCES_CATALOG.md` and `INDEX.md`.
+7. Create or open the notebook in NotebookLM and upload all compendiums.
+
+### 2. Preview Video Counts, Clusters & Token Costs (`dry-run`)
 
 Inspect video counts, domain clusters, and estimated Gemini Flash token costs without modifying anything:
 
@@ -152,9 +230,17 @@ Domain Topic Clusters:
 • General / Specialized Topics (42 videos)
 ```
 
-### 3. Incrementally Append Newly Published Videos
+### 3. Run Local-Only Distillation (Without NotebookLM Sync)
 
-When a channel publishes new content, append it to your existing notebook sources without re-synthesizing the entire channel archive:
+Build the local Markdown compendiums in `~/.notebook-alchemy/vaults/` without uploading to Google NotebookLM:
+
+```bash
+notebook-alchemy run https://www.youtube.com/@Hyperplexed --no-sync
+```
+
+### 4. Incrementally Append Newly Published Videos
+
+When a creator releases a new video, append it to your existing notebook sources without re-synthesizing the entire channel archive:
 
 ```bash
 notebook-alchemy append -n "Portable Entrepreneur" \
@@ -163,21 +249,32 @@ notebook-alchemy append -n "Portable Entrepreneur" \
   --topic "Pricing & Proposal Strategy"
 ```
 
+### 5. Clean Up Caches & Vaults
+
+Reclaim disk space anytime:
+
+```bash
+# Purge transcript cache and local vault markdown files
+notebook-alchemy clean --all
+
+# Or purge only the transcript cache
+notebook-alchemy clean --cache
+```
+
 ---
 
 ## CLI Reference
 
-| Command | Description |
-| :--- | :--- |
-| `notebook-alchemy run <URL or name>` | Distill any YouTube channel or playlist (50 to 1,500+ videos) into NotebookLM |
-| `notebook-alchemy dry-run <URL or name>` | Preview video count, domain clusters, and token cost before running |
-| `notebook-alchemy clean` | Zero-bloat cleanup: purge cached transcripts and local build artifacts |
-| `notebook-alchemy append` | Incrementally append newly published videos to the Master Catalog and compendiums |
-| `notebook-alchemy sync -n <name>` | Sync generated vault compendiums directly into Google NotebookLM |
-| `notebook-alchemy test` | Run 100% automated self-verification of the entire pipeline |
-| `notebook-alchemy status` | Inspect engine configuration, vault path, and session state |
-| `notebook-alchemy login --check` | Verify whether stored Google NotebookLM credentials are valid |
-| `notebook-alchemy login --browser-cookies edge` | Non-interactive cookie import from Edge |
+| Command | Key Options | Description |
+| :--- | :--- | :--- |
+| `notebook-alchemy run <target>` | `-N, --notebook-name`<br>`--sync / --no-sync`<br>`--offline`<br>`--preview-only` | Distill any YouTube channel or playlist (50 to 1,500+ videos) into NotebookLM |
+| `notebook-alchemy dry-run <target>` | `-n, --name` | Preview video counts, domain clusters, and token costs before executing |
+| `notebook-alchemy clean` | `--all`<br>`--cache`<br>`--vaults` | Zero-bloat disk cleanup: purge cached transcripts and local build artifacts |
+| `notebook-alchemy append` | `-n, --name`<br>`--title`<br>`--url`<br>`--topic` | Incrementally append newly published videos to Master Catalog and compendiums |
+| `notebook-alchemy sync -n <name>` | `--vault-path` | Sync generated local vault compendiums directly into Google NotebookLM |
+| `notebook-alchemy test` | | Run 100% automated self-verification of the entire pipeline locally |
+| `notebook-alchemy status` | | Inspect engine configuration, vault path, cache size, and session state |
+| `notebook-alchemy login` | `--check`<br>`--browser-cookies`<br>`--browser` | Safe session authentication for Google NotebookLM without credential leaks |
 
 ---
 
@@ -186,12 +283,12 @@ notebook-alchemy append -n "Portable Entrepreneur" \
 Pull requests and issues are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for local development setup and guidelines.
 
 ```bash
-# Run unit & integration test suite
+# Run unit & integration test suite (24 tests)
 py -m pytest
 
-# Run linter & formatter
+# Run linter & code style checks
 py -m ruff check .
-py -m ruff format .
+py -m ruff format --check .
 ```
 
 ---

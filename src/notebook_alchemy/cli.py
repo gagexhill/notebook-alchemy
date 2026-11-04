@@ -536,15 +536,6 @@ def run_automated_test() -> None:
         sys.exit(1)
 
 
-def main() -> None:
-    """Entry point for notebook-alchemy CLI."""
-    cli()
-
-
-if __name__ == "__main__":
-    main()
-
-
 @cli.command(name="clean")
 @click.option(
     "--all",
@@ -595,3 +586,12 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool) -> No
     console.print(
         f"[bold green]✓ Zero-bloat cleanup complete! Reclaimed {freed / 1024:.1f} KB of disk space.[/bold green]"
     )
+
+
+def main() -> None:
+    """Entry point for notebook-alchemy CLI."""
+    cli()
+
+
+if __name__ == "__main__":
+    main()
