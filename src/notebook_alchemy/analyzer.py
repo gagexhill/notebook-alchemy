@@ -248,7 +248,7 @@ class NotebookAnalyzer:
         )
 
     def _cluster_topics(self, titles: list[str]) -> dict[str, list[str]]:
-        """Group video titles into domain topic themes."""
+        """Group video titles into domain topic themes using a multi-domain ontology."""
         clusters: dict[str, list[str]] = {
             "Lead Generation & Client Acquisition": [],
             "Web Design & Agency Operations": [],
@@ -256,6 +256,14 @@ class NotebookAnalyzer:
             "Pricing & Proposal Strategy": [],
             "SEO & Local Search": [],
             "Solo Operator Systems & Productivity": [],
+            "AI, LLMs & Agentic Coding": [],
+            "Frontend & Modern UI Engineering": [],
+            "Backend, APIs & Distributed Systems": [],
+            "Databases & Data Storage": [],
+            "DevOps, Cloud & Developer Tooling": [],
+            "Programming Languages & Runtimes": [],
+            "Full-Stack Projects & Crash Courses": [],
+            "Mobile & Cross-Platform Development": [],
             "General / Specialized Topics": [],
         }
 
@@ -263,26 +271,15 @@ class NotebookAnalyzer:
             (
                 "Lead Generation & Client Acquisition",
                 re.compile(
-                    r"lead|client|acquire|attract|cold|prospect|outreach|marketing", re.IGNORECASE
+                    r"lead|client|acquire|attract|cold|prospect|outreach|marketing|funnel|sales",
+                    re.IGNORECASE,
                 ),
             ),
             (
                 "Client Retention, Onboarding & QBRs",
                 re.compile(
-                    r"qbr|quarterly|retain|churn|past client|onboard|deliver", re.IGNORECASE
-                ),
-            ),
-            (
-                "Web Design & Agency Operations",
-                re.compile(
-                    r"website|wordpress|webflow|design|agency|build|freelanc|portfolio|wireframe",
+                    r"qbr|quarterly|retain|churn|past client|onboard|deliver",
                     re.IGNORECASE,
-                ),
-            ),
-            (
-                "SEO & Local Search",
-                re.compile(
-                    r"seo|gbp|google business|rank|local|map pack|citation|schema", re.IGNORECASE
                 ),
             ),
             (
@@ -293,9 +290,79 @@ class NotebookAnalyzer:
                 ),
             ),
             (
+                "SEO & Local Search",
+                re.compile(
+                    r"seo|gbp|google business|rank|local|map pack|citation|schema",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
                 "Solo Operator Systems & Productivity",
                 re.compile(
                     r"productivity|time|system|scale|crm|tool|workflow|routine|homeschool|burnout",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "AI, LLMs & Agentic Coding",
+                re.compile(
+                    r"ai|llm|gpt|agent|vibe cod|claude|chatgpt|openai|cursor|copilot|model|neural|deep learning|machine learning",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Frontend & Modern UI Engineering",
+                re.compile(
+                    r"react|vue|angular|svelte|next\.?js|nuxt|html|css|tailwind|javascript|typescript|vanilla js|ui|animation|dom|flexbox|grid|bootstrap|svg|canvas|frontend|hover effect|webgl",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Backend, APIs & Distributed Systems",
+                re.compile(
+                    r"node|express|fastapi|django|flask|nest|rest|graphql|api|backend|microservice|auth|jwt|server|strapi|postman",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Databases & Data Storage",
+                re.compile(
+                    r"sql|postgres|mysql|mongo|database|prisma|redis|supabase|firebase|orm|table|couchdb",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "DevOps, Cloud & Developer Tooling",
+                re.compile(
+                    r"docker|kubernetes|aws|cloud|ci/cd|git|github|linux|deploy|serverless|devops|nginx|terminal|bash|powershell|vscode|vim|webpack|vite|npm",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Programming Languages & Runtimes",
+                re.compile(
+                    r"python|rust|golang|go lang|java|c\+\+|c#|\.net|php|laravel|ruby|dart|flutter|swift|kotlin|c programming",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Full-Stack Projects & Crash Courses",
+                re.compile(
+                    r"crash course|full stack|build a|project|beginner|mastery|guide|from scratch|tutorial|series|walkthrough",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Mobile & Cross-Platform Development",
+                re.compile(
+                    r"mobile|react native|flutter|ionic|cordova|android|ios|xamarin|app dev",
+                    re.IGNORECASE,
+                ),
+            ),
+            (
+                "Web Design & Agency Operations",
+                re.compile(
+                    r"website|wordpress|webflow|design|agency|build|freelanc|portfolio|wireframe",
                     re.IGNORECASE,
                 ),
             ),
