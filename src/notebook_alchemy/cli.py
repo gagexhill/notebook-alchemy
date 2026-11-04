@@ -129,25 +129,39 @@ def status() -> None:
 
 
 @cli.command()
+@click.argument("source", required=False, default=None)
 @click.option(
     "-n",
     "--notebook",
-    default="Portable Entrepreneur",
-    help="Title or ID of the notebook to analyze.",
+    default=None,
+    help="Title or ID of the notebook, or YouTube channel/playlist URL.",
 )
 @click.option(
     "--live/--fallback",
     default=False,
     help="Strictly enforce live NotebookLM connection (default: auto-fallback).",
 )
-def dry_run(notebook: str, live: bool) -> None:
-    """Run a pre-flight inspection and token/cost analysis without modifying NotebookLM."""
-    console.print(f"[bold cyan]Running dry-run analysis for notebook: '{notebook}'...[/bold cyan]")
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Limit number of videos to scan (e.g. 50 or 288).",
+)
+def dry_run(source: str | None, notebook: str | None, live: bool, limit: int | None) -> None:
+    """Run a pre-flight inspection and token/cost analysis on a YouTube channel URL or notebook."""
+    target = notebook or source or "Portable Entrepreneur"
+    console.print(f"[bold cyan]Running dry-run analysis for target: '{target}'...[/bold cyan]")
     analyzer = NotebookAnalyzer()
 
     try:
-        report = analyzer.generate_dry_run(notebook_query=notebook, use_fallback=not live)
+        report = analyzer.generate_dry_run(
+            notebook_query=target,
+            use_fallback=not live,
+            limit=limit,
+        )
     except Exception as exc:  # noqa: BLE001
+        console.print(f"[bold red]Dry run failed:[/bold red] {exc}")
+        sys.exit(1)
         console.print(f"[bold red]Dry run failed:[/bold red] {exc}")
         sys.exit(1)
 
@@ -190,11 +204,12 @@ def dry_run(notebook: str, live: bool) -> None:
 
 
 @cli.command(name="run")
+@click.argument("source", required=False, default=None)
 @click.option(
     "-n",
     "--notebook",
-    default="Portable Entrepreneur",
-    help="Title or ID of the notebook to synthesize.",
+    default=None,
+    help="Title or ID of the notebook, or YouTube channel/playlist URL.",
 )
 @click.option(
     "--offline/--live-llm",
@@ -211,16 +226,23 @@ def dry_run(notebook: str, live: bool) -> None:
     default=True,
     help="Write markdown notes to the local vault (default: write).",
 )
-def run_pipeline(notebook: str, offline: bool, max_per_vol: int, write: bool) -> None:
-    """Execute end-to-end distillation of YouTube sources into Domain Compendiums."""
+def run_pipeline(
+    source: str | None,
+    notebook: str | None,
+    offline: bool,
+    max_per_vol: int,
+    write: bool,
+) -> None:
+    """Execute end-to-end distillation from a YouTube channel URL or notebook into Domain Compendiums."""
+    target = notebook or source or "Portable Entrepreneur"
     console.print(
-        f"[bold cyan]Starting Notebook Alchemy Distillation for: '{notebook}'...[/bold cyan]"
+        f"[bold cyan]Starting Notebook Alchemy Distillation for target: '{target}'...[/bold cyan]"
     )
     engine = AlchemyEngine()
 
     try:
         report = engine.run_distillation(
-            notebook_query=notebook,
+            notebook_query=target,
             force_offline=offline,
             max_videos_per_volume=max_per_vol,
             write_to_vault=write,
