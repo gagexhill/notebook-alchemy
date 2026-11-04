@@ -44,7 +44,7 @@ known-public value narrowly in `.gitleaks.toml`. A bypass is `GITLEAKS_BYPASS=1`
 
 | Purpose | Authorization | Reference |
 |---|---|---|
-| Development validation (`.github/workflows/validate.yml`) | None on record. The workflow triggers on pushes to `main` and on pull requests, so no run is authorized until the Owner records one here | #30 |
+| Development validation (`.github/workflows/validate.yml`) | Owner approved opening the audit remediation pull requests (#16), which run it on the `fix/audit-remediation` pull request to `main`. Any other run needs a new record here | #30 |
 | Release | None on record | #33 |
 
 A workflow file, included runner allowance, or an older run is not permission. Verify the repository's
