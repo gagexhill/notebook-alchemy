@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from notebook_alchemy.errors import GeminiError
-from notebook_alchemy.gemini import GeminiClient, price_for, scrub
+from notebook_alchemy.gemini import THINKING_NOTE, GeminiClient, price_for, scrub
 
 KEY = "AIzaSyFAKEKEYFORTESTS0123456789"
 
@@ -113,6 +113,12 @@ def test_scrub_removes_key_forms() -> None:
 
 def test_price_table() -> None:
     assert price_for("gemini-2.5-flash-lite") == (0.10, 0.40, None)
+    low, high, note = price_for("gemini-3.8-flash")
+    assert (low, high) == (0.75, 3.75)
+    assert note == THINKING_NOTE  # 3.x models think by default, so the output estimate is a floor
+
+
+def test_unlisted_model_is_priced_high_and_flagged() -> None:
     low, high, note = price_for("gemini-unknown")
-    assert (low, high) == (0.30, 2.50)
-    assert note and "gemini-unknown" in note
+    assert (low, high) == (0.75, 3.75)
+    assert note and "gemini-unknown" in note and THINKING_NOTE in note

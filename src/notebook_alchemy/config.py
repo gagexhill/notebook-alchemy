@@ -11,8 +11,10 @@ from .errors import ConfigError
 
 logger = logging.getLogger(__name__)
 
-# Default model. gemini-2.5-flash is scheduled for shutdown; override with ALCHEMY_GEMINI_MODEL.
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
+# Default model: Google's most capable Flash model. Cheaper choices (gemini-3.5-flash-lite,
+# gemini-2.5-flash-lite) are one ALCHEMY_GEMINI_MODEL setting away; gemini-2.5-flash shuts down
+# on 2026-12-01.
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 DEFAULT_MAX_CONCURRENCY = 4
 MAX_ALLOWED_CONCURRENCY = 16
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")

@@ -90,7 +90,9 @@ def test_tokens_follow_duration() -> None:
 
 
 def test_cost_uses_the_model_price_table() -> None:
-    report = _analyzer(key="").generate_dry_run("x", use_mock=True)
+    analyzer = _analyzer(key="")
+    analyzer.model = "gemini-2.5-flash-lite"
+    report = analyzer.generate_dry_run("x", use_mock=True)
     # 288 sample videos have no duration, so 4,500 tokens each at $0.10 per 1M for flash-lite
     assert report.total_estimated_tokens == 288 * 4500
     assert report.estimated_input_cost_usd == round(288 * 4500 / 1e6 * 0.10, 4)

@@ -20,25 +20,31 @@ RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 # USD per 1M tokens, (input, output). Output includes thinking tokens.
 # Source: the Gemini API pricing page. Update this table when the page changes.
 PRICING_USD_PER_M: dict[str, tuple[float, float]] = {
+    "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.1-flash-lite": (0.25, 1.50),
     "gemini-2.5-flash": (0.30, 2.50),
     "gemini-2.5-flash-lite": (0.10, 0.40),
 }
-FALLBACK_PRICING_MODEL = "gemini-2.5-flash"
-
-_KEY_IN_TEXT = re.compile(r"(key=)[A-Za-z0-9_\-]+")
+# An unlisted model is estimated at the highest listed rate, so the estimate errs high.
+FALLBACK_PRICING_MODEL = "gemini-3.8-flash"
+THINKING_NOTE = "Thinking tokens bill as output and are not in the output estimate."
 
 
 def price_for(model: str) -> tuple[float, float, str | None]:
-    """Return (input, output, note). The note is set when the model has no listed price."""
+    """Return (input, output, note). The note flags an unlisted price or unbudgeted thinking."""
+    notes: list[str] = []
     if model in PRICING_USD_PER_M:
         low, high = PRICING_USD_PER_M[model]
-        return low, high, None
-    low, high = PRICING_USD_PER_M[FALLBACK_PRICING_MODEL]
-    return (
-        low,
-        high,
-        (f"No listed price for '{model}'; estimate uses {FALLBACK_PRICING_MODEL} rates."),
-    )
+    else:
+        low, high = PRICING_USD_PER_M[FALLBACK_PRICING_MODEL]
+        notes.append(f"No listed price for '{model}'; estimate uses {FALLBACK_PRICING_MODEL} rates.")
+    if not model.startswith("gemini-2.5"):
+        notes.append(THINKING_NOTE)  # only 2.5-family requests set the thinking budget to 0
+    return low, high, " ".join(notes) or None
+
+
+_KEY_IN_TEXT = re.compile(r"(key=)[A-Za-z0-9_\-]+")
 
 
 def scrub(text: str, api_key: str) -> str:
