@@ -154,6 +154,7 @@ class NotebookLMClient:
                 pass
             message = message or (res.stderr or "").strip() or out or f"exit code {res.returncode}"
             message = " ".join(message.split())[:400]
+            message = re.sub(r"\s*Run 'notebooklm login'[^.]*\.", "", message).strip()
             if any(h in message.lower() for h in _AUTH_HINTS):
                 raise SessionError(
                     f"NotebookLM rejected the session: {message}",
