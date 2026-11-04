@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any
+
+import httpx
 
 from .channel import ChannelScanner
 from .mock_data import (
@@ -59,8 +62,15 @@ class DryRunReport:
 class NotebookAnalyzer:
     """Interacts with NotebookLM to inspect sources and compute cost/topic models."""
 
-    def __init__(self, profile: str = "default") -> None:
+    def __init__(
+        self,
+        profile: str = "default",
+        api_key: str | None = None,
+        force_offline: bool = False,
+    ) -> None:
         self.profile = profile
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY", "")
+        self.force_offline = force_offline
 
     def _run_cli(self, args: list[str], timeout: float = 5.0) -> dict[str, Any] | list[Any]:
         """Execute notebooklm CLI command with JSON output and strict timeout."""
@@ -247,8 +257,63 @@ class NotebookAnalyzer:
             is_simulated=not scan_res.is_live,
         )
 
+    def _cluster_topics_with_gemini(self, titles: list[str]) -> dict[str, list[str]]:
+        """Zero-shot LLM ontological induction to discover 6-12 natural domain clusters for any topic."""
+        if not self.api_key or self.force_offline or len(self.api_key.strip()) < 15:
+            return {}
+
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={self.api_key}"
+        titles_preview = "\n".join(f"- {t}" for t in titles[:300])
+
+        prompt = (
+            "You are an expert Ontological Taxonomist and Knowledge Architect. Given a list of video titles from an educational YouTube archive "
+            "(which could cover parenting, relationships, quantum physics, software, business, or any subject), "
+            "identify 6 to 12 distinct, high-signal conceptual pillars (domains) that organize this knowledge cleanly.\n\n"
+            "Return a valid JSON object where keys are the domain names, and values are arrays of matching video titles.\n"
+            "Ensure every title is assigned to exactly one domain. Return ONLY valid JSON with no markdown formatting.\n\n"
+            f"Titles:\n{titles_preview}"
+        )
+
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json",
+            },
+        }
+
+        try:
+            with httpx.Client(timeout=15.0) as client:
+                res = client.post(endpoint, json=payload)
+                if res.status_code == 200:
+                    data = res.json()
+                    candidates = data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        raw_text = parts[0].get("text", "")
+                        parsed = json.loads(raw_text)
+                        if isinstance(parsed, dict) and len(parsed) >= 3:
+                            cleaned = {
+                                str(k): [str(x) for x in v]
+                                for k, v in parsed.items()
+                                if isinstance(v, list)
+                            }
+                            if cleaned:
+                                return cleaned
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Gemini zero-shot domain discovery failed (%s); using multi-domain ontology", exc
+            )
+
+        return {}
+
     def _cluster_topics(self, titles: list[str]) -> dict[str, list[str]]:
-        """Group video titles into domain topic themes using a multi-domain ontology."""
+        """Group video titles into domain topic themes using LLM induction or multi-domain ontology."""
+        if self.api_key and not self.force_offline:
+            llm_clusters = self._cluster_topics_with_gemini(titles)
+            if llm_clusters:
+                return llm_clusters
+
         clusters: dict[str, list[str]] = {
             "Lead Generation & Client Acquisition": [],
             "Web Design & Agency Operations": [],

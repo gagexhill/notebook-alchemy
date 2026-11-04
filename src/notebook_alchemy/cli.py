@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import sys
+from pathlib import Path
 
 import click
 from rich.console import Console
@@ -212,6 +213,12 @@ def dry_run(source: str | None, notebook: str | None, live: bool, limit: int | N
     help="Title or ID of the notebook, or YouTube channel/playlist URL.",
 )
 @click.option(
+    "--notebook-name",
+    "-N",
+    default=None,
+    help="Explicit name for the created Google NotebookLM notebook.",
+)
+@click.option(
     "--offline/--live-llm",
     default=True,
     help="Force deterministic offline semantic synthesis (default: offline).",
@@ -226,19 +233,42 @@ def dry_run(source: str | None, notebook: str | None, live: bool, limit: int | N
     default=True,
     help="Write markdown notes to the local vault (default: write).",
 )
+@click.option(
+    "--sync/--no-sync",
+    default=True,
+    help="Upload generated compendiums into Google NotebookLM (default: sync).",
+)
 def run_pipeline(
     source: str | None,
     notebook: str | None,
+    notebook_name: str | None,
     offline: bool,
     max_per_vol: int,
     write: bool,
+    sync: bool,
 ) -> None:
     """Execute end-to-end distillation from a YouTube channel URL or notebook into Domain Compendiums."""
     target = notebook or source or "Example Notebook"
+    engine = AlchemyEngine()
+
+    # Pillar 5: Upfront Login Check if sync is requested
+    if sync and write and not engine.client.is_authenticated():
+        console.print(
+            Panel(
+                "[bold red]Google NotebookLM Authentication Required[/bold red]\n\n"
+                "You are not currently logged in to Google NotebookLM.\n"
+                "To authenticate, run:\n"
+                "  [bold cyan]notebook-alchemy login[/bold cyan]\n\n"
+                "To generate local Markdown vault compendiums without uploading, pass [bold yellow]--no-sync[/bold yellow].",
+                title="Login Required",
+                border_style="red",
+            )
+        )
+        sys.exit(1)
+
     console.print(
         f"[bold cyan]Starting Notebook Alchemy Distillation for target: '{target}'...[/bold cyan]"
     )
-    engine = AlchemyEngine()
 
     try:
         report = engine.run_distillation(
@@ -285,6 +315,38 @@ def run_pipeline(
         summary += f"[bold green]Master Index:[/bold green] {report.index_path}\n"
 
     console.print(Panel(summary, title="Distillation Completed", border_style="green"))
+
+    # Pillar 5: Interactive Notebook Naming and Direct Sync
+    if sync and write:
+        proposed_name = notebook_name or report.notebook_title or target
+        if not notebook_name and sys.stdin.isatty():
+            console.print("\n[bold cyan]Google NotebookLM Destination[/bold cyan]")
+            user_choice = click.prompt(
+                "Proposed Notebook Name",
+                default=proposed_name,
+                show_default=True,
+            )
+            final_nb_name = user_choice.strip() or proposed_name
+        else:
+            final_nb_name = proposed_name
+
+        console.print(
+            f"[cyan]Syncing compendiums to Google NotebookLM notebook: '{final_nb_name}'...[/cyan]"
+        )
+        try:
+            nb_id = engine.sync_to_notebooklm(final_nb_name)
+            console.print(
+                Panel(
+                    f"[bold green]✓ Successfully uploaded {len(report.compendiums)} compendiums + Master Catalog to Google NotebookLM![/bold green]\n\n"
+                    f"Notebook Title: [bold]{final_nb_name}[/bold] ([dim]{nb_id}[/dim])\n"
+                    f"Open in your browser to use Audio Overview, Quizzes & Study Guides:\n"
+                    f"[bold cyan]https://notebooklm.google.com[/bold cyan]",
+                    title="NotebookLM Sync Succeeded",
+                    border_style="green",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[bold red]Sync to NotebookLM failed:[/bold red] {exc}")
 
 
 @cli.command(name="sync")
@@ -481,3 +543,55 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+@cli.command(name="clean")
+@click.option(
+    "--all",
+    "clean_all",
+    is_flag=True,
+    help="Purge all cached transcripts, temporary files, and local vaults.",
+)
+@click.option(
+    "--cache",
+    "clean_cache",
+    is_flag=True,
+    help="Purge cached transcripts (~/.notebook-alchemy/cache).",
+)
+@click.option("--vaults", "clean_vaults", is_flag=True, help="Purge local vault markdown builds.")
+def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool) -> None:
+    """Clean up temporary caches and build artifacts to reclaim disk space."""
+    import shutil
+
+    cache_dir = Path.home() / ".notebook-alchemy" / "cache"
+    vaults_dir = Path.home() / ".notebook-alchemy" / "vaults"
+    freed = 0
+
+    do_cache = clean_all or clean_cache or (not clean_cache and not clean_vaults)
+    do_vaults = clean_all or clean_vaults
+
+    if do_cache and cache_dir.exists():
+        for f in cache_dir.glob("*"):
+            if f.is_file():
+                try:
+                    freed += f.stat().st_size
+                    f.unlink()
+                except Exception:  # noqa: BLE001, S110
+                    pass
+        console.print(
+            "[green]✓ Purged temporary transcript cache (~/.notebook-alchemy/cache)[/green]"
+        )
+
+    if do_vaults and vaults_dir.exists():
+        try:
+            shutil.rmtree(vaults_dir, ignore_errors=True)
+            vaults_dir.mkdir(parents=True, exist_ok=True)
+            console.print(
+                "[green]✓ Purged local vault markdown builds (~/.notebook-alchemy/vaults)[/green]"
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+    console.print(
+        f"[bold green]✓ Zero-bloat cleanup complete! Reclaimed {freed / 1024:.1f} KB of disk space.[/bold green]"
+    )

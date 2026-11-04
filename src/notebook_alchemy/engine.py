@@ -55,7 +55,7 @@ class AlchemyEngine:
         self.config = config or AlchemyConfig.from_env()
         self.client = BaseNotebookClient(self.config)
         self.vault = VaultManager(self.config)
-        self.analyzer = NotebookAnalyzer()
+        self.analyzer = NotebookAnalyzer(api_key=self.config.gemini_api_key)
         self.synthesizer = Synthesizer(api_key=self.config.gemini_api_key)
 
     def status(self) -> dict[str, Any]:
