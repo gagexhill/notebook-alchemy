@@ -1,0 +1,6 @@
+title = "notebook-alchemy gitleaks configuration"
+
+[extend]
+useDefault = true
+
+# Keep allowlists narrow: one value in one file, never a whole tree.
