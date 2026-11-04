@@ -26,6 +26,14 @@ from .engine import AlchemyEngine
 from .errors import AlchemyError, NotebookLMError, SessionError, VaultError
 from .ui import esc, handle_errors
 
+_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
 MOCK_NOTE = (
     "This run uses the bundled sample catalog, not a real source. Its output is for trying the tool "
     "and is never uploaded to NotebookLM."
@@ -116,10 +124,15 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
     large archive fits in a few sources.
     """
     ui.configure(quiet=quiet, no_color=no_color or bool(os.getenv("NO_COLOR")), debug=debug)
-    level = logging.DEBUG if verbose > 1 else logging.INFO if verbose else logging.WARNING
+    # -vv / -v / -q win; otherwise ALCHEMY_LOG_LEVEL (validated in AlchemyConfig) or warnings only.
+    env_level = os.getenv("ALCHEMY_LOG_LEVEL", "").strip().upper()
+    level = _LOG_LEVELS.get(env_level, logging.WARNING)
+    if verbose:
+        level = logging.DEBUG if verbose > 1 else logging.INFO
     if quiet:
         level = logging.ERROR
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
+    logging.getLogger().setLevel(level)  # basicConfig is a no-op when handlers already exist
     for noisy in ("httpx", "httpcore", "yt_dlp", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
