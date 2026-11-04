@@ -70,6 +70,8 @@ ignore = [
 "tests/*" = ["S101", "S105", "S106", "BLE001", "SIM117"]
 # the sample titles keep their original punctuation
 "src/notebook_alchemy/mock_data.py" = ["RUF001"]
+# the embedded HTML template keeps its markup on long lines
+"scripts/social_preview.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

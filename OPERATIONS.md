@@ -71,10 +71,23 @@ Live state belongs to GitHub; this table records what was set and how to read it
 | Ruleset `main-protection` | Blocks deletion and force-push of `main`; no required checks, because hosted checks are not authorized | `gh api repos/gagexhill/notebook-alchemy/rulesets` |
 | Private vulnerability reporting | Enabled | `gh api repos/gagexhill/notebook-alchemy/private-vulnerability-reporting` |
 | Secret scanning and push protection | Enabled | `gh api repos/gagexhill/notebook-alchemy --jq .security_and_analysis` |
+| Social preview | `docs/images/social-preview.png`, uploaded in repository settings (GitHub has no API for it) | `gh api graphql -f query='{repository(owner:"gagexhill",name:"notebook-alchemy"){usesCustomOpenGraphImage}}'` |
 | Labels | Ventryn taxonomy: work type, `area:*`, `severity:*`, `owner-action`, `reproduced` | `gh label list` |
 
 To restore any row, apply the same value with `gh repo edit` or `gh api`; no setting here is mirrored in
 the repository.
+
+## Release Assets
+
+Both assets are generated from real output by repeatable scripts, so nothing is drawn by hand.
+
+```powershell
+py scripts/social_preview.py                                   # docs/images/social-preview.png (1280x640)
+py scripts/render_demo.py docs/images/dry-run.svg "notebook-alchemy dry-run" -- dry-run @Hyperplexed
+```
+
+`render_demo.py` runs the command for real and records the terminal with Rich's SVG export. The social
+preview is uploaded under Settings, General, Social preview.
 
 ## Release
 
