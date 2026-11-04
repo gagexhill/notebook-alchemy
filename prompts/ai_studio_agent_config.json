@@ -1,6 +1,6 @@
 {
   "name": "Notebook Alchemy Knowledge Distiller",
-  "description": "Bypasses NotebookLM's 300-source limit by autonomously distilling video transcripts into authoritative Domain Compendiums.",
+  "description": "Bypasses NotebookLM source limits and eliminates context fragmentation by autonomously distilling massive video archives into authoritative Domain Compendiums.",
   "model": "gemini-2.5-flash",
   "generationConfig": {
     "temperature": 0.2,
