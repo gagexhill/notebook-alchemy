@@ -5,25 +5,23 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-A developer-first CLI tool to bypass Google NotebookLM's 300-source limit. Autonomously distill massive YouTube channels and playlists (50 to 1,500+ videos) into self-organizing, high-density Domain Compendiums.
+A developer-first CLI tool to overcome Google NotebookLM source limits and eliminate transcript fragmentation. Autonomously distill massive YouTube channels, playlists, and video archives of arbitrary scale into self-organizing, high-density Domain Compendiums.
 
 ---
 
-## The Problem: Google NotebookLM's 300-Source Wall
+## The Problem: Google NotebookLM Source Caps & Transcript Fragmentation
 
-Google NotebookLM enforces a strict hard ceiling of **300 sources per notebook**. 
-
-When you attempt to ingest an entire YouTube channel backlog, course archive, or conference playlist, you hit this ceiling almost immediately. Dumping hundreds of raw, individual video links causes severe structural issues:
-- **Notebook Capacity Exhaustion**: A single 300-video channel consumes 100% of your source quota, leaving zero room for user notes, PDFs, or research documents.
-- **RAG Retrieval Degradation**: Querying across hundreds of fragmented, conversational transcripts produces shallow, disjointed answers.
-- **Context Fragmentation**: Critical principles, mental models, and step-by-step SOPs scattered across multiple videos never get synthesized into a cohesive playbook.
-- **Sub-Optimal Audio Overviews**: NotebookLM's Studio features (Audio Overviews / Deep Dive podcasts, Study Guides, Quizzes) perform best when given rich, high-signal topical textbooks rather than disconnected video snippets.
+Google NotebookLM enforces strict per-notebook source caps that get exhausted quickly when importing raw video links. More critically, dumping hundreds or thousands of uncurated video URLs directly into a notebook causes fundamental architectural bottlenecks:
+- **Notebook Source Capacity Exhaustion**: Ingesting raw individual video links rapidly consumes your notebook's available source quota, leaving zero room for user notes, research PDFs, code repositories, or reference documents.
+- **RAG Retrieval Degradation & Noise**: Vector retrieval across hundreds of fragmented, conversational video transcripts yields shallow, disjointed answers saturated with spoken pleasantries and conversational filler.
+- **Context & Playbook Fragmentation**: High-value mental models, strategies, and operational SOPs scattered across separate videos never get synthesized into a coherent, actionable knowledge base.
+- **Sub-Optimal Audio Overviews**: NotebookLM's flagship Studio features (Audio Overview dual-host podcasts, Study Guides, Quizzes) perform best when grounded in dense, cohesive domain textbooks rather than hundreds of disconnected video snippets.
 
 ```text
-Massive Video Archive (50 to 1,500+ Videos)
+Massive Video Archive (Arbitrary Scale: Dozens to Thousands of Videos)
                     │
                     ▼
-         [ 1. Channel Discovery ]      yt-dlp flat metadata extraction (<5s, 0 media bytes)
+         [ 1. Channel Discovery ]      yt-dlp flat metadata extraction (<15s, 0 media bytes)
                     │
                     ▼
         [ 2. Transcript Resolver ]     Multi-source: local .txt/.vtt/.srt + cache + YouTube captions
@@ -38,14 +36,14 @@ Massive Video Archive (50 to 1,500+ Videos)
     [ 5. Artifact Generation ]         8–18 Domain Compendiums + Master Source Catalog (INDEX.md)
                     │
                     ▼
-     [ 6. Google NotebookLM ]          Fits comfortably under 300-source limit (260–290+ free slots)
+     [ 6. Google NotebookLM ]          Compact source footprint (85%–98% notebook capacity preserved)
 ```
 
-`notebook-alchemy` solves this at arbitrary scale: it scans channel transcripts, clusters related videos into cohesive domain themes, and condenses hundreds to thousands of videos into a curated collection of structured Domain Compendiums—complete with actionable SOPs, mental models, video citations, and an immutable Master Source Catalog.
+`notebook-alchemy` solves this at arbitrary scale: it scans channel transcripts, clusters related videos into cohesive domain themes, and condenses massive video archives into a curated collection of structured Domain Compendiums—complete with actionable SOPs, mental models, video citations, and an immutable Master Source Catalog.
 
 ```text
-50 to 1,500+ Raw YouTube Links  ──►  notebook-alchemy  ──►  8–18 Domain Compendiums + Master Catalog
-(exceeds or fills 300-source cap)                          (260–290+ free slots remaining in NotebookLM)
+Dozens to 1,000s+ Raw Video Links  ──►  notebook-alchemy  ──►  8–18 Domain Compendiums + Master Catalog
+(exhausts notebook source quotas)                              (85%–98% source capacity preserved for notes & docs)
 ```
 
 ---
@@ -110,7 +108,8 @@ The pipeline has been empirically benchmarked across three channel tiers to guar
 | **Active Domain Clusters** | 6 clusters | 13 clusters | 14 clusters |
 | **Synthesized Compendium Volumes** | 6 volumes | 18 volumes | 33 volumes |
 | **NotebookLM Source Footprint** | 7 sources (6 vols + Catalog) | 19 sources (18 vols + Catalog) | 34 sources (33 vols + Catalog) |
-| **NotebookLM Slot Conservation** | **86.5% reduction** (293 slots free) | **94.8% reduction** (281 slots free) | **96.7% reduction** (266 slots free) |
+| **NotebookLM Source Reduction** | **86.5% reduction** (52 vids -> 7 sources) | **94.8% reduction** (363 vids -> 19 sources) | **96.7% reduction** (1,037 vids -> 34 sources) |
+| **Notebook Capacity Preserved** | **>85% capacity free** for notes & PDFs | **>94% capacity free** for notes & PDFs | **>96% capacity free** for notes & PDFs |
 | **Unclassified Leakage Rate** | 21.2% (11 videos) | 16.5% (60 videos) | 15.9% (165 videos) |
 
 *Full evaluation criteria and methodology are documented in [`test_benchmark_matrix.md`](test_benchmark_matrix.md).*
@@ -172,7 +171,7 @@ notebook-alchemy login --check
 
 ## Usage
 
-### 1. Distill an Entire YouTube Channel or Playlist
+### 1. Distill an Entire YouTube Channel or Playlist (Arbitrary Scale)
 
 Pass any channel handle, playlist URL, or channel link directly to the CLI:
 
@@ -267,7 +266,7 @@ notebook-alchemy clean --cache
 
 | Command | Key Options | Description |
 | :--- | :--- | :--- |
-| `notebook-alchemy run <target>` | `-N, --notebook-name`<br>`--sync / --no-sync`<br>`--offline`<br>`--preview-only` | Distill any YouTube channel or playlist (50 to 1,500+ videos) into NotebookLM |
+| `notebook-alchemy run <target>` | `-N, --notebook-name`<br>`--sync / --no-sync`<br>`--offline`<br>`--preview-only` | Distill any YouTube channel, playlist, or video archive of arbitrary scale into NotebookLM |
 | `notebook-alchemy dry-run <target>` | `-n, --name` | Preview video counts, domain clusters, and token costs before executing |
 | `notebook-alchemy clean` | `--all`<br>`--cache`<br>`--vaults` | Zero-bloat disk cleanup: purge cached transcripts and local build artifacts |
 | `notebook-alchemy append` | `-n, --name`<br>`--title`<br>`--url`<br>`--topic` | Incrementally append newly published videos to Master Catalog and compendiums |

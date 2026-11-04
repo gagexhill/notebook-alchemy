@@ -343,7 +343,7 @@ class Synthesizer:
                 "\n## How to Use in Google NotebookLM\n",
                 "1. Upload these `.md` compendium files into your NotebookLM notebook.",
                 "2. NotebookLM will ingest each compendium as a clean, high-density source.",
-                "3. Scales effortlessly to archives of 50 to 1,500+ videos while keeping your notebook well below NotebookLM's source limit.",
+                "3. Scales effortlessly to archives of arbitrary scale (dozens, hundreds, or thousands of videos) while keeping your notebook well below NotebookLM's source caps.",
             ]
         )
 

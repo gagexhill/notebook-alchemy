@@ -94,7 +94,7 @@ tags:
 ## 3. The 3 Cost-Reduction Pillars for Monthly Scale
 
 1. **Context Caching (~90% Input Discount):**
-   When processing 288+ videos, the static transcript corpus exceeds 1,000,000 tokens. By enabling Gemini **Context Caching** in Google AI Studio or via API, the input tokens are cached. Repeated queries and updates are billed at cache rates ($0.075/1M tokens) instead of full price ($0.75/1M tokens).
+   When processing large video archives (hundreds to thousands of videos), the static transcript corpus exceeds 1,000,000+ tokens. By enabling Gemini **Context Caching** in Google AI Studio or via API, the input tokens are cached. Repeated queries and updates are billed at cache rates ($0.075/1M tokens) instead of full price ($0.75/1M tokens).
 
 2. **The Batch API (50% Discount):**
    If you run multi-domain distillation asynchronously (e.g. overnight or batch runs), use the Gemini Batch API. Google applies an automatic 50% discount across all input and output tokens.
