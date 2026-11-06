@@ -312,3 +312,47 @@ def test_clustering_and_synthesis_share_one_gemini_client(tmp_path: Path) -> Non
 
 def test_no_gemini_client_without_a_key(engine: AlchemyEngine) -> None:
     assert engine.gemini is None
+
+
+def _write_set(tmp_path: Path, names: tuple[str, ...]) -> Path:
+    directory = tmp_path / "vault" / "chan" / "compendiums"
+    if directory.exists():
+        for old in directory.glob("*.md"):
+            old.unlink()
+    directory.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (directory / f"{n}.md").write_text(
+            f'---\ndomain: "{n}"\nvolume: 1\nsource_count: 1\n---\n# {n}\n', encoding="utf-8"
+        )
+    return directory
+
+
+def test_a_later_run_with_different_domains_prunes_the_earlier_runs_sources(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    fake.seed("Chan", ["My own notes"])
+    engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Alpha_Topics", "Beta_Topics")))
+    second = engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Gamma_Topics", "Beta_Topics")))
+    assert second.pruned == 1  # Alpha Topics is gone from this build
+    assert fake.titles("Chan") == ["Beta Topics", "Gamma Topics", "My own notes"]
+
+
+def test_nothing_is_pruned_without_a_record_of_an_earlier_sync(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    fake.seed("Chan", ["Old Domain", "My own notes"])
+    result = _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    assert result.pruned == 0 and "Old Domain" in fake.titles("Chan")
+
+
+def test_a_failed_sync_does_not_overwrite_the_record(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Alpha_Topics",)))
+    broken = FakeNotebookLM(fail={"add": "Gamma"})
+    broken.notebooks, broken.sources = fake.notebooks, fake.sources
+    engine.client = NotebookLMClient(engine.config, runner=broken)
+    with pytest.raises(SyncError):
+        engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Gamma_Topics",)))
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Gamma_Topics",)))
+    assert fake.titles("Chan") == ["Gamma Topics"]  # Alpha was still recorded, so it is pruned now

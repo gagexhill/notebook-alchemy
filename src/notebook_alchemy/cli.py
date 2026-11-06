@@ -291,6 +291,7 @@ def run_pipeline(
                 f"{action} notebook [bold]{esc(final_name)}[/bold]\n"
                 f"Uploaded {synced.uploaded} files"
                 + (f", replaced {synced.replaced} existing sources" if synced.replaced else "")
+                + (f", removed {synced.pruned} stale sources from the earlier run" if synced.pruned else "")
                 + "\n\nOpen https://notebooklm.google.com to use Audio Overview, Study Guides and Quizzes.",
                 title="Upload complete",
                 border_style="green",
@@ -522,7 +523,8 @@ def sync_to_notebooklm(notebook: str | None, source_dir: Path | None) -> None:
         result = engine.sync_to_notebooklm(name, directory, progress=reporter)
     ui.success(
         f"{'Created' if result.created else 'Updated'} notebook '{esc(name)}': "
-        f"uploaded {result.uploaded}, replaced {result.replaced}."
+        f"uploaded {result.uploaded}, replaced {result.replaced}"
+        + (f", removed {result.pruned} stale." if result.pruned else ".")
     )
 
 
