@@ -10,6 +10,7 @@ Usage: python scripts/render_demo.py OUT.svg "window title" -- dry-run @Hyperple
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import sys
 from pathlib import Path
@@ -46,6 +47,7 @@ def main() -> int:
     ui.console = recorder
     ui.err_console = recorder
     ui.Reporter = _NoProgress  # type: ignore[misc,assignment]
+    recorder.status = lambda *a, **k: contextlib.nullcontext()  # type: ignore[method-assign]
 
     code = 0
     try:
