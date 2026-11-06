@@ -217,3 +217,9 @@ def test_fallback_notice_is_kept_even_when_clustering_fails() -> None:
     analyzer.cluster_titles(["a"])
     assert analyzer.cluster_method == "keyword"
     assert any("used gemini-3.5-flash-lite" in n for n in analyzer.notes)
+
+
+def test_estimated_gemini_requests_cover_discovery_assignment_and_each_volume() -> None:
+    report = _analyzer(key="").generate_dry_run("x", use_mock=True)  # 288 videos, keyword domains
+    volumes = sum(-(-len(v) // 50) for v in report.domain_videos.values())
+    assert report.estimated_gemini_requests == 1 + 2 + volumes  # 288 titles = 2 assignment batches

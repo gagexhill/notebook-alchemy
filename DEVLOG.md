@@ -31,6 +31,13 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   `ALCHEMY_GEMINI_FALLBACK_MODEL` changes it or, when empty, turns it off. Token limits are set high enough that
   thinking cannot consume them. Trade-off: thinking tokens still bill as output, so a real run costs somewhat more
   than the `dry-run` estimate (which says so). (#26)
+- **A daily quota fails over at once, and the dry-run says how many requests a run needs.** A new AI Studio
+  project starts on the free tier, and the live runs hit its limit of 20 requests per day for `gemini-3.8-flash`
+  (HTTP 429, retry in about 12 hours). Waiting seconds cannot help, so the client treats a per-day 429 as final
+  for that model and moves to the fallback immediately; the notice is one short line instead of Google's whole
+  message. `dry-run` and `run` print the expected request count (one discovery call, one per 150 titles, one per
+  volume) so a user can see whether the free tier is enough before starting. Larger channels need billing enabled
+  on the key's project. (#26)
 - **Offline mode is an index, not a summary.** It lists videos and links and says no summary was made.
   Why: canned text presented as synthesis misleads whoever uploads it. (#22)
 - **Clustering is two-stage and index-based.** Domains from a sample, then every title assigned by

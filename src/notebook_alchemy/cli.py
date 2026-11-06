@@ -21,7 +21,7 @@ from rich.table import Table
 from . import __version__, ui
 from .channel import video_id_from_url
 from .client import NotebookLMClient
-from .config import AlchemyConfig
+from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig
 from .engine import AlchemyEngine
 from .errors import AlchemyError, NotebookLMError, SessionError, VaultError
 from .ui import esc, handle_errors
@@ -159,7 +159,7 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
 @click.option(
     "--max-per-vol",
     type=click.IntRange(min=1),
-    default=50,
+    default=DEFAULT_MAX_PER_VOLUME,
     show_default=True,
     help="Most videos per compendium volume.",
 )
@@ -349,6 +349,8 @@ def dry_run(source: str | None, notebook: str | None, limit: int | None, offline
         f"[bold]Transcript tokens:[/bold] ~{report.total_estimated_tokens:,}\n"
         f"[bold]Input cost:[/bold] ${report.estimated_input_cost_usd:.4f}   "
         f"[bold]Output cost:[/bold] ${report.estimated_synthesis_output_cost_usd:.4f}\n"
+        f"[bold]Gemini requests:[/bold] ~{report.estimated_gemini_requests} "
+        f"[dim](the free tier allows a limited number per day)[/dim]\n"
         f"[bold green]Estimated total:[/bold green] ${report.total_estimated_cost_usd:.4f} "
         f"[dim]({esc(report.model)}; an estimate from video length)[/dim]"
     )

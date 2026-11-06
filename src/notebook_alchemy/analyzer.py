@@ -11,7 +11,7 @@ from typing import Any
 
 from .channel import ChannelScanner
 from .client import NotebookLMClient
-from .config import AlchemyConfig, is_usable_api_key
+from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig, is_usable_api_key
 from .errors import GeminiError, NotebookLMError, SessionError
 from .gemini import GeminiClient, price_for
 from .mock_data import MOCK_NOTEBOOK_ID, MOCK_NOTEBOOK_TITLE, get_mock_sources
@@ -78,6 +78,13 @@ class DryRunReport:
     @property
     def total_estimated_cost_usd(self) -> float:
         return self.estimated_input_cost_usd + self.estimated_synthesis_output_cost_usd
+
+    @property
+    def estimated_gemini_requests(self) -> int:
+        """Domain discovery, title assignment batches, and one synthesis call per volume."""
+        titles = len(self.youtube_videos)
+        volumes = sum(-(-len(v) // DEFAULT_MAX_PER_VOLUME) for v in self.domain_videos.values())
+        return 1 + -(-titles // ASSIGN_BATCH_SIZE) + volumes
 
 
 def _kw(pattern: str) -> re.Pattern[str]:
