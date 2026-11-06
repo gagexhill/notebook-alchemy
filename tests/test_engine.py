@@ -14,7 +14,7 @@ from notebook_alchemy.engine import AlchemyEngine
 from notebook_alchemy.errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
 from notebook_alchemy.synthesizer import Synthesizer
 
-from .conftest import FakeProcess
+from .conftest import FakeNotebookLM, FakeProcess
 
 MOCK_DIR = "sample_catalog_mock_data"
 
@@ -166,43 +166,71 @@ def _sync_engine(tmp_path: Path, process: FakeProcess) -> AlchemyEngine:
     return engine
 
 
-def test_sync_replaces_same_titled_sources_after_adding(tmp_path: Path) -> None:
+def _fake_engine(tmp_path: Path, fake: FakeNotebookLM) -> AlchemyEngine:
     _session(tmp_path)
-    process = FakeProcess(
-        ("source delete", 0, "{}", ""),
-        ("source list", 0, LIST_SRC, ""),
-        ("source add", 0, json.dumps({"id": "new"}), ""),
-        ("list", 0, LIST_NBS, ""),
-    )
-    result = _sync_engine(tmp_path, process).sync_to_notebooklm("Chan", _real_dir(tmp_path))
-    assert (result.uploaded, result.replaced, result.created) == (2, 1, False)
-    commands = [" ".join(c) for c in process.calls]
-    add_alpha = next(i for i, c in enumerate(commands) if "Alpha_Topics.md" in c)
-    delete = next(i for i, c in enumerate(commands) if "source delete s1" in c)
-    assert add_alpha < delete  # the old copy is removed only after the new one is in
+    engine = AlchemyEngine(_config(tmp_path))
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    return engine
+
+
+def test_sync_creates_the_notebook_and_uploads_every_file(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    result = _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    assert (result.created, result.uploaded, result.replaced) == (True, 2, 0)
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]
+
+
+def test_resync_replaces_old_copies_including_filename_titled_ones(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    fake.seed("Chan", ["Alpha Topics", "Alpha Topics", "Beta_Topics.md", "My own notes"])
+    result = _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    assert result.replaced == 3  # both exact copies and the filename-titled one
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "My own notes"]  # user's own source kept
+
+
+def test_titles_the_service_resets_to_file_names_are_corrected(tmp_path: Path) -> None:
+    fake = FakeNotebookLM(reset_titles=True)  # the behaviour seen against the real NotebookLM
+    engine = _fake_engine(tmp_path, fake)
+    directory = _real_dir(tmp_path)
+    engine.sync_to_notebooklm("Chan", directory)
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]
+    engine.sync_to_notebooklm("Chan", directory)  # a second run must not pile up duplicates
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]
+
+
+def test_sync_adds_before_it_deletes_and_waits_before_renaming(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    fake.seed("Chan", ["Alpha Topics"])
+    _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    verbs = [" ".join(c) for c in fake.calls]
+    first_add = next(i for i, c in enumerate(verbs) if "source add" in c)
+    first_wait = next(i for i, c in enumerate(verbs) if "source wait" in c)
+    first_delete = next(i for i, c in enumerate(verbs) if "source delete" in c)
+    assert first_add < first_wait < first_delete  # the old copy goes only after the new one is ready
 
 
 def test_sync_reports_each_failed_file_and_still_uploads_the_rest(tmp_path: Path) -> None:
-    _session(tmp_path)
-
-    def runner(cmd: list[str], **kw: object):
-        import subprocess
-
-        joined = " ".join(cmd)
-        if "source add" in joined and "Beta_Topics.md" in joined:
-            return subprocess.CompletedProcess(cmd, 2, "", "No such option")
-        if "source add" in joined:
-            return subprocess.CompletedProcess(cmd, 0, json.dumps({"id": "x"}), "")
-        if "source list" in joined:
-            return subprocess.CompletedProcess(cmd, 0, "[]", "")
-        return subprocess.CompletedProcess(cmd, 0, LIST_NBS, "")
-
-    engine = AlchemyEngine(_config(tmp_path))
-    engine.client = NotebookLMClient(engine.config, runner=runner)
+    fake = FakeNotebookLM(fail={"add": "Beta_Topics.md"})
     with pytest.raises(SyncError) as err:
-        engine.sync_to_notebooklm("Chan", _real_dir(tmp_path))
-    assert err.value.failed == ["Beta_Topics.md: `notebooklm source add` failed: No such option"]
-    assert "1 of 2" in err.value.message
+        _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    assert err.value.failed == ["Beta_Topics.md: `notebooklm source add` failed: add failed on purpose"]
+    assert fake.titles("Chan") == ["Alpha Topics"]
+
+
+def test_an_old_copy_that_cannot_be_deleted_is_reported(tmp_path: Path) -> None:
+    fake = FakeNotebookLM(fail={"delete": "old-"})
+    fake.seed("Chan", ["Alpha Topics"])
+    with pytest.raises(SyncError) as err:
+        _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    assert any("old copy not removed" in f for f in err.value.failed)
+    assert any("appears 2 times" in f for f in err.value.failed)  # the read-back catches the duplicate
+
+
+def test_a_source_that_never_finishes_processing_is_reported(tmp_path: Path) -> None:
+    fake = FakeNotebookLM(fail={"wait": "src-"})
+    with pytest.raises(SyncError) as err:
+        _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    assert all("processing did not finish" in f for f in err.value.failed) and len(err.value.failed) == 2
 
 
 def test_sync_needs_a_working_session(tmp_path: Path) -> None:
