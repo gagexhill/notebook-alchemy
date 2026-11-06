@@ -230,3 +230,13 @@ def test_notices_survive_a_failed_live_synthesis() -> None:
     assert any("was unavailable" in w for w in comp.warnings) and any(
         "both models down" in w for w in comp.warnings
     )
+
+
+def test_frontmatter_records_only_real_notebook_ids() -> None:
+    synth = Synthesizer(api_key="")
+    derived = synth.synthesize_cluster("D", _videos(1), force_offline=True, notebook_id="nb_hyperplexed")
+    real = synth.synthesize_cluster("D", _videos(1), force_offline=True, notebook_id=UUID)
+    sample = synth.synthesize_cluster("D", _videos(1), force_offline=True, notebook_id="mock_notebook_0000")
+    assert "notebook_id:" not in derived.content and "sample_data" not in derived.content
+    assert f'notebook_id: "{UUID}"' in real.content
+    assert "sample_data: true" in sample.content and "notebook_id:" not in sample.content

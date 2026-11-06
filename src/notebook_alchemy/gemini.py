@@ -157,6 +157,7 @@ class GeminiClient:
         json_mode: bool = False,
         max_output_tokens: int = 8192,
         temperature: float = 0.2,
+        timeout: float | None = None,
     ) -> GeminiResult:
         models = [self.active_model]
         if self.fallback_model and self.fallback_model != models[0]:
@@ -175,7 +176,7 @@ class GeminiClient:
             # primary gets one retry, not the full set.
             attempts = min(self._retries, PRIMARY_RETRIES_WITH_FALLBACK) if has_next else self._retries
             try:
-                return self._call(model, body, attempts)
+                return self._call(model, body, attempts, timeout or self._timeout)
             except GeminiError as exc:
                 if has_next and (exc.status is None or exc.status in FALLBACK_STATUSES):
                     self._failed_over.add(model)
@@ -184,22 +185,22 @@ class GeminiClient:
                 raise
         raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
 
-    def _call(self, model: str, body: dict, retries: int) -> GeminiResult:
+    def _call(self, model: str, body: dict, retries: int, timeout: float) -> GeminiResult:
         headers = {"x-goog-api-key": self._api_key, "content-type": "application/json"}
         try:
-            return self._send(model, body, headers, retries)
+            return self._send(model, body, headers, retries, timeout)
         except _ThinkingRejected:
             # The model does not accept this thinking setting; use its default and send again.
             del body["generationConfig"]["thinkingConfig"]
             logger.info("%s rejected the thinking setting; retrying with its default.", model)
-            return self._send(model, body, headers, retries)
+            return self._send(model, body, headers, retries, timeout)
 
-    def _send(self, model: str, body: dict, headers: dict, retries: int) -> GeminiResult:
+    def _send(self, model: str, body: dict, headers: dict, retries: int, timeout: float) -> GeminiResult:
         last_error = "no response"
         last_status: int | None = None
         for attempt in range(retries + 1):
             try:
-                with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
+                with httpx.Client(timeout=timeout, transport=self._transport) as client:
                     response = client.post(self._endpoint(model), json=body, headers=headers)
             except httpx.TransportError as exc:
                 last_error = f"network error: {type(exc).__name__}"

@@ -24,6 +24,7 @@ SECTION_RELATED = "## Related Domains"
 MAX_PROMPT_CHARS = 1_600_000
 MAX_CHARS_PER_VIDEO = 60_000
 LIVE_MAX_OUTPUT_TOKENS = 32_768
+LIVE_TIMEOUT_SECONDS = 150.0
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 _WINDOWS_RESERVED = {
     "con",
@@ -203,8 +204,10 @@ class Synthesizer:
             f"volume: {volume}",
             f"notebook_title: {yaml_str(notebook_title)}",
         ]
-        if notebook_id:
+        if notebook_url(notebook_id):  # only a real notebook id; derived ids are not recorded
             lines.append(f"notebook_id: {yaml_str(notebook_id)}")
+        if notebook_id.startswith("mock_"):
+            lines.append("sample_data: true")
         lines += [
             f"source_count: {count}",
             f"synthesis: {yaml_str(mode)}",
@@ -296,6 +299,7 @@ class Synthesizer:
             system=SYSTEM_PROMPT,
             max_output_tokens=LIVE_MAX_OUTPUT_TOKENS,
             temperature=0.2,
+            timeout=LIVE_TIMEOUT_SECONDS,
         )
         warnings.extend(f"{label}: {n}" for n in self._client().drain_notices())
         if result.truncated:
