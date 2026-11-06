@@ -75,6 +75,7 @@ class GeminiResult:
 # Statuses after which another model may still answer: gone (404), throttled, or unavailable.
 # A 400 (bad request) or 401/403 (key) would fail the same way on any model.
 FALLBACK_STATUSES = frozenset({404, 429, 500, 502, 503, 504})
+PRIMARY_RETRIES_WITH_FALLBACK = 1
 
 
 class GeminiClient:
@@ -169,10 +170,13 @@ class GeminiClient:
                 max_output_tokens=max_output_tokens,
                 temperature=temperature,
             )
+            has_next = index + 1 < len(models)
+            # An overloaded model can take tens of seconds per answer, so with a fallback ready the
+            # primary gets one retry, not the full set.
+            attempts = min(self._retries, PRIMARY_RETRIES_WITH_FALLBACK) if has_next else self._retries
             try:
-                return self._call(model, body)
+                return self._call(model, body, attempts)
             except GeminiError as exc:
-                has_next = index + 1 < len(models)
                 if has_next and (exc.status is None or exc.status in FALLBACK_STATUSES):
                     self._failed_over.add(model)
                     self._notices.append(f"{model} was unavailable ({exc.detail}); used {models[index + 1]}.")
@@ -180,20 +184,20 @@ class GeminiClient:
                 raise
         raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
 
-    def _call(self, model: str, body: dict) -> GeminiResult:
+    def _call(self, model: str, body: dict, retries: int) -> GeminiResult:
         headers = {"x-goog-api-key": self._api_key, "content-type": "application/json"}
         try:
-            return self._send(model, body, headers)
+            return self._send(model, body, headers, retries)
         except _ThinkingRejected:
             # The model does not accept this thinking setting; use its default and send again.
             del body["generationConfig"]["thinkingConfig"]
             logger.info("%s rejected the thinking setting; retrying with its default.", model)
-            return self._send(model, body, headers)
+            return self._send(model, body, headers, retries)
 
-    def _send(self, model: str, body: dict, headers: dict) -> GeminiResult:
+    def _send(self, model: str, body: dict, headers: dict, retries: int) -> GeminiResult:
         last_error = "no response"
         last_status: int | None = None
-        for attempt in range(self._retries + 1):
+        for attempt in range(retries + 1):
             try:
                 with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
                     response = client.post(self._endpoint(model), json=body, headers=headers)
@@ -216,20 +220,20 @@ class GeminiClient:
                         detail=last_error,
                     )
 
-            if attempt < self._retries:
+            if attempt < retries:
                 delay = self._delay(response, attempt)
                 logger.info(
                     "%s call failed (%s); retry %d/%d in %.0fs.",
                     model,
                     scrub(last_error, self._api_key),
                     attempt + 1,
-                    self._retries,
+                    retries,
                     delay,
                 )
                 self._sleep(delay)
 
         raise GeminiError(
-            f"{model} did not succeed after {self._retries + 1} attempts ({last_error}).",
+            f"{model} did not succeed after {retries + 1} attempts ({last_error}).",
             hint="Check your network and quota, or run with --offline.",
             status=last_status,
             detail=last_error,

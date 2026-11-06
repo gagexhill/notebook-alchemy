@@ -244,3 +244,26 @@ def test_empty_max_tokens_answer_names_thinking_as_the_cause() -> None:
     body = {"candidates": [{"content": {"parts": []}, "finishReason": "MAX_TOKENS"}]}
     with pytest.raises(GeminiError, match="thinking"):
         _client(lambda r: httpx.Response(200, json=body)).generate("hi")
+
+
+def test_with_a_fallback_the_primary_gets_one_retry_not_the_full_set() -> None:
+    handler, calls = _router(
+        {
+            PRIMARY: httpx.Response(503, json={"error": {"message": "busy"}}),
+            BACKUP: httpx.Response(200, json=_ok()),
+        }
+    )
+    assert _fallback_client(handler).generate("hi").model == BACKUP  # default retries=3
+    assert calls == [PRIMARY, PRIMARY, BACKUP]
+
+
+def test_the_last_model_still_gets_every_retry() -> None:
+    handler, calls = _router(
+        {
+            PRIMARY: httpx.Response(503, json={"error": {"message": "a"}}),
+            BACKUP: httpx.Response(503, json={"error": {"message": "b"}}),
+        }
+    )
+    with pytest.raises(GeminiError):
+        _fallback_client(handler).generate("hi")
+    assert calls == [PRIMARY, PRIMARY] + [BACKUP] * 4
