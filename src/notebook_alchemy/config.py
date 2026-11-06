@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 # gemini-2.5-flash-lite) are one ALCHEMY_GEMINI_MODEL setting away; gemini-2.5-flash shuts down
 # on 2026-12-01.
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+# Used when the default is overloaded or unavailable; set ALCHEMY_GEMINI_FALLBACK_MODEL to an empty
+# value to turn the fallback off.
+DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_MAX_CONCURRENCY = 4
 MAX_ALLOWED_CONCURRENCY = 16
 _LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -87,6 +90,7 @@ class AlchemyConfig:
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".notebook-alchemy" / "cache")
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     gemini_model: str = DEFAULT_GEMINI_MODEL
+    gemini_fallback_model: str = DEFAULT_GEMINI_FALLBACK_MODEL
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
 
     @property
@@ -118,6 +122,9 @@ class AlchemyConfig:
             cache_dir=_path("ALCHEMY_CACHE_DIR", Path.home() / ".notebook-alchemy" / "cache"),  # type: ignore[arg-type]
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
             gemini_model=os.getenv("ALCHEMY_GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL,
+            gemini_fallback_model=os.getenv(
+                "ALCHEMY_GEMINI_FALLBACK_MODEL", DEFAULT_GEMINI_FALLBACK_MODEL
+            ).strip(),
             max_concurrency=_int_env(
                 "ALCHEMY_MAX_CONCURRENCY",
                 DEFAULT_MAX_CONCURRENCY,

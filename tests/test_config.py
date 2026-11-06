@@ -80,3 +80,11 @@ def test_invalid_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALCHEMY_GEMINI_MODEL", "gemini-test-model")
     assert AlchemyConfig.from_env().gemini_model == "gemini-test-model"
+
+
+def test_fallback_model_default_override_and_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert AlchemyConfig.from_env().gemini_fallback_model == "gemini-3.5-flash-lite"
+    monkeypatch.setenv("ALCHEMY_GEMINI_FALLBACK_MODEL", "gemini-other")
+    assert AlchemyConfig.from_env().gemini_fallback_model == "gemini-other"
+    monkeypatch.setenv("ALCHEMY_GEMINI_FALLBACK_MODEL", "")
+    assert AlchemyConfig.from_env().gemini_fallback_model == ""

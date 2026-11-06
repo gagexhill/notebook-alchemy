@@ -17,8 +17,9 @@ The settings and the system instruction below are mirrored in `ai_studio_agent_c
 | Max output tokens | 32768 | A compendium covers up to 50 videos |
 | Grounding and code execution | Off | The transcripts are the only source |
 
-Cheaper choices: `gemini-3.5-flash-lite` and `gemini-2.5-flash-lite`. Thinking tokens bill at the output rate, so a
-real run costs somewhat more than the `dry-run` output estimate shows.
+Cheaper choice: `gemini-3.5-flash-lite`, which is also the tool's fallback when the default is overloaded. Google's
+API reports `gemini-2.5-flash-lite` as no longer available to new users. Thinking tokens bill at the output rate and
+count against the output limit, so a real run costs somewhat more than the `dry-run` output estimate shows.
 
 Check current rates on the [pricing page](https://ai.google.dev/gemini-api/docs/pricing) before estimating
 a large run. `notebook-alchemy dry-run <url>` does the arithmetic from video lengths.

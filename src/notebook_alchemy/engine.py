@@ -85,6 +85,7 @@ class AlchemyEngine:
         self.synthesizer = Synthesizer(
             api_key=self.config.gemini_api_key,
             model=self.config.gemini_model,
+            fallback_model=self.config.gemini_fallback_model,
             transcripts=self.transcripts,
         )
 

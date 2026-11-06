@@ -26,7 +26,7 @@ NOTEBOOKLM_BIN = "notebooklm"
 LIST_TIMEOUT = 60.0
 WRITE_TIMEOUT = 120.0
 UPLOAD_TIMEOUT = 300.0
-_AUTH_HINTS = ("authentication", "sign-in", "signed-out", "login", "re-authenticate")
+_AUTH_HINTS = ("authentication", "auth not found", "sign-in", "signed-out", "login", "re-authenticate")
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]  # defaults to subprocess.run at call time
 
@@ -109,7 +109,7 @@ class NotebookLMClient:
             return SessionStatus(False, "No NotebookLM session found.")
         try:
             notebooks = self.list_notebooks()
-        except SessionError as exc:
+        except NotebookLMError as exc:
             return SessionStatus(False, exc.message)
         return SessionStatus(True, "Session is active.", len(notebooks))
 
@@ -117,7 +117,9 @@ class NotebookLMClient:
 
     def _command(self, args: list[str], *, as_json: bool) -> list[str]:
         cmd = [NOTEBOOKLM_BIN]
-        if self.config.session_file:
+        # A configured path that does not exist (for example one copied from an old .env) is
+        # ignored, so the notebooklm profile's own session is used.
+        if self.config.session_file and self.config.session_file.is_file():
             cmd += ["--storage", str(self.config.session_file)]
         cmd += ["--profile", self.profile, *args]
         if as_json:

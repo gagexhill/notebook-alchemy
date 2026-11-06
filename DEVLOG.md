@@ -14,13 +14,18 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   `--text` option, and one argument cannot carry a large document on Windows. (#17)
 - **Gemini key in a header, one client for every call.** `gemini.py` owns retries, key scrubbing and the
   price table. Why: `?key=` URLs surfaced in exception text. (#21)
-- **Default model is `gemini-3.8-flash`, thinking set to low.** Google lists it as its most capable Flash model at
-  $0.75 input and $3.75 output per 1M tokens. `gemini-2.5-flash` shuts down on 2026-12-01, so it could not stay the
-  default, and a synthesis tool is judged on the quality of its prose. The request mirrors what AI Studio shows for
-  this model: `thinkingLevel: low`, and no temperature, because AI Studio offers none for Gemini 3.x. If the API
-  rejects the thinking field the client drops it and retries once. Trade-off: thinking tokens still bill as output,
-  so a real run costs somewhat more than the `dry-run` estimate (which says so). Cheaper choices are one
-  `ALCHEMY_GEMINI_MODEL` setting away (`gemini-3.5-flash-lite`, `gemini-2.5-flash-lite`). (#26)
+- **Default model is `gemini-3.8-flash`, thinking set to low, with `gemini-3.5-flash-lite` as the fallback.**
+  Google lists 3.8 Flash as its most capable Flash model at $0.75 input and $3.75 output per 1M tokens.
+  `gemini-2.5-flash` shuts down on 2026-12-01, so it could not stay the default, and a synthesis tool is judged on
+  the quality of its prose. The request mirrors what AI Studio shows for this model: `thinkingLevel: low`, and no
+  temperature, because AI Studio offers none for Gemini 3.x. The first live run showed why a fallback is needed:
+  3.8 Flash answered HTTP 503 ("high demand") for more than 40 seconds while `gemini-3.5-flash-lite` answered in
+  2.5 seconds and accepted the same request, `gemini-2.5-flash-lite` returned 404 for a new project, and
+  `gemini-3.1-flash-lite` spent a 64-token limit entirely on thinking. So the client switches to the fallback for
+  the rest of a run when the default returns 404, 429 or a 5xx after its retries, and says so in the output;
+  `ALCHEMY_GEMINI_FALLBACK_MODEL` changes it or, when empty, turns it off. Token limits are set high enough that
+  thinking cannot consume them. Trade-off: thinking tokens still bill as output, so a real run costs somewhat more
+  than the `dry-run` estimate (which says so). (#26)
 - **Offline mode is an index, not a summary.** It lists videos and links and says no summary was made.
   Why: canned text presented as synthesis misleads whoever uploads it. (#22)
 - **Clustering is two-stage and index-based.** Domains from a sample, then every title assigned by
