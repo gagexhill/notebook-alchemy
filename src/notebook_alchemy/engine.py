@@ -57,6 +57,7 @@ class SyncResult:
     created: bool
     uploaded: int
     replaced: int
+    pruned: int = 0
 
 
 @dataclass
@@ -241,6 +242,33 @@ class AlchemyEngine:
 
     # -- NotebookLM sync --
 
+    def _sync_state_path(self, notebook_id: str) -> Path:
+        """Per-user record of what the last successful sync uploaded to this notebook."""
+        return self.config.cache_dir.parent / "sync" / f"{safe_filename(notebook_id)}.json"
+
+    def _read_synced_titles(self, notebook_id: str) -> list[str]:
+        path = self._sync_state_path(notebook_id)
+        if not path.is_file():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return [str(t) for t in data.get("titles", [])]
+        except (OSError, ValueError) as exc:
+            logger.warning("Ignoring unreadable sync record %s: %s", path, exc)
+            return []
+
+    def _write_synced_titles(self, notebook_id: str, titles: list[str]) -> None:
+        path = self._sync_state_path(notebook_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"notebook_id": notebook_id, "titles": sorted(titles)}), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning(
+                "Could not record this sync (%s); stale sources will not be pruned next time.", exc
+            )
+
     def sync_to_notebooklm(
         self,
         notebook_title: str,
@@ -307,16 +335,22 @@ class AlchemyEngine:
                     except AlchemyError as exc:
                         failed.append(f"{title}: could not set the title: {exc.message}")
 
-        # Remove every older source whose title matches one we uploaded.
+        # Remove every older source whose title matches one we uploaded, and every source the last
+        # sync uploaded that this build no longer contains (domains are re-discovered each run).
         wanted = {normalize_title(t) for t in new_ids}
+        stale = {normalize_title(t) for t in self._read_synced_titles(nb_id)} - wanted
         added = set(new_ids.values())
-        replaced = 0
+        replaced = pruned = 0
         for old in before:
-            if str(old["id"]) in added or normalize_title(str(old.get("title", ""))) not in wanted:
+            key = normalize_title(str(old.get("title", "")))
+            if str(old["id"]) in added or (key not in wanted and key not in stale):
                 continue
             try:
                 self.client.delete_source(nb_id, str(old["id"]))
-                replaced += 1
+                if key in wanted:
+                    replaced += 1
+                else:
+                    pruned += 1
             except AlchemyError as exc:
                 failed.append(f"{old.get('title', old['id'])}: old copy not removed: {exc.message}")
 
@@ -336,7 +370,8 @@ class AlchemyEngine:
                 failed=failed,
                 hint="Fix the cause above and run the same command again; it replaces, not duplicates.",
             )
-        return SyncResult(nb_id, created, len(new_ids), replaced)
+        self._write_synced_titles(nb_id, list(new_ids))
+        return SyncResult(nb_id, created, len(new_ids), replaced, pruned)
 
     # -- append --
 
