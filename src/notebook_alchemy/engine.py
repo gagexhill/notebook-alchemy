@@ -13,7 +13,7 @@ from typing import Any
 from .analyzer import DryRunReport, NotebookAnalyzer, ProgressFn
 from .channel import TranscriptManager
 from .client import NotebookLMClient, SourceDocument, normalize_title
-from .config import AlchemyConfig
+from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig
 from .errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
 from .gemini import GeminiClient
 from .synthesizer import DomainCompendium, Synthesizer, safe_filename, unique_slugs
@@ -128,7 +128,7 @@ class AlchemyEngine:
         notebook_query: str = "",
         *,
         force_offline: bool = False,
-        max_videos_per_volume: int = 50,
+        max_videos_per_volume: int = DEFAULT_MAX_PER_VOLUME,
         write_to_vault: bool = True,
         use_mock: bool = False,
         limit: int | None = None,

@@ -276,8 +276,9 @@ class Synthesizer:
             warnings.append(f"{label}: {shortened} transcripts were shortened to {per_video:,} characters.")
         blocked = [r for r in results.values() if r.source == "blocked"]
         if blocked:
+            noun = "request" if len(blocked) == 1 else "requests"
             warnings.append(
-                f"{label}: YouTube blocked {len(blocked)} transcript requests; retry later or add "
+                f"{label}: YouTube blocked {len(blocked)} transcript {noun}; retry later or add "
                 "local transcript files."
             )
 

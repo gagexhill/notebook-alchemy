@@ -267,3 +267,57 @@ def test_the_last_model_still_gets_every_retry() -> None:
     with pytest.raises(GeminiError):
         _fallback_client(handler).generate("hi")
     assert calls == [PRIMARY, PRIMARY] + [BACKUP] * 4
+
+
+QUOTA = {
+    "error": {
+        "message": "You exceeded your current quota (generate_content_free_tier_requests, limit: 20). "
+        "Requests per day limit exceeded on Free Tier. Please retry in 12h39m.",
+    }
+}
+
+
+def test_a_daily_quota_fails_over_at_once_without_retrying_or_dumping_the_error() -> None:
+    sleeps: list[float] = []
+    handler, calls = _router(
+        {PRIMARY: httpx.Response(429, json=QUOTA), BACKUP: httpx.Response(200, json=_ok())}
+    )
+    client = GeminiClient(
+        KEY, PRIMARY, fallback_model=BACKUP, transport=httpx.MockTransport(handler), sleep=sleeps.append
+    )
+    assert client.generate("hi").model == BACKUP
+    assert calls == [PRIMARY, BACKUP] and sleeps == []  # no waiting on a quota that resets in hours
+    (notice,) = client.drain_notices()
+    assert "daily request quota exhausted" in notice and "12h39m" not in notice and len(notice) < 160
+
+
+def test_a_daily_quota_with_no_fallback_explains_the_next_step() -> None:
+    handler, _calls = _router({PRIMARY: httpx.Response(429, json=QUOTA)})
+    client = GeminiClient(KEY, PRIMARY, transport=httpx.MockTransport(handler), sleep=lambda _s: None)
+    with pytest.raises(GeminiError) as err:
+        client.generate("hi")
+    assert err.value.status == 429 and "billing" in (err.value.hint or "")
+
+
+def test_a_rate_limit_that_clears_in_seconds_is_still_retried() -> None:
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            return httpx.Response(429, json={"error": {"message": "Resource exhausted, retry shortly"}})
+        return httpx.Response(200, json=_ok())
+
+    assert _client(handler).generate("hi").text == "hello"
+    assert attempts["n"] == 2
+
+
+def test_long_error_text_is_shortened_in_the_detail() -> None:
+    long_message = "x" * 400
+    handler, _calls = _router({PRIMARY: httpx.Response(503, json={"error": {"message": long_message}})})
+    client = GeminiClient(
+        KEY, PRIMARY, transport=httpx.MockTransport(handler), sleep=lambda _s: None, retries=0
+    )
+    with pytest.raises(GeminiError) as err:
+        client.generate("hi")
+    assert len(err.value.detail) < 180

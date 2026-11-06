@@ -213,7 +213,7 @@ class GeminiClient:
                 last_status = response.status_code
                 if self._thinking_rejected(response, body):
                     raise _ThinkingRejected
-                if response.status_code not in RETRY_STATUSES:
+                if response.status_code not in RETRY_STATUSES or self._quota_exhausted(response):
                     raise GeminiError(
                         f"Gemini rejected the request ({last_error}).",
                         hint=self._hint(response.status_code),
@@ -241,6 +241,14 @@ class GeminiClient:
         )
 
     @staticmethod
+    def _quota_exhausted(response: httpx.Response) -> bool:
+        """A 429 for a per-day (or longer) quota: waiting seconds will not help."""
+        if response.status_code != 429:
+            return False
+        text = response.text.lower()
+        return "perday" in text or "per day" in text or "free_tier" in text
+
+    @staticmethod
     def _thinking_rejected(response: httpx.Response, body: dict) -> bool:
         """A 400 that names the thinking field, while we sent one."""
         if response.status_code != 400 or "thinkingConfig" not in body["generationConfig"]:
@@ -261,6 +269,11 @@ class GeminiClient:
             detail = str(response.json().get("error", {}).get("message", ""))
         except ValueError:
             detail = response.text[:200]
+        if self._quota_exhausted(response):
+            detail = "daily request quota exhausted (free tier limit)"
+        else:
+            detail = " ".join(detail.split())
+            detail = detail if len(detail) <= 140 else detail[:137].rstrip() + "..."
         text = f"HTTP {response.status_code}" + (f": {detail}" if detail else "")
         return scrub(text, self._api_key)
 
@@ -270,6 +283,8 @@ class GeminiClient:
             return "Check ALCHEMY_GEMINI_MODEL; the model name may be wrong or retired."
         if status in (401, 403):
             return "Check GEMINI_API_KEY and that the Generative Language API is enabled for it."
+        if status == 429:
+            return "Enable billing for the key's project, wait for the quota to reset, or use --offline."
         return "See the message above, or run with --offline."
 
     def _parse(self, response: httpx.Response, model: str) -> GeminiResult:
