@@ -140,3 +140,107 @@ def test_unlisted_model_is_priced_high_and_flagged() -> None:
     low, high, note = price_for("gemini-unknown")
     assert (low, high) == (0.75, 3.75)
     assert note and "gemini-unknown" in note and THINKING_NOTE in note
+
+
+PRIMARY, BACKUP = "gemini-3.8-flash", "gemini-3.5-flash-lite"
+
+
+def _router(responses: dict[str, httpx.Response]):
+    """MockTransport handler answering by the model named in the URL; records the order of calls."""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        model = str(request.url).split("/models/")[1].split(":")[0]
+        calls.append(model)
+        return responses[model]
+
+    return handler, calls
+
+
+def _fallback_client(handler, **kw) -> GeminiClient:
+    return GeminiClient(
+        KEY,
+        PRIMARY,
+        fallback_model=BACKUP,
+        transport=httpx.MockTransport(handler),
+        sleep=lambda _s: None,
+        **kw,
+    )
+
+
+def test_overloaded_primary_falls_back_and_sticks() -> None:
+    handler, calls = _router(
+        {
+            PRIMARY: httpx.Response(503, json={"error": {"message": "high demand"}}),
+            BACKUP: httpx.Response(200, json=_ok()),
+        }
+    )
+    client = _fallback_client(handler, retries=1)
+    first = client.generate("hi")
+    assert first.model == BACKUP and first.text == "hello"
+    assert calls == [PRIMARY, PRIMARY, BACKUP]  # two tries on the primary, then the backup
+    notices = client.drain_notices()
+    assert (
+        len(notices) == 1 and "high demand" in notices[0] and BACKUP in notices[0] and KEY not in notices[0]
+    )
+    assert client.drain_notices() == []  # each notice is reported once
+    client.generate("again")
+    assert calls[3:] == [BACKUP]  # stays on the backup instead of re-trying the primary
+
+
+def test_a_retired_model_404_falls_back() -> None:
+    handler, calls = _router(
+        {
+            PRIMARY: httpx.Response(404, json={"error": {"message": "no longer available to new users"}}),
+            BACKUP: httpx.Response(200, json=_ok()),
+        }
+    )
+    assert _fallback_client(handler).generate("hi").model == BACKUP
+    assert calls == [PRIMARY, BACKUP]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403])
+def test_request_and_key_errors_do_not_fall_back(status: int) -> None:
+    handler, calls = _router(
+        {
+            PRIMARY: httpx.Response(status, json={"error": {"message": "nope"}}),
+            BACKUP: httpx.Response(200, json=_ok()),
+        }
+    )
+    with pytest.raises(GeminiError) as err:
+        _fallback_client(handler).generate("hi")
+    assert calls == [PRIMARY] and err.value.status == status
+
+
+def test_no_fallback_when_unset_or_the_same_model() -> None:
+    for fallback in (None, "", PRIMARY):
+        handler, calls = _router({PRIMARY: httpx.Response(503, json={"error": {"message": "busy"}})})
+        client = GeminiClient(
+            KEY,
+            PRIMARY,
+            fallback_model=fallback,
+            transport=httpx.MockTransport(handler),
+            sleep=lambda _s: None,
+            retries=0,
+        )
+        with pytest.raises(GeminiError):
+            client.generate("hi")
+        assert calls == [PRIMARY]
+
+
+def test_both_models_down_raises_the_last_error() -> None:
+    handler, _calls = _router(
+        {
+            PRIMARY: httpx.Response(503, json={"error": {"message": "a"}}),
+            BACKUP: httpx.Response(503, json={"error": {"message": "b"}}),
+        }
+    )
+    with pytest.raises(GeminiError) as err:
+        _fallback_client(handler, retries=0).generate("hi")
+    assert BACKUP in err.value.message and err.value.status == 503
+
+
+def test_empty_max_tokens_answer_names_thinking_as_the_cause() -> None:
+    body = {"candidates": [{"content": {"parts": []}, "finishReason": "MAX_TOKENS"}]}
+    with pytest.raises(GeminiError, match="thinking"):
+        _client(lambda r: httpx.Response(200, json=body)).generate("hi")

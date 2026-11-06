@@ -65,38 +65,65 @@ class GeminiResult:
     finish_reason: str
     prompt_tokens: int = 0
     output_tokens: int = 0
+    model: str = ""
 
     @property
     def truncated(self) -> bool:
         return self.finish_reason == "MAX_TOKENS"
 
 
+# Statuses after which another model may still answer: gone (404), throttled, or unavailable.
+# A 400 (bad request) or 401/403 (key) would fail the same way on any model.
+FALLBACK_STATUSES = frozenset({404, 429, 500, 502, 503, 504})
+
+
 class GeminiClient:
-    """Minimal generateContent client. The key is sent only in the x-goog-api-key header."""
+    """Minimal generateContent client. The key is sent only in the x-goog-api-key header.
+
+    When the primary model is unavailable the client switches to `fallback_model` for the rest of
+    its life, and records a notice that callers show to the user (`drain_notices`).
+    """
 
     def __init__(
         self,
         api_key: str,
         model: str,
         *,
-        timeout: float = 120.0,
+        fallback_model: str | None = None,
+        timeout: float = 90.0,
         retries: int = 3,
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._api_key = api_key
         self.model = model
+        self.fallback_model = fallback_model if fallback_model and fallback_model != model else None
         self._timeout = timeout
         self._retries = retries
         self._transport = transport
         self._sleep = sleep
+        self._failed_over: set[str] = set()
+        self._notices: list[str] = []
 
     @property
-    def endpoint(self) -> str:
-        return f"{API_ROOT}/{self.model}:generateContent"
+    def active_model(self) -> str:
+        """The model the next call will try first."""
+        if self.model in self._failed_over and self.fallback_model:
+            return self.fallback_model
+        return self.model
 
+    def drain_notices(self) -> list[str]:
+        """Messages about models that were unavailable; each is returned once."""
+        notices, self._notices = self._notices, []
+        return notices
+
+    @staticmethod
+    def _endpoint(model: str) -> str:
+        return f"{API_ROOT}/{model}:generateContent"
+
+    @staticmethod
     def _body(
-        self,
+        model: str,
         prompt: str,
         *,
         system: str | None,
@@ -105,15 +132,15 @@ class GeminiClient:
         temperature: float,
     ) -> dict:
         config: dict = {"maxOutputTokens": max_output_tokens}
-        if not self.model.startswith("gemini-3"):
+        if not model.startswith("gemini-3"):
             # AI Studio offers no temperature control for Gemini 3.x models, so none is sent.
             config["temperature"] = temperature
         if json_mode:
             config["responseMimeType"] = "application/json"
-        # Thinking tokens bill at the output rate; extraction and synthesis need little of them.
-        if self.model.startswith("gemini-2.5"):
+        # Thinking tokens bill at the output rate and count against maxOutputTokens.
+        if model.startswith("gemini-2.5"):
             config["thinkingConfig"] = {"thinkingBudget": 0}
-        elif self.model.startswith("gemini-3"):
+        elif model.startswith("gemini-3"):
             config["thinkingConfig"] = {"thinkingLevel": "low"}
         body: dict = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
         if system:
@@ -130,47 +157,70 @@ class GeminiClient:
         max_output_tokens: int = 8192,
         temperature: float = 0.2,
     ) -> GeminiResult:
-        body = self._body(
-            prompt,
-            system=system,
-            json_mode=json_mode,
-            max_output_tokens=max_output_tokens,
-            temperature=temperature,
-        )
+        models = [self.active_model]
+        if self.fallback_model and self.fallback_model != models[0]:
+            models.append(self.fallback_model)
+        for index, model in enumerate(models):
+            body = self._body(
+                model,
+                prompt,
+                system=system,
+                json_mode=json_mode,
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+            )
+            try:
+                return self._call(model, body)
+            except GeminiError as exc:
+                has_next = index + 1 < len(models)
+                if has_next and (exc.status is None or exc.status in FALLBACK_STATUSES):
+                    self._failed_over.add(model)
+                    self._notices.append(f"{model} was unavailable ({exc.detail}); used {models[index + 1]}.")
+                    continue
+                raise
+        raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
+
+    def _call(self, model: str, body: dict) -> GeminiResult:
         headers = {"x-goog-api-key": self._api_key, "content-type": "application/json"}
         try:
-            return self._send(body, headers)
+            return self._send(model, body, headers)
         except _ThinkingRejected:
             # The model does not accept this thinking setting; use its default and send again.
             del body["generationConfig"]["thinkingConfig"]
-            logger.warning("Gemini rejected the thinking setting; retrying with the model default.")
-            return self._send(body, headers)
+            logger.info("%s rejected the thinking setting; retrying with its default.", model)
+            return self._send(model, body, headers)
 
-    def _send(self, body: dict, headers: dict) -> GeminiResult:
+    def _send(self, model: str, body: dict, headers: dict) -> GeminiResult:
         last_error = "no response"
+        last_status: int | None = None
         for attempt in range(self._retries + 1):
             try:
                 with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
-                    response = client.post(self.endpoint, json=body, headers=headers)
+                    response = client.post(self._endpoint(model), json=body, headers=headers)
             except httpx.TransportError as exc:
                 last_error = f"network error: {type(exc).__name__}"
+                last_status = None
                 response = None
             else:
                 if response.status_code == 200:
-                    return self._parse(response)
+                    return self._parse(response, model)
                 last_error = self._describe(response)
+                last_status = response.status_code
                 if self._thinking_rejected(response, body):
                     raise _ThinkingRejected
                 if response.status_code not in RETRY_STATUSES:
                     raise GeminiError(
                         f"Gemini rejected the request ({last_error}).",
                         hint=self._hint(response.status_code),
+                        status=response.status_code,
+                        detail=last_error,
                     )
 
             if attempt < self._retries:
                 delay = self._delay(response, attempt)
-                logger.warning(
-                    "Gemini call failed (%s); retry %d/%d in %.0fs.",
+                logger.info(
+                    "%s call failed (%s); retry %d/%d in %.0fs.",
+                    model,
                     scrub(last_error, self._api_key),
                     attempt + 1,
                     self._retries,
@@ -179,8 +229,10 @@ class GeminiClient:
                 self._sleep(delay)
 
         raise GeminiError(
-            f"Gemini did not succeed after {self._retries + 1} attempts ({last_error}).",
+            f"{model} did not succeed after {self._retries + 1} attempts ({last_error}).",
             hint="Check your network and quota, or run with --offline.",
+            status=last_status,
+            detail=last_error,
         )
 
     @staticmethod
@@ -215,7 +267,7 @@ class GeminiClient:
             return "Check GEMINI_API_KEY and that the Generative Language API is enabled for it."
         return "See the message above, or run with --offline."
 
-    def _parse(self, response: httpx.Response) -> GeminiResult:
+    def _parse(self, response: httpx.Response, model: str) -> GeminiResult:
         try:
             data = response.json()
         except ValueError as exc:
@@ -234,10 +286,16 @@ class GeminiClient:
         text = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict))
         finish = str(candidate.get("finishReason", "UNKNOWN"))
         if not text.strip():
-            raise GeminiError(f"Gemini returned an empty answer (finish reason: {finish}).")
+            reason = (
+                "the model spent its whole output budget on thinking; raise the token limit"
+                if finish == "MAX_TOKENS"
+                else f"finish reason: {finish}"
+            )
+            raise GeminiError(f"Gemini returned an empty answer ({reason}).")
         return GeminiResult(
             text=text,
             finish_reason=finish,
             prompt_tokens=int(usage.get("promptTokenCount", 0) or 0),
             output_tokens=int(usage.get("candidatesTokenCount", 0) or 0),
+            model=model,
         )

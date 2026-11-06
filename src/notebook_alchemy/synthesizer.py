@@ -105,11 +105,13 @@ class Synthesizer:
         api_key: str | None = None,
         model: str = DEFAULT_GEMINI_MODEL,
         *,
+        fallback_model: str | None = None,
         gemini: GeminiClient | None = None,
         transcripts: TranscriptManager | None = None,
     ) -> None:
         self.api_key = api_key or ""
         self.model = model
+        self.fallback_model = fallback_model
         self._gemini = gemini
         self._transcripts = transcripts
 
@@ -121,7 +123,7 @@ class Synthesizer:
 
     def _client(self) -> GeminiClient:
         if self._gemini is None:
-            self._gemini = GeminiClient(self.api_key, self.model)
+            self._gemini = GeminiClient(self.api_key, self.model, fallback_model=self.fallback_model)
         return self._gemini
 
     def _transcript_manager(self) -> TranscriptManager:
@@ -160,6 +162,8 @@ class Synthesizer:
                 )
                 is_live = True
             except GeminiError as exc:
+                if self._gemini is not None:
+                    warnings.extend(f"{domain} (Vol. {volume}): {n}" for n in self._gemini.drain_notices())
                 warnings.append(
                     f"{domain} (Vol. {volume}): live synthesis failed ({exc.message}); "
                     "wrote the offline index instead."
@@ -293,6 +297,7 @@ class Synthesizer:
             max_output_tokens=LIVE_MAX_OUTPUT_TOKENS,
             temperature=0.2,
         )
+        warnings.extend(f"{label}: {n}" for n in self._client().drain_notices())
         if result.truncated:
             warnings.append(
                 f"{label}: Gemini stopped at its output limit, so the synthesis may end early. "
@@ -315,7 +320,7 @@ class Synthesizer:
                 len(videos),
                 notebook_title,
                 notebook_id,
-                f"gemini:{self._client().model}",
+                f"gemini:{result.model}",
             )
             + header
             + body

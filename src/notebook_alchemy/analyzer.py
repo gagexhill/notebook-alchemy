@@ -192,9 +192,18 @@ class NotebookAnalyzer:
     def llm_enabled(self) -> bool:
         return is_usable_api_key(self.api_key) and not self.force_offline
 
+    def _gemini_notices(self) -> list[str]:
+        """Fallback-model notices from the Gemini client, if one was created."""
+        return self._gemini.drain_notices() if self._gemini else []
+
     def _gemini_client(self) -> GeminiClient:
         if self._gemini is None:
-            self._gemini = GeminiClient(self.api_key, self.model)
+            self._gemini = GeminiClient(
+                self.api_key,
+                self.model,
+                fallback_model=self.config.gemini_fallback_model,
+                timeout=60.0,
+            )
         return self._gemini
 
     # -- discovery --
@@ -361,8 +370,10 @@ class NotebookAnalyzer:
             try:
                 clusters = self._cluster_with_gemini(titles, progress)
                 self.cluster_method = "gemini"
+                self.notes.extend(self._gemini_notices())
                 return clusters
             except (GeminiError, ValueError, KeyError, TypeError) as exc:
+                self.notes.extend(self._gemini_notices())
                 reason = exc.message if isinstance(exc, GeminiError) else f"unusable answer ({exc})"
                 self.notes.append(f"Gemini clustering unavailable: {reason} Used keyword matching.")
         elif not self.force_offline:
@@ -386,7 +397,7 @@ class NotebookAnalyzer:
             f"Titles:\n{sample}"
         )
         result = self._gemini_client().generate(
-            prompt, json_mode=True, max_output_tokens=1024, temperature=0.1
+            prompt, json_mode=True, max_output_tokens=4096, temperature=0.1
         )
         raw = json.loads(result.text).get("domains")
         if not isinstance(raw, list):
@@ -418,7 +429,7 @@ class NotebookAnalyzer:
                 "covering every title number."
             )
             result = self._gemini_client().generate(
-                prompt, json_mode=True, max_output_tokens=8192, temperature=0.0
+                prompt, json_mode=True, max_output_tokens=16384, temperature=0.0
             )
             mapping = json.loads(result.text).get("assignments")
             if not isinstance(mapping, dict):

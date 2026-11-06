@@ -146,3 +146,33 @@ def test_create_without_id_is_an_error(tmp_path: Path) -> None:
     client = _client(tmp_path, FakeProcess(("create", 0, "{}", ""), ("list", 0, "[]", "")))
     with pytest.raises(NotebookLMError, match="no notebook id"):
         client.create_notebook("New")
+
+
+def test_a_missing_session_file_setting_is_not_passed_to_the_cli(tmp_path: Path) -> None:
+    process = FakeProcess(("list", 0, NOTEBOOKS, ""))
+    missing = tmp_path / "old-env" / "session.json"  # for example copied from an old .env
+    _client(tmp_path, process, session_file=missing).list_notebooks()
+    assert "--storage" not in process.calls[0]
+
+
+def test_an_existing_session_file_setting_is_passed_to_the_cli(tmp_path: Path) -> None:
+    session = tmp_path / "session.json"
+    session.write_text("{}", encoding="utf-8")
+    process = FakeProcess(("list", 0, NOTEBOOKS, ""))
+    _client(tmp_path, process, session_file=session).list_notebooks()
+    assert process.calls[0][process.calls[0].index("--storage") + 1] == str(session)
+
+
+def test_auth_not_found_is_a_session_error(tmp_path: Path) -> None:
+    client = _client(tmp_path, FakeProcess(("list", 1, json.dumps({"message": "Auth not found."}), "")))
+    with pytest.raises(SessionError):
+        client.list_notebooks()
+
+
+def test_check_session_reports_any_cli_failure_instead_of_raising(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "storage_state.json").write_text("{}", encoding="utf-8")
+    client = _client(tmp_path, FakeProcess(("list", 1, "", "something unexpected broke")))
+    status = client.check_session()
+    assert not status.ok and "something unexpected broke" in status.detail

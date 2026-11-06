@@ -33,8 +33,13 @@ class FakeGemini:
     model = "fake-model"
 
     def __init__(self, result: GeminiResult | Exception | None = None) -> None:
-        self.result = result or GeminiResult("## Executive Summary\nBody [1].", "STOP")
+        self.result = result or GeminiResult("## Executive Summary\nBody [1].", "STOP", model="fake-model")
         self.prompts: list[str] = []
+        self.notices: list[str] = []
+
+    def drain_notices(self) -> list[str]:
+        notices, self.notices = self.notices, []
+        return notices
 
     def generate(self, prompt: str, **kwargs: object) -> GeminiResult:
         self.prompts.append(prompt)
@@ -141,7 +146,7 @@ def test_long_transcripts_are_shortened_to_a_budget_and_reported() -> None:
 
 
 def test_truncated_output_is_a_warning() -> None:
-    fake = FakeGemini(GeminiResult("## Executive Summary\npartial", "MAX_TOKENS"))
+    fake = FakeGemini(GeminiResult("## Executive Summary\npartial", "MAX_TOKENS", model="fake-model"))
     comp = Synthesizer(api_key=KEY, gemini=fake, transcripts=FakeTranscripts()).synthesize_cluster(
         "D", _videos(3)
     )
@@ -158,7 +163,9 @@ def test_live_failure_falls_back_to_the_offline_index_with_a_warning() -> None:
 
 
 def test_fenced_model_output_is_unwrapped() -> None:
-    fake = FakeGemini(GeminiResult("```markdown\n## Executive Summary\nBody\n```", "STOP"))
+    fake = FakeGemini(
+        GeminiResult("```markdown\n## Executive Summary\nBody\n```", "STOP", model="fake-model")
+    )
     comp = Synthesizer(api_key=KEY, gemini=fake, transcripts=FakeTranscripts()).synthesize_cluster(
         "D", _videos(1)
     )
@@ -201,3 +208,25 @@ def test_placeholder_keys_are_not_live(key: str) -> None:
     fake = FakeGemini()
     comp = Synthesizer(api_key=key, gemini=fake).synthesize_cluster("D", _videos(1))
     assert not comp.is_live_synthesized and fake.prompts == []
+
+
+def test_fallback_notice_becomes_a_warning_and_frontmatter_names_the_answering_model() -> None:
+    fake = FakeGemini(GeminiResult("## Executive Summary\nBody", "STOP", model="gemini-3.5-flash-lite"))
+    fake.notices = ["gemini-3.8-flash was unavailable (HTTP 503); used gemini-3.5-flash-lite."]
+    comp = Synthesizer(api_key=KEY, gemini=fake, transcripts=FakeTranscripts()).synthesize_cluster(
+        "D", _videos(2)
+    )
+    assert 'synthesis: "gemini:gemini-3.5-flash-lite"' in comp.content
+    assert any("used gemini-3.5-flash-lite" in w for w in comp.warnings)
+
+
+def test_notices_survive_a_failed_live_synthesis() -> None:
+    fake = FakeGemini(GeminiError("both models down"))
+    fake.notices = ["gemini-3.8-flash was unavailable (HTTP 503); used gemini-3.5-flash-lite."]
+    comp = Synthesizer(api_key=KEY, gemini=fake, transcripts=FakeTranscripts()).synthesize_cluster(
+        "D", _videos(1)
+    )
+    assert not comp.is_live_synthesized
+    assert any("was unavailable" in w for w in comp.warnings) and any(
+        "both models down" in w for w in comp.warnings
+    )

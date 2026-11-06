@@ -29,6 +29,11 @@ class FakeGemini:
         self.assign = assign or (lambda idx, k: idx % k)
         self.fail_at = fail_at
         self.prompts: list[str] = []
+        self.notices: list[str] = []
+
+    def drain_notices(self) -> list[str]:
+        notices, self.notices = self.notices, []
+        return notices
 
     def generate(self, prompt: str, **kwargs: object) -> GeminiResult:
         self.prompts.append(prompt)
@@ -194,3 +199,21 @@ def test_too_few_domains_falls_back() -> None:
     analyzer = _analyzer(FakeGemini(domains=["Only One", "Two"]))
     analyzer.cluster_titles(["x"])
     assert analyzer.cluster_method == "keyword"
+
+
+def test_fallback_model_notice_reaches_the_report() -> None:
+    fake = FakeGemini()
+    fake.notices = ["gemini-3.8-flash was unavailable (HTTP 503); used gemini-3.5-flash-lite."]
+    analyzer = _analyzer(fake)
+    analyzer.cluster_titles(["a", "b", "c"])
+    assert analyzer.cluster_method == "gemini"
+    assert any("used gemini-3.5-flash-lite" in n for n in analyzer.notes)
+
+
+def test_fallback_notice_is_kept_even_when_clustering_fails() -> None:
+    fake = FakeGemini(fail_at=1)
+    fake.notices = ["gemini-3.8-flash was unavailable (HTTP 503); used gemini-3.5-flash-lite."]
+    analyzer = _analyzer(fake)
+    analyzer.cluster_titles(["a"])
+    assert analyzer.cluster_method == "keyword"
+    assert any("used gemini-3.5-flash-lite" in n for n in analyzer.notes)

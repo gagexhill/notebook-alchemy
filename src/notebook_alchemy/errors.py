@@ -27,6 +27,18 @@ class ChannelScanError(AlchemyError):
 class GeminiError(AlchemyError):
     """A Gemini API call failed. The message never contains the API key."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        status: int | None = None,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(message, hint=hint)
+        self.status = status  # HTTP status, or None for a network failure
+        self.detail = detail or message  # short cause, used in fallback notices
+
 
 class NotebookLMError(AlchemyError):
     """The `notebooklm` CLI is missing, failed, timed out or returned unusable output."""
