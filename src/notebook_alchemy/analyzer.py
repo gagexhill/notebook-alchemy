@@ -397,7 +397,7 @@ class NotebookAnalyzer:
             f"Titles:\n{sample}"
         )
         result = self._gemini_client().generate(
-            prompt, json_mode=True, max_output_tokens=4096, temperature=0.1
+            prompt, json_mode=True, max_output_tokens=4096, temperature=0.1, timeout=45.0
         )
         raw = json.loads(result.text).get("domains")
         if not isinstance(raw, list):
@@ -429,7 +429,7 @@ class NotebookAnalyzer:
                 "covering every title number."
             )
             result = self._gemini_client().generate(
-                prompt, json_mode=True, max_output_tokens=16384, temperature=0.0
+                prompt, json_mode=True, max_output_tokens=16384, temperature=0.0, timeout=60.0
             )
             mapping = json.loads(result.text).get("assignments")
             if not isinstance(mapping, dict):

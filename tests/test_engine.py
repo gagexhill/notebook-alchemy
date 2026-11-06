@@ -271,3 +271,16 @@ def test_append_creates_a_new_domain_file(engine: AlchemyEngine, tmp_path: Path)
     )
     assert result.updated_files == ["Cooking.md"]
     assert 'domain: "Cooking"' in (directory / "Cooking.md").read_text(encoding="utf-8")
+
+
+def test_clustering_and_synthesis_share_one_gemini_client(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config.gemini_api_key = "K" * 24
+    engine = AlchemyEngine(config)
+    assert engine.gemini is not None
+    assert engine.analyzer._gemini_client() is engine.gemini
+    assert engine.synthesizer._client() is engine.gemini  # a failover seen once is seen by both
+
+
+def test_no_gemini_client_without_a_key(engine: AlchemyEngine) -> None:
+    assert engine.gemini is None

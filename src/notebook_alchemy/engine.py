@@ -15,6 +15,7 @@ from .channel import TranscriptManager
 from .client import NotebookLMClient, SourceDocument
 from .config import AlchemyConfig
 from .errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
+from .gemini import GeminiClient
 from .synthesizer import DomainCompendium, Synthesizer, safe_filename, unique_slugs
 from .vault import VaultManager
 
@@ -78,7 +79,17 @@ class AlchemyEngine:
         self.config = config or AlchemyConfig.from_env()
         self.client = NotebookLMClient(self.config)
         self.vault = VaultManager(self.config)
-        self.analyzer = NotebookAnalyzer(self.config, client=self.client)
+        # One client for clustering and synthesis, so a model that fails over stays failed over.
+        self.gemini = (
+            GeminiClient(
+                self.config.gemini_api_key,
+                self.config.gemini_model,
+                fallback_model=self.config.gemini_fallback_model,
+            )
+            if self.config.has_gemini_key
+            else None
+        )
+        self.analyzer = NotebookAnalyzer(self.config, client=self.client, gemini=self.gemini)
         self.transcripts = TranscriptManager(
             cache_dir=self.config.cache_dir, max_workers=self.config.max_concurrency
         )
@@ -86,6 +97,7 @@ class AlchemyEngine:
             api_key=self.config.gemini_api_key,
             model=self.config.gemini_model,
             fallback_model=self.config.gemini_fallback_model,
+            gemini=self.gemini,
             transcripts=self.transcripts,
         )
 
@@ -247,7 +259,7 @@ class AlchemyEngine:
                 hint="Run `notebook-alchemy run <source>` first, or pass --source-dir.",
             )
         for f in files:
-            if 'notebook_id: "mock_' in f.read_text(encoding="utf-8")[:800]:
+            if "sample_data: true" in f.read_text(encoding="utf-8")[:800]:
                 raise AlchemyError(
                     f"{source_dir} holds mock sample data; it will not be uploaded.",
                     hint="Run `notebook-alchemy run <real source>` to build real compendiums.",
