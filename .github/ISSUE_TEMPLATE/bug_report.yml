@@ -1,7 +1,7 @@
-name: "🐛 Bug Report"
+name: "Bug Report"
 description: "Report a bug, unexpected error, or failed distillation in Notebook Alchemy"
 title: "[Bug]: "
-labels: ["bug", "triage"]
+labels: ["bug"]
 body:
   - type: markdown
     attributes:
@@ -12,7 +12,7 @@ body:
     attributes:
       label: "Notebook Alchemy Version"
       description: "Run `notebook-alchemy --version` or check your installed version."
-      placeholder: "e.g., 0.1.0"
+      placeholder: "e.g., 0.2.0"
     validations:
       required: true
   - type: dropdown

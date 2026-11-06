@@ -1,7 +1,7 @@
-name: "💡 Feature or Source Proposal"
+name: "Feature or Source Proposal"
 description: "Suggest a new ingestion source, distillation preset, or capability for Notebook Alchemy"
 title: "[Feature]: "
-labels: ["enhancement", "proposal"]
+labels: ["enhancement"]
 body:
   - type: markdown
     attributes:

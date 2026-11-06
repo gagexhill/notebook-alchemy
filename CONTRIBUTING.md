@@ -1,69 +1,46 @@
-# Contributing to Notebook Alchemy
+# Contributing
 
-First off, thank you for considering contributing to **Notebook Alchemy**! Whether you are proposing a new ingestion adapter, refining our thematic clustering heuristics, or improving documentation, your support makes this engine better for everyone.
+Thank you for helping. This repository tracks all work as GitHub issues; open one (or comment on an
+existing one) before a larger change so the scope is agreed.
 
----
+By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-## Code of Conduct
+## Set up
 
-All contributors and maintainers are expected to adhere to our [Code of Conduct](CODE_OF_CONDUCT.md). Please treat all community members with empathy and respect.
-
----
-
-## Local Development Workflow
-
-### 1. Prerequisites
-
-- Python 3.10+
-- Git
-
-### 2. Setting Up Your Environment
+Python 3.10 or newer and Git.
 
 ```bash
-# Fork and clone the repository
 git clone https://github.com/gagexhill/notebook-alchemy.git
 cd notebook-alchemy
-
-# Create and activate a local virtual environment
 python -m venv .venv
-# On Windows:
-.venv\Scripts\activate
-# On macOS/Linux:
-# source .venv/bin/activate
-
-# Install editable package along with dev dependencies
+# Windows: .venv\Scripts\activate    macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
+git config core.hooksPath .githooks
 ```
 
-### 3. Running Linting and Tests
+The hook scans pushed commits for secrets with [gitleaks](https://github.com/gitleaks/gitleaks).
 
-We use `ruff` for ultra-fast linting/formatting and standard testing:
+## Check your change
 
 ```bash
-# Format code
-ruff format .
-
-# Check linting and style rules
-ruff check .
-
-# Run test suite
-pytest
-# Or using standard library unittest:
-python -m unittest discover tests
+python -m ruff check .
+python -m ruff format --check .
+python -m pytest
+python -m notebook_alchemy.cli test
 ```
 
----
+The test suite is hermetic. `tests/conftest.py` runs every test in a temporary working directory and
+home, and blocks real processes and network connections. Fake the `notebooklm` CLI and Gemini with the
+helpers in the existing tests instead of calling them. A new guard needs a test that fails when the guard
+is removed.
 
-## Pull Request Guidelines
+## Pull requests
 
-1. **Branch Naming**: Use descriptive prefixes like `feat/audio-source`, `fix/rpc-timeout`, `docs/gemini-setup`.
-2. **Atomic Commits**: Write clear, imperative commit messages (e.g. `feat: add async RSS ingestion pipeline`).
-3. **Strict Credential Hygiene**: Ensure no private API keys, emails, cookies, or session files are ever committed.
-4. **Tests**: Add unit tests for any new features or bug fixes.
-5. **PR Checklist**: Fill out the [Pull Request Template](.github/PULL_REQUEST_TEMPLATE.md) completely.
+1. Branch from `main` with a prefix such as `fix/`, `feat/` or `docs/`.
+2. Write imperative commit messages, for example `fix: report failed uploads with their cause`.
+3. Reference the issue (`Refs #12`). Use a closing keyword only when the issue's whole acceptance is met.
+4. Never commit keys, cookies, session files or `.env`.
+5. Update the README when a command or option changes.
 
----
-
-## Questions & Architectural Discussions
-
-Have an idea or question that doesn't fit into an issue? Head over to our [GitHub Discussions](https://github.com/gagexhill/notebook-alchemy/discussions) to brainstorm with maintainers and other users.
+Project rules for agents and maintainers are in [AGENTS.md](AGENTS.md); the operations map is in
+[OPERATIONS.md](OPERATIONS.md).
