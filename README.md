@@ -59,7 +59,7 @@ A NotebookLM notebook accepts a limited number of sources, and the limit depends
 
 Even when the videos fit, each one arrives as its own source. A question about one subject has to draw on dozens of them, and there is no document that covers the subject as a whole.
 
-Notebook Alchemy changes the unit. The videos are grouped by subject first, then written as one document per group, with a catalog of every source and an index. A 52-video channel becomes six domain volumes plus an index and a catalog: eight sources. The example under [Getting Started](#-getting-started) shows the real output.
+Notebook Alchemy changes the unit. The videos are grouped by subject first, then written as one document per group, with a catalog of every source and an index. A 52-video channel becomes six or seven domain volumes plus an index and a catalog: eight or nine sources. The example under [Getting Started](#-getting-started) shows the real output.
 
 ---
 
@@ -76,7 +76,7 @@ YouTube URL ──► discover ──► group ──► resolve transcripts ─
 3. **Resolve transcripts** (live mode). Each video's text comes from your own `.txt`, `.vtt` or `.srt` files, then the local cache, then YouTube captions, fetched with a bounded worker pool. Videos with no captions are remembered for a week.
 4. **Write volumes.** A domain with more than `--max-per-vol` videos (50 by default) splits into volumes. Live volumes are synthesized by Gemini and end with a generated source table; offline volumes are indexes.
 5. **Write the vault.** Everything is built in a staging folder and swapped into `vault/<source>/compendiums/` only when complete, together with `INDEX.md` and `MASTER_SOURCES_CATALOG.md`.
-6. **Upload.** Each file goes to NotebookLM as a file source. A source with the same title is replaced after the new one is in, and any file that fails is listed with its cause.
+6. **Upload.** Each file goes to NotebookLM as a file source. The tool waits for NotebookLM to process each one, corrects any title NotebookLM rewrites to the file name, replaces older copies with the same title, removes sources it uploaded last time that this build no longer has, and reads the notebook back to confirm each title appears once. Any file that fails is listed with its cause.
 
 ---
 
@@ -106,7 +106,7 @@ YouTube URL ──► discover ──► group ──► resolve transcripts ─
 | yt-dlp | >=2025.1.0 | Flat channel and playlist metadata |
 | youtube-transcript-api | >=1.0.0 | Captions when no local transcript exists |
 | notebooklm-py | >=0.8.6 | The `notebooklm` command used for login, notebooks and uploads |
-| Gemini API | `gemini-3.8-flash` by default | Domain discovery, title assignment, synthesis |
+| Gemini API | `gemini-3.8-flash` by default, `gemini-3.5-flash-lite` as fallback | Domain discovery, title assignment, synthesis |
 | pytest, ruff, pip-audit | dev extras | Tests, lint and format, dependency audit |
 
 Versions are the minimums declared in `pyproject.toml`. Override the model with `ALCHEMY_GEMINI_MODEL`.
@@ -123,7 +123,7 @@ src/notebook_alchemy/
 ├── analyzer.py     # Source discovery, domain clustering, token and cost estimates
 ├── channel.py      # YouTube scanning, URL handling, transcript resolution and cache
 ├── synthesizer.py  # Live Gemini volumes, offline indexes, index and catalog files
-├── gemini.py       # Gemini client: header auth, retries, scrubbed errors, price table
+├── gemini.py       # Gemini client: header auth, retries, model fallback, scrubbed errors, price table
 ├── client.py       # NotebookLM through the `notebooklm` command, with checked results
 ├── vault.py        # Vault layout and the atomic directory swap
 ├── config.py       # Environment and .env settings
@@ -139,12 +139,13 @@ src/notebook_alchemy/
 
 - **Real input, real output** — a bad URL, an unknown notebook or a zero-video channel is an error with a next step. Sample data appears only behind `--mock`, with a banner.
 - **Checked uploads** — files are uploaded one by one, each result is verified, failures are listed by file, and the exit code is non-zero.
-- **Replace, not duplicate** — re-running a sync replaces same-titled sources, so repeated runs do not consume the notebook's source limit.
+- **Replace, not duplicate** — a re-run replaces same-titled sources and removes the ones it uploaded last time that are gone, so repeated runs do not pile up in the notebook. Sources you added yourself are never touched.
+- **Survives a busy model** — if the default Gemini model is overloaded, retired, or out of daily quota, the run moves to the fallback model and says so.
 - **Every title assigned** — clustering covers the whole channel, not a sample, and reports what it could not place.
 - **Honest offline mode** — without a key you get an index and a catalog, labelled as such.
 - **Safe writes** — output is namespaced per source, built in staging, and swapped in whole, so a failed run leaves the previous build intact.
 - **Key hygiene** — the Gemini key travels in a header only and is removed from every error and log line.
-- **Cost before commitment** — `dry-run` estimates tokens from video length and prices them for the configured model.
+- **Cost and quota before commitment** — `dry-run` estimates tokens from video length, prices them for the configured model, and prints how many Gemini requests a run needs.
 - **Guided terminal output** — numbered steps, progress bars on a terminal, plain lines when piped, and `NO_COLOR` honoured.
 - **Hermetic tests** — the suite runs in a temporary working directory and home, with real processes and sockets blocked.
 
@@ -259,23 +260,17 @@ notebook-alchemy dry-run https://www.youtube.com/@Hyperplexed
 notebook-alchemy run https://www.youtube.com/@Hyperplexed
 ```
 
-A preview of that channel looks like this (offline keyword grouping, no key set):
+A real run on that channel, recorded from the terminal (the first is the preview, the second builds and uploads):
 
-```text
-┌──────────────────────────────────────────── Dry run ────────────────────────────────────────────┐
-│  Source: Hyperplexed (YouTube)                                                                  │
-│  Videos: 52                                                                                     │
-│  Domains: 6 (keyword clustering)                                                                │
-│                                                                                                 │
-│  Transcript tokens: ~67,846                                                                     │
-│  Input cost: $0.0509   Output cost: $0.0975                                                     │
-│  Estimated total: $0.1484 (gemini-3.8-flash; an estimate from video length)                     │
-└─────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
+![Terminal output of a dry run of the Hyperplexed channel](docs/images/dry-run.svg)
 
-The estimate counts only the output you can see; Gemini 3.x models also think, and thinking tokens bill as output, so a real run costs more. `ALCHEMY_GEMINI_MODEL` selects a cheaper model such as `gemini-3.5-flash-lite`.
+![Terminal output of a full run that builds and uploads the Hyperplexed channel](docs/images/run.svg)
 
-Keyword grouping is the fallback. It cannot tell what an unusual title is about, so some videos land in "General / Specialized Topics"; with a Gemini key the domains are named from the channel's own titles.
+The cost estimate counts only the output you can see; Gemini 3.x models also think, and thinking tokens bill as output, so a real run costs somewhat more. `ALCHEMY_GEMINI_MODEL` selects a cheaper model such as `gemini-3.5-flash-lite`.
+
+A new AI Studio key starts on Google's free tier, which limits requests per day for each model. `dry-run` prints how many requests a run needs; when a limit is reached the run continues on the fallback model, and a large channel needs billing enabled on the key's project.
+
+Keyword grouping is the fallback when no key is set. It cannot tell what an unusual title is about, so some videos land in "General / Specialized Topics"; with a Gemini key the domains are named from the channel's own titles. Domains are discovered again on each run, so their names can differ between runs.
 
 ### Build for Production
 
@@ -324,6 +319,8 @@ notebook-alchemy/
 | WebVTT and SRT parsing | `src/notebook_alchemy/channel.py` (`parse_captions`) |
 | Negative caching with expiry | `src/notebook_alchemy/channel.py` (`TranscriptManager`) |
 | Retry with backoff and `Retry-After` | `src/notebook_alchemy/gemini.py` (`GeminiClient.generate`) |
+| Model fallback after overload, retirement or quota | `src/notebook_alchemy/gemini.py` (`GeminiClient.generate`) |
+| Read-back verification after an upload | `src/notebook_alchemy/engine.py` (`sync_to_notebooklm`) |
 | Header-based API authentication and secret scrubbing | `src/notebook_alchemy/gemini.py` (`scrub`) |
 | Atomic directory replacement | `src/notebook_alchemy/vault.py` (`replace_dir`) |
 | Typed errors that carry a next action | `src/notebook_alchemy/errors.py`, `src/notebook_alchemy/ui.py` |
