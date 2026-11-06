@@ -10,8 +10,13 @@ Completed material decisions, newest first. Current work is in GitHub issues.
 - **Output is namespaced and swapped atomically.** `vault/<source-slug>/compendiums/`, built in a staging
   directory and renamed into place. Why: one shared directory mingled sources and a failed run left it
   empty. (#20, #14)
-- **Upload goes through a temp file.** `notebooklm source add <file> --type file`. Why: the CLI has no
-  `--text` option, and one argument cannot carry a large document on Windows. (#17)
+- **Upload goes through a temp file, then waits, corrects titles and reads back.**
+  `notebooklm source add <file> --type file`. Why: the CLI has no `--text` option, and one argument cannot carry a
+  large document on Windows. The first live re-sync left duplicates because NotebookLM resets some titles to the
+  file name once processing ends (the upload response still echoes the title we sent), so the sync waits for every
+  source, renames any whose title changed, removes older copies by a normalised title (no `.md`, underscores as
+  spaces), and reads the notebook back to confirm each title appears once. A source the user added with another
+  title is never touched. (#17)
 - **Gemini key in a header, one client for every call.** `gemini.py` owns retries, key scrubbing and the
   price table. Why: `?key=` URLs surfaced in exception text. (#21)
 - **Default model is `gemini-3.8-flash`, thinking set to low, with `gemini-3.5-flash-lite` as the fallback.**

@@ -12,7 +12,7 @@ from typing import Any
 
 from .analyzer import DryRunReport, NotebookAnalyzer, ProgressFn
 from .channel import TranscriptManager
-from .client import NotebookLMClient, SourceDocument
+from .client import NotebookLMClient, SourceDocument, normalize_title
 from .config import AlchemyConfig
 from .errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
 from .gemini import GeminiClient
@@ -266,14 +266,11 @@ class AlchemyEngine:
                 )
 
         nb_id, created = self.client.create_notebook(notebook_title)
-        existing: dict[str, str] = {}
-        if not created:
-            existing = {
-                str(s.get("title", "")): str(s["id"]) for s in self.client.list_sources(nb_id) if s.get("id")
-            }
+        before = [] if created else [s for s in self.client.list_sources(nb_id) if s.get("id")]
 
         failed: list[str] = []
-        uploaded = replaced = 0
+        new_ids: dict[str, str] = {}  # wanted title -> id of the source we just added
+        total_steps = len(files) * 2
         for done, md_file in enumerate(files, 1):
             title = md_file.stem.replace("_", " ")
             doc = SourceDocument(
@@ -283,22 +280,63 @@ class AlchemyEngine:
                 source_type="compendium",
             )
             try:
-                self.client.add_source_document(nb_id, doc)
-                uploaded += 1
-                if title in existing:
-                    self.client.delete_source(nb_id, existing[title])
-                    replaced += 1
+                new_ids[title] = self.client.add_source_document(nb_id, doc)
             except AlchemyError as exc:
                 failed.append(f"{md_file.name}: {exc.message}")
             if progress:
-                progress("Uploading to NotebookLM", done, len(files))
+                progress("Uploading to NotebookLM", done, total_steps)
+
+        # NotebookLM can reset a title to the file name once processing ends, so wait for every
+        # source, then read the titles back and correct any that changed.
+        titles_by_id: dict[str, str] = {}
+        for done, (title, source_id) in enumerate(list(new_ids.items()), 1):
+            try:
+                self.client.wait_for_source(nb_id, source_id)
+            except AlchemyError as exc:
+                failed.append(f"{title}: processing did not finish: {exc.message}")
+                new_ids.pop(title)
+            if progress:
+                progress("Uploading to NotebookLM", len(files) + done, total_steps)
+        if new_ids:
+            titles_by_id = {str(s["id"]): str(s.get("title", "")) for s in self.client.list_sources(nb_id)}
+            for title, source_id in list(new_ids.items()):
+                if titles_by_id.get(source_id) != title:
+                    try:
+                        self.client.rename_source(nb_id, source_id, title)
+                        titles_by_id[source_id] = title
+                    except AlchemyError as exc:
+                        failed.append(f"{title}: could not set the title: {exc.message}")
+
+        # Remove every older source whose title matches one we uploaded.
+        wanted = {normalize_title(t) for t in new_ids}
+        added = set(new_ids.values())
+        replaced = 0
+        for old in before:
+            if str(old["id"]) in added or normalize_title(str(old.get("title", ""))) not in wanted:
+                continue
+            try:
+                self.client.delete_source(nb_id, str(old["id"]))
+                replaced += 1
+            except AlchemyError as exc:
+                failed.append(f"{old.get('title', old['id'])}: old copy not removed: {exc.message}")
+
+        if new_ids:  # final read-back: every title exactly once
+            counts: dict[str, int] = {}
+            for s in self.client.list_sources(nb_id):
+                key = normalize_title(str(s.get("title", "")))
+                counts[key] = counts.get(key, 0) + 1
+            failed.extend(
+                f"{title}: appears {counts.get(normalize_title(title), 0)} times in the notebook"
+                for title in new_ids
+                if counts.get(normalize_title(title), 0) != 1
+            )
         if failed:
             raise SyncError(
-                f"{len(failed)} of {len(files)} files did not upload.",
+                f"{len(failed)} problems while uploading {len(files)} files.",
                 failed=failed,
                 hint="Fix the cause above and run the same command again; it replaces, not duplicates.",
             )
-        return SyncResult(nb_id, created, uploaded, replaced)
+        return SyncResult(nb_id, created, len(new_ids), replaced)
 
     # -- append --
 

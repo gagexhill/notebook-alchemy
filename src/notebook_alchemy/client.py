@@ -48,6 +48,14 @@ class SessionStatus:
     notebooks: int = 0
 
 
+def normalize_title(title: str) -> str:
+    """Compare source titles the way NotebookLM may rewrite them: no `.md`, underscores as spaces."""
+    stem = title.strip()
+    if stem.lower().endswith(".md"):
+        stem = stem[:-3]
+    return " ".join(stem.replace("_", " ").split()).lower()
+
+
 def _first(data: Any, *keys: str) -> Any:
     if isinstance(data, dict):
         for key in keys:
@@ -221,6 +229,17 @@ class NotebookLMClient:
 
     def delete_source(self, notebook_id: str, source_id: str) -> None:
         self._run(["source", "delete", source_id, "-n", notebook_id, "-y"], timeout=WRITE_TIMEOUT)
+
+    def wait_for_source(self, notebook_id: str, source_id: str, timeout: int = 180) -> None:
+        """Block until NotebookLM has finished processing a source; raise if it failed or timed out."""
+        self._run(
+            ["source", "wait", source_id, "-n", notebook_id, "--timeout", str(timeout)],
+            timeout=timeout + 30,
+            as_json=False,
+        )
+
+    def rename_source(self, notebook_id: str, source_id: str, title: str) -> None:
+        self._run(["source", "rename", source_id, title, "-n", notebook_id], timeout=WRITE_TIMEOUT)
 
     def add_source_document(self, notebook_id: str, document: SourceDocument) -> str:
         """Upload one document as a file source (content never travels on the command line)."""

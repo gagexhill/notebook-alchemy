@@ -25,7 +25,8 @@ Durable rules for agents working in this repository. Company standards live in
 - Vault output is written to a staging directory and swapped in whole (`vault.replace_dir`). Output is
   namespaced `vault/<source-slug>/compendiums/`.
 - Upload content goes to `notebooklm` as a file, never on the command line (Windows limits one argument
-  to about 32,000 characters).
+  to about 32,000 characters). NotebookLM can reset a source title to its file name after processing, so
+  a sync waits, corrects titles, and reads the notebook back before it reports success.
 - Text that comes from outside (titles, errors, paths) is passed through `ui.esc` before Rich prints it.
 - Model names and prices live in `config.py` and `gemini.py` only.
 
