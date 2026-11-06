@@ -2,34 +2,31 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .analyzer import NotebookAnalyzer
-from .client import BaseNotebookClient, SourceDocument
-from .config import AlchemyConfig
-from .synthesizer import DomainCompendium, Synthesizer
+from .analyzer import DryRunReport, NotebookAnalyzer, ProgressFn
+from .channel import TranscriptManager
+from .client import NotebookLMClient, SourceDocument, normalize_title
+from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig
+from .errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
+from .gemini import GeminiClient
+from .synthesizer import DomainCompendium, Synthesizer, safe_filename, unique_slugs
 from .vault import VaultManager
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class SynthesisResult:
-    """Represents the output of a single knowledge synthesis run."""
-
-    artifact_id: str
-    title: str
-    markdown_content: str
-    sources_referenced: list[str]
-    metadata: dict[str, Any] | None = None
+MAX_RELATED_LINKS = 12
 
 
 @dataclass
 class DistillationReport:
-    """Report detailing the results of a multi-source distillation run."""
+    """What a distillation run produced."""
 
     notebook_title: str
     notebook_id: str
@@ -37,7 +34,9 @@ class DistillationReport:
     compendiums: list[DomainCompendium] = field(default_factory=list)
     vault_directory: Path | None = None
     index_path: Path | None = None
-    is_live_session: bool = False
+    is_mock: bool = False
+    cluster_method: str = "keyword"
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def total_compendiums(self) -> int:
@@ -47,241 +46,449 @@ class DistillationReport:
     def total_tokens(self) -> int:
         return sum(c.token_count for c in self.compendiums)
 
+    @property
+    def live_compendiums(self) -> int:
+        return sum(1 for c in self.compendiums if c.is_live_synthesized)
+
+
+@dataclass
+class SyncResult:
+    notebook_id: str
+    created: bool
+    uploaded: int
+    replaced: int
+    pruned: int = 0
+
+
+@dataclass
+class AppendResult:
+    added: int
+    skipped: int
+    updated_files: list[str]
+
+
+def _dir_size(path: Path) -> int:
+    if not path.is_dir():
+        return 0
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
 
 class AlchemyEngine:
-    """Core knowledge orchestration, clustering, and synthesis engine."""
+    """Discovery, clustering, synthesis and vault output."""
 
     def __init__(self, config: AlchemyConfig | None = None) -> None:
         self.config = config or AlchemyConfig.from_env()
-        self.client = BaseNotebookClient(self.config)
+        self.client = NotebookLMClient(self.config)
         self.vault = VaultManager(self.config)
-        self.analyzer = NotebookAnalyzer(api_key=self.config.gemini_api_key)
-        self.synthesizer = Synthesizer(api_key=self.config.gemini_api_key)
+        # One client for clustering and synthesis, so a model that fails over stays failed over.
+        self.gemini = (
+            GeminiClient(
+                self.config.gemini_api_key,
+                self.config.gemini_model,
+                fallback_model=self.config.gemini_fallback_model,
+            )
+            if self.config.has_gemini_key
+            else None
+        )
+        self.analyzer = NotebookAnalyzer(self.config, client=self.client, gemini=self.gemini)
+        self.transcripts = TranscriptManager(
+            cache_dir=self.config.cache_dir, max_workers=self.config.max_concurrency
+        )
+        self.synthesizer = Synthesizer(
+            api_key=self.config.gemini_api_key,
+            model=self.config.gemini_model,
+            fallback_model=self.config.gemini_fallback_model,
+            gemini=self.gemini,
+            transcripts=self.transcripts,
+        )
+
+    def analyzer_for(self, offline: bool) -> NotebookAnalyzer:
+        """The analyzer, set to use Gemini only when `offline` is false."""
+        self.analyzer.force_offline = offline
+        return self.analyzer
 
     def status(self) -> dict[str, Any]:
-        """Return engine operational status and configuration."""
+        """Facts about this installation. Nothing here contacts the network."""
+        session = self.client.session_file()
         return {
             "environment": self.config.env,
-            "authenticated": self.client.is_authenticated(),
+            "notebooklm_cli": self.client.cli_version() or "not found (pip install notebooklm-py)",
+            "session_file": str(session) if session else "none (run: notebook-alchemy login)",
+            "gemini_api_key": "set" if self.config.has_gemini_key else "unset",
+            "gemini_model": self.config.gemini_model,
             "vault_path": str(self.config.vault_path),
-            "state_dir": str(self.config.state_dir),
-            "sources_count": len(self.client.list_sources()),
+            "cache_dir": f"{self.config.cache_dir} ({_dir_size(self.config.cache_dir) / 1024:.0f} KB)",
+            "max_concurrency": self.config.max_concurrency,
         }
 
-    def process_and_export(
-        self,
-        document: SourceDocument,
-        relative_vault_path: str,
-    ) -> SynthesisResult:
-        """Ingest document, process, and persist note to local markdown vault."""
-        source_id = self.client.ingest_source(document)
-
-        frontmatter = {
-            "title": f'"{document.title}"',
-            "source_type": document.source_type,
-            "source_id": source_id,
-        }
-
-        self.vault.write_note(
-            relative_path=relative_vault_path,
-            content=document.content,
-            frontmatter=frontmatter,
-        )
-
-        return SynthesisResult(
-            artifact_id=f"art_{source_id}",
-            title=document.title,
-            markdown_content=document.content,
-            sources_referenced=[source_id],
-        )
+    # -- distillation --
 
     def run_distillation(
         self,
-        notebook_query: str = "Example Notebook",
+        notebook_query: str = "",
         *,
         force_offline: bool = False,
-        max_videos_per_volume: int = 50,
+        max_videos_per_volume: int = DEFAULT_MAX_PER_VOLUME,
         write_to_vault: bool = True,
+        use_mock: bool = False,
+        limit: int | None = None,
+        dry_run: DryRunReport | None = None,
+        progress: ProgressFn | None = None,
     ) -> DistillationReport:
-        """Run the end-to-end distillation pipeline on a notebook's video sources."""
-        # 1. Inspect and cluster sources
-        dry_run = self.analyzer.generate_dry_run(notebook_query, use_fallback=True)
-
-        # Map cluster titles back to video source objects
-        videos_by_title = {v.title: v for v in dry_run.youtube_videos}
-
-        compendiums: list[DomainCompendium] = []
-
-        for domain, titles in dry_run.domain_topic_clusters.items():
-            if not titles:
-                continue
-
-            # Batch large clusters into volumes of at most max_videos_per_volume
-            for vol_idx in range(0, len(titles), max_videos_per_volume):
-                vol_num = (vol_idx // max_videos_per_volume) + 1
-                chunk_titles = titles[vol_idx : vol_idx + max_videos_per_volume]
-                chunk_videos = [
-                    {
-                        "id": getattr(videos_by_title.get(t), "source_id", f"src_{i}"),
-                        "title": t,
-                        "url": getattr(videos_by_title.get(t), "url", "https://youtube.com"),
-                    }
-                    for i, t in enumerate(chunk_titles)
-                ]
-
-                compendium = self.synthesizer.synthesize_cluster(
-                    domain=domain,
-                    videos=chunk_videos,
-                    volume=vol_num,
-                    force_offline=force_offline,
-                    notebook_title=dry_run.notebook_title,
-                    notebook_id=dry_run.notebook_id,
-                )
-                compendiums.append(compendium)
-
-        vault_dir = self.vault.vault_path / "compendiums"
-        index_file: Path | None = None
-
-        # 2. Write compendiums and master index to vault if requested
-        if write_to_vault:
-            self.vault.ensure_vault()
-            vault_dir.mkdir(parents=True, exist_ok=True)
-            # Purge lingering artifacts from prior runs to prevent cross-channel mixing
-            for old_md in vault_dir.glob("*.md"):
-                try:
-                    old_md.unlink()
-                except Exception:  # noqa: BLE001, S110
-                    pass
-
-            for comp in compendiums:
-                file_path = self.vault.vault_path / comp.relative_path
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                file_path.write_text(comp.content, encoding="utf-8")
-                logger.info("Saved compendium: %s", file_path)
-
-            # Master index note
-            index_content = self.synthesizer.generate_index(
-                compendiums=compendiums,
-                notebook_title=dry_run.notebook_title,
-                total_sources=len(dry_run.youtube_videos),
+        """Cluster a source and build one compendium per domain volume."""
+        if max_videos_per_volume < 1:
+            raise ConfigError(
+                f"--max-per-vol must be 1 or more, got {max_videos_per_volume}.",
+                hint="The default is 50.",
             )
-            index_file = vault_dir / "INDEX.md"
-            index_file.write_text(index_content, encoding="utf-8")
-            logger.info("Saved master index: %s", index_file)
+        self.analyzer.force_offline = force_offline
+        report = dry_run or self.analyzer.generate_dry_run(
+            notebook_query, use_mock=use_mock, limit=limit, progress=progress
+        )
+        if not report.youtube_videos:
+            raise AlchemyError(
+                f"'{report.notebook_title}' has no video sources to distill.",
+                hint="Check the URL or notebook, or pass a different source.",
+            )
 
-            # Master Immutable Source Catalog
-            catalog_videos = [
+        domains = list(report.domain_videos)
+        slugs = unique_slugs(domains)
+        all_links = [(slugs[d], d) for d in domains]
+        volumes = [
+            (domain, vol, chunk)
+            for domain in domains
+            for vol, chunk in enumerate(self._chunks(report.domain_videos[domain], max_videos_per_volume), 1)
+        ]
+
+        warnings = list(report.notes)
+        compendiums: list[DomainCompendium] = []
+        for done, (domain, vol, chunk) in enumerate(volumes, 1):
+            related = [(s, n) for s, n in all_links if n != domain][:MAX_RELATED_LINKS]
+            compendium = self.synthesizer.synthesize_cluster(
+                domain=domain,
+                videos=[{"id": v.source_id, "title": v.title, "url": v.url} for v in chunk],
+                volume=vol,
+                force_offline=force_offline,
+                notebook_title=report.notebook_title,
+                notebook_id=report.notebook_id,
+                slug=slugs[domain],
+                related_domains=related,
+                progress=progress,
+            )
+            warnings.extend(compendium.warnings)
+            compendiums.append(compendium)
+            if progress:
+                progress("Building compendiums", done, len(volumes))
+
+        vault_dir = self.vault.compendium_dir(report.notebook_title)
+        index_file: Path | None = None
+        if write_to_vault:
+            index_file = self._write_vault(report, compendiums, vault_dir)
+
+        return DistillationReport(
+            notebook_title=report.notebook_title,
+            notebook_id=report.notebook_id,
+            total_sources_scanned=report.total_sources,
+            compendiums=compendiums,
+            vault_directory=vault_dir if write_to_vault else None,
+            index_path=index_file,
+            is_mock=report.is_mock,
+            cluster_method=report.cluster_method,
+            warnings=warnings,
+        )
+
+    @staticmethod
+    def _chunks(items: list[Any], size: int) -> list[list[Any]]:
+        return [items[i : i + size] for i in range(0, len(items), size)]
+
+    def _write_vault(self, report: DryRunReport, compendiums: list[DomainCompendium], final: Path) -> Path:
+        """Build into a staging directory, then swap it in. A failed run leaves the old vault intact."""
+        stage = self.vault.stage_dir(final)
+        try:
+            for comp in compendiums:
+                (stage / Path(comp.relative_path).name).write_text(comp.content, encoding="utf-8")
+            (stage / "INDEX.md").write_text(
+                self.synthesizer.generate_index(
+                    compendiums,
+                    notebook_title=report.notebook_title,
+                    total_sources=len(report.youtube_videos),
+                ),
+                encoding="utf-8",
+            )
+            domain_of = {v.source_id: domain for domain, vs in report.domain_videos.items() for v in vs}
+            catalog = [
                 {
                     "id": v.source_id,
                     "title": v.title,
                     "url": v.url,
-                    "topic": "Distilled Source",
+                    "topic": domain_of.get(v.source_id, ""),
                 }
-                for v in dry_run.youtube_videos
+                for v in report.youtube_videos
             ]
-            catalog_content = self.synthesizer.generate_master_sources_catalog(
-                videos=catalog_videos,
-                notebook_title=dry_run.notebook_title,
+            (stage / "MASTER_SOURCES_CATALOG.md").write_text(
+                self.synthesizer.generate_master_sources_catalog(
+                    catalog, notebook_title=report.notebook_title
+                ),
+                encoding="utf-8",
             )
-            catalog_file = vault_dir / "MASTER_SOURCES_CATALOG.md"
-            catalog_file.write_text(catalog_content, encoding="utf-8")
-            logger.info("Saved immutable master catalog: %s", catalog_file)
+            self.vault.replace_dir(stage, final)
+        except OSError as exc:
+            shutil.rmtree(stage, ignore_errors=True)  # best-effort: the real error is raised below
+            raise VaultError(f"Could not write the vault: {exc}") from exc
+        except BaseException:
+            shutil.rmtree(stage, ignore_errors=True)  # best-effort cleanup before re-raising
+            raise
+        return final / "INDEX.md"
 
-        return DistillationReport(
-            notebook_title=dry_run.notebook_title,
-            notebook_id=dry_run.notebook_id,
-            total_sources_scanned=dry_run.total_sources,
-            compendiums=compendiums,
-            vault_directory=vault_dir if write_to_vault else None,
-            index_path=index_file,
-            is_live_session=not dry_run.is_simulated,
-        )
+    # -- NotebookLM sync --
+
+    def _sync_state_path(self, notebook_id: str) -> Path:
+        """Per-user record of what the last successful sync uploaded to this notebook."""
+        return self.config.cache_dir.parent / "sync" / f"{safe_filename(notebook_id)}.json"
+
+    def _read_synced_titles(self, notebook_id: str) -> list[str]:
+        path = self._sync_state_path(notebook_id)
+        if not path.is_file():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return [str(t) for t in data.get("titles", [])]
+        except (OSError, ValueError) as exc:
+            logger.warning("Ignoring unreadable sync record %s: %s", path, exc)
+            return []
+
+    def _write_synced_titles(self, notebook_id: str, titles: list[str]) -> None:
+        path = self._sync_state_path(notebook_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"notebook_id": notebook_id, "titles": sorted(titles)}), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning(
+                "Could not record this sync (%s); stale sources will not be pruned next time.", exc
+            )
 
     def sync_to_notebooklm(
         self,
-        notebook_title: str = "Example Notebook",
-    ) -> str:
-        """Create target NotebookLM notebook if it does not exist, and upload compendiums as sources."""
-        # 1. Locate or create destination notebook
-        nb_id = self.client.create_notebook(notebook_title)
+        notebook_title: str,
+        source_dir: Path,
+        *,
+        progress: ProgressFn | None = None,
+    ) -> SyncResult:
+        """Upload every compendium in `source_dir`, replacing same-titled sources."""
+        status = self.client.check_session()
+        if not status.ok:
+            raise SessionError(status.detail, hint="Run `notebook-alchemy login`.")
+        files = sorted(source_dir.glob("*.md")) if source_dir.is_dir() else []
+        if not files:
+            raise VaultError(
+                f"No compendiums found in {source_dir}.",
+                hint="Run `notebook-alchemy run <source>` first, or pass --source-dir.",
+            )
+        for f in files:
+            if "sample_data: true" in f.read_text(encoding="utf-8")[:800]:
+                raise AlchemyError(
+                    f"{source_dir} holds mock sample data; it will not be uploaded.",
+                    hint="Run `notebook-alchemy run <real source>` to build real compendiums.",
+                )
 
-        # 2. Upload master catalog and all generated compendiums as clean text sources
-        vault_dir = self.vault.vault_path / "compendiums"
-        if not vault_dir.exists():
-            self.run_distillation(notebook_title, force_offline=True, write_to_vault=True)
+        nb_id, created = self.client.create_notebook(notebook_title)
+        before = [] if created else [s for s in self.client.list_sources(nb_id) if s.get("id")]
 
-        uploaded_count = 0
-        for md_file in sorted(vault_dir.glob("*.md")):
+        failed: list[str] = []
+        new_ids: dict[str, str] = {}  # wanted title -> id of the source we just added
+        total_steps = len(files) * 2
+        for done, md_file in enumerate(files, 1):
+            title = md_file.stem.replace("_", " ")
             doc = SourceDocument(
                 source_id=md_file.stem,
-                title=md_file.stem.replace("_", " "),
+                title=title,
                 content=md_file.read_text(encoding="utf-8"),
                 source_type="compendium",
             )
-            self.client.add_source_document(nb_id, doc)
-            uploaded_count += 1
+            try:
+                new_ids[title] = self.client.add_source_document(nb_id, doc)
+            except AlchemyError as exc:
+                failed.append(f"{md_file.name}: {exc.message}")
+            if progress:
+                progress("Uploading to NotebookLM", done, total_steps)
 
-        logger.info(
-            "Synced %d compendiums to NotebookLM notebook '%s' (%s)",
-            uploaded_count,
-            notebook_title,
-            nb_id,
-        )
-        return nb_id
+        # NotebookLM can reset a title to the file name once processing ends, so wait for every
+        # source, then read the titles back and correct any that changed.
+        titles_by_id: dict[str, str] = {}
+        for done, (title, source_id) in enumerate(list(new_ids.items()), 1):
+            try:
+                self.client.wait_for_source(nb_id, source_id)
+            except AlchemyError as exc:
+                failed.append(f"{title}: processing did not finish: {exc.message}")
+                new_ids.pop(title)
+            if progress:
+                progress("Uploading to NotebookLM", len(files) + done, total_steps)
+        if new_ids:
+            titles_by_id = {str(s["id"]): str(s.get("title", "")) for s in self.client.list_sources(nb_id)}
+            for title, source_id in list(new_ids.items()):
+                if titles_by_id.get(source_id) != title:
+                    try:
+                        self.client.rename_source(nb_id, source_id, title)
+                        titles_by_id[source_id] = title
+                    except AlchemyError as exc:
+                        failed.append(f"{title}: could not set the title: {exc.message}")
+
+        # Remove every older source whose title matches one we uploaded, and every source the last
+        # sync uploaded that this build no longer contains (domains are re-discovered each run).
+        wanted = {normalize_title(t) for t in new_ids}
+        stale = {normalize_title(t) for t in self._read_synced_titles(nb_id)} - wanted
+        added = set(new_ids.values())
+        replaced = pruned = 0
+        for old in before:
+            key = normalize_title(str(old.get("title", "")))
+            if str(old["id"]) in added or (key not in wanted and key not in stale):
+                continue
+            try:
+                self.client.delete_source(nb_id, str(old["id"]))
+                if key in wanted:
+                    replaced += 1
+                else:
+                    pruned += 1
+            except AlchemyError as exc:
+                failed.append(f"{old.get('title', old['id'])}: old copy not removed: {exc.message}")
+
+        if new_ids:  # final read-back: every title exactly once
+            counts: dict[str, int] = {}
+            for s in self.client.list_sources(nb_id):
+                key = normalize_title(str(s.get("title", "")))
+                counts[key] = counts.get(key, 0) + 1
+            failed.extend(
+                f"{title}: appears {counts.get(normalize_title(title), 0)} times in the notebook"
+                for title in new_ids
+                if counts.get(normalize_title(title), 0) != 1
+            )
+        if failed:
+            raise SyncError(
+                f"{len(failed)} problems while uploading {len(files)} files.",
+                failed=failed,
+                hint="Fix the cause above and run the same command again; it replaces, not duplicates.",
+            )
+        self._write_synced_titles(nb_id, list(new_ids))
+        return SyncResult(nb_id, created, len(new_ids), replaced, pruned)
+
+    # -- append --
+
+    @staticmethod
+    def _read_domain(path: Path) -> tuple[str, int] | None:
+        head = path.read_text(encoding="utf-8")[:1500]
+        dm = re.search(r"^domain:\s*(\".*\")\s*$", head, re.MULTILINE)
+        vm = re.search(r"^volume:\s*(\d+)", head, re.MULTILINE)
+        if not dm:
+            return None
+        try:
+            return json.loads(dm.group(1)), int(vm.group(1)) if vm else 1
+        except ValueError:
+            return None
 
     def append_incremental_sources(
         self,
         new_videos: list[dict[str, Any]],
-        notebook_title: str = "Example Notebook",
-    ) -> int:
-        """Incrementally append new videos to the Master Catalog and corresponding domain compendiums."""
-        vault_dir = self.vault.vault_path / "compendiums"
-        vault_dir.mkdir(parents=True, exist_ok=True)
+        source_dir: Path,
+        *,
+        domain: str | None = None,
+        notebook_title: str = "Untitled",
+    ) -> AppendResult:
+        """Add videos to the catalog and to the matching domain compendium. Duplicates are skipped."""
+        source_dir.mkdir(parents=True, exist_ok=True)
+        catalog_file = source_dir / "MASTER_SOURCES_CATALOG.md"
+        catalog_text = catalog_file.read_text(encoding="utf-8") if catalog_file.exists() else ""
 
-        # 1. Update Master Sources Catalog
-        catalog_file = vault_dir / "MASTER_SOURCES_CATALOG.md"
-        if catalog_file.exists():
-            existing_catalog = catalog_file.read_text(encoding="utf-8")
-            append_lines = []
-            for v in new_videos:
-                vid_id = v.get("id") or "new_yt"
-                title = (v.get("title") or "New Video").replace("|", "-")
-                url = v.get("url") or "https://youtube.com"
-                topic = v.get("topic") or "General"
-                append_lines.append(f"| + | `{vid_id}` | {title} | {topic} | [Link]({url}) |")
+        fresh: list[dict[str, Any]] = []
+        for v in new_videos:
+            vid, url = str(v.get("id") or ""), str(v.get("url") or "")
+            if (vid and f"`{vid}`" in catalog_text) or (url and url in catalog_text):
+                continue
+            fresh.append(v)
+        skipped = len(new_videos) - len(fresh)
+        if not fresh:
+            return AppendResult(0, skipped, [])
+
+        titles = [str(v.get("title") or "") for v in fresh]
+        if domain:
+            assignment = {domain: list(range(len(fresh)))}
+        else:
+            self.analyzer.force_offline = not self.config.has_gemini_key
+            clusters = self.analyzer.cluster_titles(titles)
+            assignment = {}
+            used: set[int] = set()
+            for name, cluster_titles in clusters.items():
+                idxs = []
+                for t in cluster_titles:
+                    i = next(k for k, tt in enumerate(titles) if tt == t and k not in used)
+                    used.add(i)
+                    idxs.append(i)
+                assignment[name] = idxs
+
+        rows = []
+        for name, idxs in assignment.items():
+            for i in idxs:
+                v = fresh[i]
+                title = str(v.get("title") or "New Video").replace("|", "-")
+                rows.append(
+                    f"| + | `{v.get('id') or 'new'}` | {title} | {name.replace('|', '-')} | "
+                    f"[Link]({v.get('url') or ''}) |"
+                )
+        if catalog_text:
+            catalog_text = re.sub(
+                r"^total_sources:\s*(\d+)",
+                lambda m: f"total_sources: {int(m.group(1)) + len(fresh)}",
+                catalog_text,
+                count=1,
+                flags=re.MULTILINE,
+            )
             catalog_file.write_text(
-                existing_catalog + "\n" + "\n".join(append_lines) + "\n", encoding="utf-8"
+                catalog_text.rstrip("\n") + "\n" + "\n".join(rows) + "\n", encoding="utf-8"
             )
         else:
-            cat_content = self.synthesizer.generate_master_sources_catalog(
-                new_videos, notebook_title
+            seed = [
+                {**v, "topic": next(n for n, ix in assignment.items() if i in ix)}
+                for i, v in enumerate(fresh)
+            ]
+            catalog_file.write_text(
+                self.synthesizer.generate_master_sources_catalog(seed, notebook_title),
+                encoding="utf-8",
             )
-            catalog_file.write_text(cat_content, encoding="utf-8")
 
-        # 2. Cluster new videos and auto-append to domain compendiums
-        titles = [str(v.get("title", "")) for v in new_videos]
-        clusters = self.analyzer._cluster_topics(titles)
-        updated_compendiums = 0
+        existing: dict[str, list[tuple[int, Path]]] = {}
+        for f in source_dir.glob("*.md"):
+            info = self._read_domain(f)
+            if info:
+                existing.setdefault(info[0].lower(), []).append((info[1], f))
+        taken = {f.stem.lower() for f in source_dir.glob("*.md")}
 
-        for domain, d_titles in clusters.items():
-            if not d_titles:
-                continue
-            safe_name = self.synthesizer._safe_filename(domain)
-            target_comp = vault_dir / f"{safe_name}.md"
-            matching_videos = [v for v in new_videos if v.get("title") in d_titles]
-
-            if target_comp.exists():
-                old_text = target_comp.read_text(encoding="utf-8")
-                new_text = self.synthesizer.append_to_domain_compendium(
-                    old_text, matching_videos, domain=domain
+        updated: list[str] = []
+        for name, idxs in assignment.items():
+            matching = [fresh[i] for i in idxs]
+            versions = existing.get(name.lower())
+            if versions:
+                target = max(versions)[1]
+                target.write_text(
+                    self.synthesizer.append_to_domain_compendium(
+                        target.read_text(encoding="utf-8"), matching, domain=name
+                    ),
+                    encoding="utf-8",
                 )
-                target_comp.write_text(new_text, encoding="utf-8")
-                updated_compendiums += 1
             else:
+                slug = safe_filename(name)
+                if slug.lower() in taken:
+                    slug = f"{slug}_new"
+                taken.add(slug.lower())
                 comp = self.synthesizer.synthesize_cluster(
-                    domain, matching_videos, volume=1, force_offline=True
+                    name,
+                    matching,
+                    volume=1,
+                    force_offline=True,
+                    notebook_title=notebook_title,
+                    slug=slug,
                 )
-                target_comp.write_text(comp.content, encoding="utf-8")
-                updated_compendiums += 1
-
-        return updated_compendiums
+                target = source_dir / f"{slug}.md"
+                target.write_text(comp.content, encoding="utf-8")
+            updated.append(target.name)
+        return AppendResult(len(fresh), skipped, updated)

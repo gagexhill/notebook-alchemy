@@ -1,23 +1,18 @@
-## Description
+## Summary
 
-Please include a concise summary of the change, issue addressed, and motivation.
+What changed and why. Link the issue: `Refs #`. Use `Closes #` only when the issue's whole acceptance is met.
 
-Fixes #(issue)
+## Type of change
 
-## Type of Change
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Breaking change (a command, option or output format changes)
+- [ ] Documentation
+- [ ] Tests
 
-- [ ] 🐛 Bug fix (non-breaking change fixing an issue)
-- [ ] ✨ New feature (non-breaking change adding functionality)
-- [ ] 💥 Breaking change (fix or feature that causes existing functionality to change)
-- [ ] 📚 Documentation update
-- [ ] 🧪 Tests / Benchmarks / Performance enhancement
+## Checks
 
-## Security & Quality Pre-Flight Checklist
-
-Before submitting this PR, please check all boxes:
-
-- [ ] **No Leaked Secrets**: Verified that no personal emails, `.env` files, cookies, or API keys are committed or staged.
-- [ ] **Code Quality**: Formatted and linted code via `ruff check` and `ruff format`.
-- [ ] **Unit Tests**: All unit tests pass locally (`pytest` or `python -m unittest discover tests`).
-- [ ] **New Tests Added**: Added test cases covering any newly introduced functions or edge cases.
-- [ ] **Docs Updated**: Updated README or inline docstrings if modifying public CLI or configuration options.
+- [ ] `python -m ruff check .` and `python -m ruff format --check .` pass
+- [ ] `python -m pytest` passes, with a test that fails without the fix
+- [ ] No keys, cookies, session files or `.env` are staged
+- [ ] README and `--help` text match any changed command or option

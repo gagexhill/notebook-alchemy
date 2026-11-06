@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: "💬 GitHub Discussions"
+  - name: "GitHub Discussions"
     url: "https://github.com/gagexhill/notebook-alchemy/discussions"
     about: "Ask questions, share workflows, propose architectural ideas, and engage with the community."
-  - name: "🔒 Security Vulnerability Report"
+  - name: "Report a security vulnerability"
     url: "https://github.com/gagexhill/notebook-alchemy/security/policy"
     about: "Privately disclose sensitive security vulnerabilities according to our security policy."
