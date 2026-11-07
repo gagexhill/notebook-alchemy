@@ -237,6 +237,8 @@ class AlchemyEngine:
             if progress:
                 progress("Building compendiums", done, len(volumes))
 
+        warnings.extend(self._transcript_summary(compendiums))
+
         vault_dir = self.vault.compendium_dir(report.notebook_title)
         index_file: Path | None = None
         if write_to_vault:
@@ -253,6 +255,23 @@ class AlchemyEngine:
             cluster_method=report.cluster_method,
             warnings=warnings,
         )
+
+    def _transcript_summary(self, compendiums: list[DomainCompendium]) -> list[str]:
+        """One line for the whole run, instead of one per volume, about missing transcripts."""
+        lines: list[str] = []
+        title_only = [c for c in compendiums if c.title_only]
+        blocked = self.transcripts.blocked_total
+        if blocked:
+            lines.append(
+                f"YouTube blocked caption requests for {blocked} videos in this run. Run the same command "
+                "later: captions already fetched are cached, so it continues where it stopped."
+            )
+        if title_only:
+            lines.append(
+                f"{len(title_only)} of {len(compendiums)} volumes had no transcripts, so they are offline "
+                "indexes (titles and links, no summary) and used no Gemini request."
+            )
+        return lines
 
     @staticmethod
     def _chunks(items: list[Any], size: int) -> list[list[Any]]:

@@ -142,7 +142,7 @@ src/notebook_alchemy/
 - **Replace, not duplicate** — a re-run replaces same-titled sources and removes the ones it uploaded last time that are gone, so repeated runs do not pile up in the notebook. Sources you added yourself are never touched.
 - **Survives a busy model** — if the default Gemini model is overloaded, retired, or out of daily quota, the run moves to the fallback model and says so.
 - **Every title assigned** — clustering covers the whole channel, not a sample, and reports what it could not place.
-- **Honest offline mode** — without a key you get an index and a catalog, labelled as such.
+- **Honest offline mode** — without a key you get an index and a catalog, labelled as such. A volume whose videos have no reachable captions (YouTube sometimes blocks caption requests for a while) is written as an index too, not a summary invented from titles, and uses no Gemini request.
 - **Safe writes** — output is namespaced per source, built in staging, and swapped in whole, so a failed run leaves the previous build intact.
 - **A known upload account** — `status`, `run` and `sync` name the Google account that receives uploads, or say `unknown` when the `notebooklm` profile did not record one. The first upload to an account asks first (`--yes` skips the question), and asks again if the account behind a profile changes. An account that cannot be identified is asked about on every upload.
 - **Key hygiene** — the Gemini key travels in a header only and is removed from every error and log line.
