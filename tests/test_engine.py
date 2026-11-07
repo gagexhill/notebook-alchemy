@@ -22,7 +22,6 @@ MOCK_DIR = "sample_catalog_mock_data"
 def _config(tmp_path: Path) -> AlchemyConfig:
     return AlchemyConfig(
         vault_path=tmp_path / "vault",
-        state_dir=tmp_path / "state",
         cache_dir=tmp_path / "cache",
         gemini_api_key="",
     )
@@ -114,7 +113,7 @@ def test_max_per_vol_is_validated(engine: AlchemyEngine) -> None:
 
 
 def test_duplicate_titles_keep_distinct_ids(engine: AlchemyEngine) -> None:
-    videos = [VideoSourceSummary(f"id{i}", "Same Title", f"https://u/{i}", "yt", "ready") for i in range(4)]
+    videos = [VideoSourceSummary(f"id{i}", "Same Title", f"https://u/{i}", "ready") for i in range(4)]
     report = engine.analyzer._build_report(
         nb_id="nb_dup",
         nb_title="Dup",
@@ -135,7 +134,7 @@ def test_duplicate_titles_keep_distinct_ids(engine: AlchemyEngine) -> None:
 
 def _report_with_domains(engine: AlchemyEngine, domains: dict[str, int]):  # type: ignore[no-untyped-def]
     videos = [
-        VideoSourceSummary(f"{d[:3]}{i}", f"{d} talk {i}", f"https://u/{d}/{i}", "yt", "ready")
+        VideoSourceSummary(f"{d[:3]}{i}", f"{d} talk {i}", f"https://u/{d}/{i}", "ready")
         for d, n in domains.items()
         for i in range(n)
     ]
@@ -307,7 +306,7 @@ def _built(engine: AlchemyEngine, tmp_path: Path) -> Path:
     report = engine.analyzer._build_report(
         nb_id="nb",
         nb_title="Chan",
-        videos=[VideoSourceSummary("a1", "Build a React app", "https://youtu.be/a1", "yt", "ready")],
+        videos=[VideoSourceSummary("a1", "Build a React app", "https://youtu.be/a1", "ready")],
         others=[],
         total_sources=1,
         origin="youtube",
@@ -330,17 +329,6 @@ def test_append_adds_once_and_skips_duplicates(engine: AlchemyEngine, tmp_path: 
     assert catalog.count("`n1`") == 1 and "total_sources: 2" in catalog
     body = (directory / first.updated_files[0]).read_text(encoding="utf-8")
     assert "source_count: 2" in body and "[Added] [New video]" in body
-
-
-def test_append_moves_an_older_catalog_to_the_new_name(engine: AlchemyEngine, tmp_path: Path) -> None:
-    directory = _built(engine, tmp_path)
-    (directory / "_MASTER_SOURCES_CATALOG.md").rename(directory / "MASTER_SOURCES_CATALOG.md")
-    video = {"id": "n2", "title": "Another video", "url": "https://youtu.be/n2"}
-    result = engine.append_incremental_sources([video], directory)
-    assert result.added == 1
-    assert not (directory / "MASTER_SOURCES_CATALOG.md").exists()
-    catalog = (directory / "_MASTER_SOURCES_CATALOG.md").read_text(encoding="utf-8")
-    assert "`n2`" in catalog and "total_sources: 2" in catalog
 
 
 def test_append_creates_a_new_domain_file(engine: AlchemyEngine, tmp_path: Path) -> None:

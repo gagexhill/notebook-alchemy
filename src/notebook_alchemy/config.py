@@ -24,13 +24,19 @@ DEFAULT_NOTEBOOKLM_PROFILE = "default"
 # notebooklm-py 0.8.6 accepts ^[a-zA-Z0-9][a-zA-Z0-9_-]*$; the name is also a folder, so Windows
 # device names are refused too.
 _PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_WINDOWS_RESERVED = frozenset(
+WINDOWS_RESERVED_NAMES = frozenset(
     {"con", "prn", "aux", "nul"} | {f"{p}{n}" for p in ("com", "lpt") for n in range(1, 10)}
 )
 DEFAULT_MAX_CONCURRENCY = 4
 DEFAULT_MAX_PER_VOLUME = 50
 MAX_ALLOWED_CONCURRENCY = 16
-_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
 
 
 def is_usable_api_key(key: str | None) -> bool:
@@ -72,7 +78,7 @@ def _load_dotenv_simple(env_path: Path | None = None) -> None:
 def validate_profile_name(name: str, *, source: str = "ALCHEMY_NOTEBOOKLM_PROFILE") -> str:
     """A notebooklm profile name: letters, digits, `_` and `-`, starting with a letter or digit."""
     value = name.strip()
-    if not _PROFILE_NAME.match(value) or value.lower() in _WINDOWS_RESERVED:
+    if not _PROFILE_NAME.match(value) or value.lower() in WINDOWS_RESERVED_NAMES:
         where = " (in .env or your environment)" if source.isupper() else ""
         raise ConfigError(
             f"{source}={name!r}{where} is not a usable NotebookLM profile name.",
@@ -156,9 +162,7 @@ class AlchemyConfig:
     """Runtime configuration for the Alchemy engine."""
 
     env: str = "development"
-    log_level: str = "INFO"
     vault_path: Path = field(default_factory=lambda: Path("./vault").resolve())
-    state_dir: Path = field(default_factory=lambda: Path("./.notebooklm").resolve())
     session_file: Path | None = None
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".notebook-alchemy" / "cache")
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
@@ -177,10 +181,10 @@ class AlchemyConfig:
         _load_dotenv_simple()
 
         level = os.getenv("ALCHEMY_LOG_LEVEL", "INFO").strip().upper() or "INFO"
-        if level not in _LOG_LEVELS:
+        if level not in LOG_LEVELS:
             raise ConfigError(
                 f"ALCHEMY_LOG_LEVEL={level!r} is not a log level.",
-                hint=f"Use one of: {', '.join(_LOG_LEVELS)}.",
+                hint=f"Use one of: {', '.join(LOG_LEVELS)}.",
             )
 
         def _path(name: str, default: Path | None) -> Path | None:
@@ -189,9 +193,7 @@ class AlchemyConfig:
 
         return cls(
             env=os.getenv("ALCHEMY_ENV", "development"),
-            log_level=level,
             vault_path=_path("ALCHEMY_VAULT_PATH", Path("./vault").resolve()),  # type: ignore[arg-type]
-            state_dir=_path("ALCHEMY_STATE_DIR", Path("./.notebooklm").resolve()),  # type: ignore[arg-type]
             session_file=_path("ALCHEMY_SESSION_FILE", None),
             cache_dir=_path("ALCHEMY_CACHE_DIR", Path.home() / ".notebook-alchemy" / "cache"),  # type: ignore[arg-type]
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),

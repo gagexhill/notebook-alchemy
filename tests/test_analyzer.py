@@ -73,7 +73,7 @@ def test_unknown_notebook_is_an_error(tmp_path) -> None:
     state = Path.home() / ".notebooklm" / "profiles" / "default" / "storage_state.json"
     state.parent.mkdir(parents=True)
     state.write_text("{}", encoding="utf-8")
-    config = AlchemyConfig(state_dir=tmp_path / "state", gemini_api_key="")
+    config = AlchemyConfig(gemini_api_key="")
     client = NotebookLMClient(
         config, runner=lambda cmd, **kw: __import__("subprocess").CompletedProcess(cmd, 0, "[]", "")
     )
@@ -171,7 +171,7 @@ def test_duplicate_titles_keep_distinct_videos() -> None:
     assert report.cluster_method == "gemini"
     from notebook_alchemy.analyzer import VideoSourceSummary
 
-    same = [VideoSourceSummary(f"id{i}", "Same Title", f"https://u/{i}", "yt", "ready") for i in range(4)]
+    same = [VideoSourceSummary(f"id{i}", "Same Title", f"https://u/{i}", "ready") for i in range(4)]
     indices = analyzer._cluster_indices([v.title for v in same])
     assert sorted(i for ids in indices.values() for i in ids) == [0, 1, 2, 3]
 

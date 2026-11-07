@@ -46,7 +46,6 @@ class VideoSourceSummary:
     source_id: str
     title: str
     url: str
-    source_type: str
     status: str
     duration_seconds: int = 0
 
@@ -67,7 +66,6 @@ class DryRunReport:
     total_estimated_tokens: int
     estimated_input_cost_usd: float
     estimated_synthesis_output_cost_usd: float
-    domain_topic_clusters: dict[str, list[str]] = field(default_factory=dict)
     domain_videos: dict[str, list[VideoSourceSummary]] = field(default_factory=dict)
     is_mock: bool = False
     origin: str = "youtube"  # youtube | notebooklm | mock
@@ -271,17 +269,15 @@ class NotebookAnalyzer:
         url: str,
         limit: int | None = None,
         *,
-        use_mock: bool = False,
         progress: ProgressFn | None = None,
     ) -> DryRunReport:
         """Scan a YouTube channel, playlist or video. Raises ChannelScanError on failure."""
-        scan = ChannelScanner().scan(url, limit=limit, use_mock=use_mock)
+        scan = ChannelScanner().scan(url, limit=limit)
         videos = [
             VideoSourceSummary(
                 source_id=v.id,
                 title=v.title,
                 url=v.url,
-                source_type="youtube_video",
                 status="ready",
                 duration_seconds=v.duration_seconds,
             )
@@ -294,7 +290,7 @@ class NotebookAnalyzer:
             videos=videos,
             others=[],
             total_sources=len(videos),
-            origin="mock" if not scan.is_live else "youtube",
+            origin="youtube",
             progress=progress,
         )
 
@@ -314,7 +310,6 @@ class NotebookAnalyzer:
                         source_id=str(s.get("id") or s.get("source_id") or ""),
                         title=str(s.get("title") or "Untitled Source"),
                         url=url,
-                        source_type=stype,
                         status=str(s.get("status") or "ready"),
                     )
                 )
@@ -352,7 +347,6 @@ class NotebookAnalyzer:
             total_estimated_tokens=total_tokens,
             estimated_input_cost_usd=round(input_cost, 4),
             estimated_synthesis_output_cost_usd=round(output_cost, 4),
-            domain_topic_clusters={d: [v.title for v in vs] for d, vs in domain_videos.items()},
             domain_videos=domain_videos,
             is_mock=origin == "mock",
             origin=origin,

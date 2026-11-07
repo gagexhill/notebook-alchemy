@@ -26,7 +26,7 @@ NOTEBOOKS = json.dumps([{"id": "nb-1", "title": "Alpha"}, {"id": "nb-2", "title"
 
 
 def _client(tmp_path: Path, process: FakeProcess | None = None, **cfg) -> NotebookLMClient:
-    config = AlchemyConfig(vault_path=tmp_path / "v", state_dir=tmp_path / "state", **cfg)
+    config = AlchemyConfig(vault_path=tmp_path / "v", **cfg)
     return NotebookLMClient(config, runner=process)
 
 
@@ -211,7 +211,7 @@ def test_profile_comes_from_config_and_an_explicit_profile_wins(tmp_path: Path) 
     process = FakeProcess(("list", 0, "[]", ""))
     _client(tmp_path, process, notebooklm_profile="work").list_notebooks()
     assert process.calls[-1][:3] == ["notebooklm", "--profile", "work"]
-    config = AlchemyConfig(state_dir=tmp_path / "s", notebooklm_profile="work")
+    config = AlchemyConfig(notebooklm_profile="work")
     NotebookLMClient(config, "other", runner=process).list_notebooks()
     assert process.calls[-1][:3] == ["notebooklm", "--profile", "other"]
 

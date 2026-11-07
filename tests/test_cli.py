@@ -59,7 +59,7 @@ def _scan_result(*titles: str) -> ChannelScanResult:
         ChannelVideo(f"vid{i:08d}", t, f"https://www.youtube.com/watch?v=vid{i:08d}", 120)
         for i, t in enumerate(titles)
     ]
-    return ChannelScanResult("My Channel", "https://www.youtube.com/@my/videos", len(videos), videos, True)
+    return ChannelScanResult("My Channel", videos)
 
 
 @pytest.fixture
@@ -295,17 +295,6 @@ def _seed_cache_and_vault(env) -> tuple[Path, Path]:
     (vault / "A.md").write_text("built", encoding="utf-8")
     (vault / "_INDEX.md").write_text("index", encoding="utf-8")
     return cache, vault
-
-
-def test_clean_recognises_a_vault_from_before_the_underscore_names(
-    runner: CliRunner, isolated_environment
-) -> None:
-    vault = isolated_environment.work / "vault" / "old" / "compendiums"
-    vault.mkdir(parents=True)
-    (vault / "MASTER_SOURCES_CATALOG.md").write_text("catalog", encoding="utf-8")
-    result = runner.invoke(cli, ["clean", "--vaults", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert not vault.exists()
 
 
 def test_clean_defaults_to_the_cache_and_keeps_vaults(runner: CliRunner, isolated_environment) -> None:
