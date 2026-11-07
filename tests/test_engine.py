@@ -250,6 +250,20 @@ def test_uploads_and_waits_overlap_but_titles_are_fixed_only_after_all_waits(tmp
     )
 
 
+def test_an_unexpected_error_in_one_upload_is_reported_and_the_rest_reconcile(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+
+    def flaky(cmd: list[str], **kw: object):
+        if "add" in cmd and any("Beta" in part for part in cmd):
+            raise RuntimeError("something nobody expected")
+        return fake(cmd, **kw)
+
+    with pytest.raises(SyncError) as err:
+        _fake_engine(tmp_path, flaky).sync_to_notebooklm("Chan", _real_dir(tmp_path))  # type: ignore[arg-type]
+    assert any("Beta_Topics.md" in f and "RuntimeError" in f for f in err.value.failed)
+    assert fake.titles("Chan") == ["Alpha Topics"]  # the other upload was waited on and kept
+
+
 def test_resync_replaces_old_copies_including_filename_titled_ones(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     fake.seed("Chan", ["Alpha Topics", "Alpha Topics", "Beta_Topics.md", "My own notes"])

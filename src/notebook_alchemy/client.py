@@ -107,7 +107,7 @@ def upload_confirmed(identity: AccountIdentity) -> bool:
     entry = data.get("profiles", {}).get(identity.profile) if isinstance(data.get("profiles"), dict) else None
     if not isinstance(salt, str) or not isinstance(entry, str):
         return False
-    return hmac.compare_digest(entry, _account_hash(identity.email, salt))
+    return hmac.compare_digest(entry.encode(), _account_hash(identity.email, salt).encode())
 
 
 def record_upload_consent(identity: AccountIdentity) -> None:
@@ -196,12 +196,14 @@ class NotebookLMClient:
 
         Read from package metadata: starting `notebooklm --version` takes seconds.
         """
-        if shutil.which(NOTEBOOKLM_BIN) is None:
+        found = shutil.which(NOTEBOOKLM_BIN)
+        if found is None:
             return None
         try:
-            return f"notebooklm-py {importlib.metadata.version('notebooklm-py')}"
+            version = importlib.metadata.version("notebooklm-py")
         except importlib.metadata.PackageNotFoundError:
-            return "installed (version unknown)"
+            return f"found at {found}, not installed in this Python (version unknown)"
+        return f"notebooklm-py {version}"
 
     def check_session(self) -> SessionStatus:
         """Ask NotebookLM whether the stored session works (one read-only list call)."""
@@ -390,7 +392,8 @@ class NotebookLMClient:
     def add_source_document(self, notebook_id: str, document: SourceDocument) -> str:
         """Upload one document as a file source (content never travels on the command line)."""
         safe = re.sub(r"[^\w\-]+", "_", document.title).strip("_") or "source"
-        with tempfile.TemporaryDirectory(prefix="notebook-alchemy-") as tmp:
+        # A scanner briefly holding the temp file must not turn a finished upload into an error.
+        with tempfile.TemporaryDirectory(prefix="notebook-alchemy-", ignore_cleanup_errors=True) as tmp:
             path = Path(tmp) / f"{safe[:80]}.md"
             path.write_text(document.content, encoding="utf-8")
             data = self._run(

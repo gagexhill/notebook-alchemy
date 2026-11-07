@@ -11,6 +11,7 @@ from typing import ClassVar
 import pytest
 from youtube_transcript_api import (
     AgeRestricted,
+    FailedToCreateConsentCookie,
     NoTranscriptFound,
     PoTokenRequired,
     RequestBlocked,
@@ -325,17 +326,34 @@ def test_blocked_is_not_cached(tmp_path: Path) -> None:
     assert not (tmp_path / "cache" / "abcdefghijk.json").exists()
 
 
-def test_a_proof_of_origin_demand_counts_as_blocked_and_stops_later_requests(tmp_path: Path) -> None:
+def test_a_second_proof_of_origin_demand_stops_later_requests(tmp_path: Path) -> None:
     def behaviour(vid: str):
         raise PoTokenRequired(vid)
 
     api = _Api(behaviour)
     tm = _manager(tmp_path, api)
-    first = tm.resolve("abcdefghijk")
-    later = tm.resolve("bcdefghijkl")
-    assert first.source == "blocked" and later.source == "blocked"
-    assert len(api.fetches) == 1  # no retries, and the second video never asked
+    results = [tm.resolve(v) for v in ("abcdefghijk", "bcdefghijkl", "cdefghijklm")]
+    assert [r.source for r in results] == ["blocked", "blocked", "blocked"]
+    assert len(api.fetches) == 2  # no retries; the third video never asked
     assert not (tmp_path / "cache").exists()  # a block is not remembered as "no captions"
+
+
+def test_a_consent_page_failure_is_a_block_not_missing_captions(tmp_path: Path) -> None:
+    def behaviour(vid: str):
+        raise FailedToCreateConsentCookie(vid)
+
+    api = _Api(behaviour)
+    tm = _manager(tmp_path, api)
+    assert tm.resolve("abcdefghijk").source == "blocked"
+    assert tm.resolve("bcdefghijkl").source == "blocked" and len(api.fetches) == 1
+    assert not (tmp_path / "cache").exists()
+
+
+def test_only_youtube_video_ids_reach_the_captions_api(tmp_path: Path) -> None:
+    api = _Api(lambda vid: pytest.fail("network used"))
+    tm = _manager(tmp_path, api)
+    for vid in ("mock_001", "", "0f3c2a9e-uuid-from-notebooklm", "short"):
+        assert tm.resolve(vid).source == "skipped"
 
 
 def test_any_other_retrieval_failure_is_remembered_as_unavailable(tmp_path: Path) -> None:
@@ -381,13 +399,6 @@ def test_transient_errors_retry(tmp_path: Path) -> None:
 
     assert _manager(tmp_path, _Api(behaviour)).resolve("abcdefghijk").text == "ok"
     assert calls["n"] == 3
-
-
-def test_mock_and_empty_ids_never_hit_the_network(tmp_path: Path) -> None:
-    api = _Api(lambda vid: pytest.fail("network used"))
-    tm = _manager(tmp_path, api)
-    assert tm.resolve("mock_001").source == "skipped"
-    assert tm.resolve("").source == "skipped"
 
 
 def test_cache_path_is_sanitised(tmp_path: Path) -> None:

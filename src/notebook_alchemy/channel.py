@@ -29,6 +29,8 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # exists, a caption track the uploader wrote is preferred over an automatic one in any language.
 PREFERRED_LANGUAGES = ("en", "en-US", "en-GB")
 NEGATIVE_CACHE_DAYS = 7
+PO_TOKEN_STOP_AFTER = 2  # proof-of-origin demands before the run stops asking YouTube for captions
+_YOUTUBE_ID_RE = re.compile(r"^[\w-]{11}$")
 
 
 @dataclass
@@ -277,6 +279,8 @@ class TranscriptManager:
         # Set once YouTube blocks a request: the rest of the run would be blocked too, so later
         # videos skip the network instead of each waiting for the same answer.
         self._blocked = threading.Event()
+        self._po_token_demands = 0
+        self._po_lock = threading.Lock()
 
     # -- helpers --
 
@@ -365,8 +369,8 @@ class TranscriptManager:
         local = self._check_local_text_files(video_id, title)
         if local:
             return TranscriptResult(video_id, local, "local")
-        if not video_id.strip() or video_id.startswith("mock_"):
-            return TranscriptResult(video_id, "", "skipped", "no real video id")
+        if not _YOUTUBE_ID_RE.fullmatch(video_id.strip()):
+            return TranscriptResult(video_id, "", "skipped", "no YouTube video id")
         cached = self._read_cache(video_id)
         if cached:
             return cached
@@ -378,9 +382,10 @@ class TranscriptManager:
         import youtube_transcript_api as yta  # imported on use, like yt-dlp
 
         api = (self._api_factory or yta.YouTubeTranscriptApi)()
-        # Blocked: this network is refused (an IP block, or YouTube wants a proof-of-origin token);
-        # every retry and every later video gets the same answer, so stop and do not cache it.
-        blocked = (yta.RequestBlocked, yta.PoTokenRequired)
+        # Blocked: this network is refused (an IP block, or a consent page that cannot be passed
+        # from here); every retry and every later video gets the same answer, so stop the run's
+        # caption requests and cache nothing about the video.
+        blocked = (yta.RequestBlocked, yta.FailedToCreateConsentCookie)
         # Retried: the request or the page YouTube sent back failed.
         transient = (yta.YouTubeRequestFailed, yta.YouTubeDataUnparsable)
         last_exc: Exception | None = None
@@ -394,6 +399,16 @@ class TranscriptManager:
                 return TranscriptResult(video_id, text, "youtube")
             except blocked as exc:
                 self._blocked.set()
+                return TranscriptResult(
+                    video_id, "", "blocked", f"YouTube blocked the request ({type(exc).__name__})"
+                )
+            except yta.PoTokenRequired as exc:
+                # YouTube can demand a proof-of-origin token for some videos only, so one demand
+                # is not cached; the run stops asking after a second.
+                with self._po_lock:
+                    self._po_token_demands += 1
+                    if self._po_token_demands >= PO_TOKEN_STOP_AFTER:
+                        self._blocked.set()
                 return TranscriptResult(
                     video_id, "", "blocked", f"YouTube blocked the request ({type(exc).__name__})"
                 )
