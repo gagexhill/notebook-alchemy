@@ -24,7 +24,12 @@ from .client import NotebookLMClient
 from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig
 from .engine import AlchemyEngine
 from .errors import AlchemyError, NotebookLMError, SessionError, VaultError
-from .synthesizer import CATALOG_FILENAME, INDEX_FILENAME
+from .synthesizer import (
+    CATALOG_FILENAME,
+    INDEX_FILENAME,
+    LEGACY_CATALOG_FILENAME,
+    LEGACY_INDEX_FILENAME,
+)
 from .ui import esc, handle_errors
 
 _LOG_LEVELS = {
@@ -265,7 +270,7 @@ def run_pipeline(
             ui.warn(esc(w))
 
     where = (
-        f"{_short(result.vault_directory)}  (index: INDEX.md)"
+        f"{_short(result.vault_directory)}  (index: {INDEX_FILENAME})"
         if result.vault_directory
         else "not written (--preview-only)"
     )
@@ -565,6 +570,10 @@ def append_video(
 # --- clean / test --------------------------------------------------------------------------------
 
 
+# Files that mark a folder as this tool's vault output, in current and earlier layouts.
+_VAULT_MARKERS = (INDEX_FILENAME, CATALOG_FILENAME, LEGACY_INDEX_FILENAME, LEGACY_CATALOG_FILENAME)
+
+
 def _is_cache_record(path: Path) -> bool:
     """True for a transcript cache file this tool wrote (JSON object with a video_id)."""
     try:
@@ -621,7 +630,7 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: 
                 skipped.append(f.name)
     if do_vaults:
         for d in engine.vault.existing_compendium_dirs():
-            if (d / INDEX_FILENAME).is_file() or (d / CATALOG_FILENAME).is_file():
+            if any((d / n).is_file() for n in _VAULT_MARKERS):
                 targets.append(("vault", d))
             else:
                 skipped.append(str(d))
@@ -709,7 +718,9 @@ def run_automated_test() -> None:
             try:
                 built = engine.run_distillation(force_offline=True, dry_run=report, write_to_vault=True)
                 ok = built.total_compendiums >= 3 and bool(built.index_path and built.index_path.exists())
-                record("Compendiums build", ok, f"{built.total_compendiums} compendiums plus INDEX.md")
+                record(
+                    "Compendiums build", ok, f"{built.total_compendiums} compendiums plus {INDEX_FILENAME}"
+                )
             except AlchemyError as exc:
                 record("Compendiums build", False, exc.message)
 
