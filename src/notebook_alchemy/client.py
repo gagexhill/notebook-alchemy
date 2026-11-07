@@ -48,6 +48,69 @@ class SessionStatus:
     notebooks: int = 0
 
 
+@dataclass
+class AccountIdentity:
+    """The Google account a notebooklm profile is signed in to, as the profile itself records it.
+
+    `email` is None when the account cannot be read; it is never guessed. `detail` says why.
+    """
+
+    profile: str
+    email: str | None
+    detail: str = ""
+
+    @property
+    def display(self) -> str:
+        return self.email or "unknown"
+
+
+def consent_file() -> Path:
+    return Path.home() / ".notebook-alchemy" / "upload_accounts.json"
+
+
+def _read_consents() -> dict[str, Any]:
+    path = consent_file()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # An unreadable record means we cannot prove consent, so the user is asked again.
+        logger.warning("Could not read %s (%s); upload confirmation will be asked again.", path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def upload_confirmed(identity: AccountIdentity) -> bool:
+    """True when uploads to this profile were confirmed for this same, known account.
+
+    An unknown account is never confirmed: two different unknown accounts cannot be told apart.
+    """
+    if identity.email is None:
+        return False
+    entry = _read_consents().get(identity.profile)
+    return isinstance(entry, dict) and "email" in entry and entry["email"] == identity.email
+
+
+def record_upload_consent(identity: AccountIdentity) -> None:
+    """Remember that the user confirmed uploads to this profile and account (a known one only)."""
+    if identity.email is None:
+        return
+    path = consent_file()
+    data = _read_consents()
+    data[identity.profile] = {"email": identity.email}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise NotebookLMError(
+            f"Could not record the upload confirmation in {path}: {exc}",
+            hint="Check that the folder is writable, or pass --yes to skip the confirmation.",
+        ) from exc
+
+
 def normalize_title(title: str) -> str:
     """Compare source titles the way NotebookLM may rewrite them: no `.md`, underscores as spaces."""
     stem = title.strip()
@@ -70,12 +133,12 @@ class NotebookLMClient:
     def __init__(
         self,
         config: AlchemyConfig,
-        profile: str = "default",
+        profile: str | None = None,
         *,
         runner: Runner | None = None,
     ) -> None:
         self.config = config
-        self.profile = profile
+        self.profile = profile or config.notebooklm_profile
         self._runner = runner
 
     # -- session --
@@ -120,6 +183,48 @@ class NotebookLMClient:
         except NotebookLMError as exc:
             return SessionStatus(False, exc.message)
         return SessionStatus(True, "Session is active.", len(notebooks))
+
+    def upload_account(self) -> AccountIdentity:
+        """Read the account recorded on this profile with `notebooklm auth check --json`.
+
+        This is a local read (no network). The email is reported only when notebooklm itself
+        recorded one; otherwise it is None with the reason in `detail`.
+        """
+        if os.getenv("NOTEBOOKLM_AUTH_JSON"):
+            return AccountIdentity(
+                self.profile, None, "NOTEBOOKLM_AUTH_JSON is set; its account is not recorded."
+            )
+        cmd = self._command(["auth", "check"], as_json=True)
+        try:
+            res = (self._runner or subprocess.run)(
+                cmd, check=False, capture_output=True, text=True, encoding="utf-8", timeout=30.0
+            )
+        except FileNotFoundError:
+            return AccountIdentity(self.profile, None, "the `notebooklm` command was not found")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return AccountIdentity(self.profile, None, f"`notebooklm auth check` could not run: {exc}")
+        # auth check exits non-zero when a check fails but still prints its JSON report.
+        try:
+            data = json.loads((res.stdout or "").strip())
+        except ValueError:
+            return AccountIdentity(
+                self.profile, None, f"`notebooklm auth check` returned no report (exit {res.returncode})"
+            )
+        account = data.get("account") if isinstance(data, dict) else None
+        email = account.get("email") if isinstance(account, dict) else None
+        if isinstance(email, str) and "@" in email.strip():
+            return AccountIdentity(self.profile, email.strip())
+        if isinstance(data, dict) and "account" not in data:
+            return AccountIdentity(self.profile, None, "no session is stored for this profile")
+        return AccountIdentity(self.profile, None, "this profile's sign-in did not record an account")
+
+    def browser_accounts(self, browser: str) -> list[str]:
+        """Emails of the Google accounts a browser has signed in (`notebooklm auth inspect`)."""
+        data = self._run(["auth", "inspect", "--browser", browser], timeout=LIST_TIMEOUT)
+        accounts = data.get("accounts") if isinstance(data, dict) else None
+        if not isinstance(accounts, list):
+            raise NotebookLMError("`notebooklm auth inspect` returned an unexpected shape.")
+        return [str(a["email"]) for a in accounts if isinstance(a, dict) and a.get("email")]
 
     # -- process plumbing --
 

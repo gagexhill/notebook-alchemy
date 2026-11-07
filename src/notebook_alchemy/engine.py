@@ -122,6 +122,7 @@ class AlchemyEngine:
         return {
             "environment": self.config.env,
             "notebooklm_cli": self.client.cli_version() or "not found (pip install notebooklm-py)",
+            "notebooklm_profile": self.client.profile,
             "session_file": str(session) if session else "none (run: notebook-alchemy login)",
             "gemini_api_key": "set" if self.config.has_gemini_key else "unset",
             "gemini_model": self.config.gemini_model,

@@ -2,6 +2,27 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## Upload account and setup (#39)
+
+- **The upload account is read from the profile's own record, and shown as `unknown` otherwise.**
+  `notebooklm --profile <p> auth check --json` reports the account email notebooklm-py 0.8.6 stored on the
+  profile, without a network call. A sign-in window does not record one; `login --browser-cookies <b>
+  --account <email>` does, and the login reads it back and fails if it differs. Why: the Owner's uploads
+  went to a business account while the Gemini key belonged to a personal one, and nothing said so.
+  `notebooklm profile list` reads the same record; `status` (session context) and `auth inspect` (browser
+  accounts) do not identify the profile's account, so they are not used for it.
+- **First upload to a profile asks, per account.** The confirmation is stored as profile to email in
+  `~/.notebook-alchemy/upload_accounts.json`; a different email, or an unreadable record, asks again. An
+  unknown account is asked about on every upload and never recorded, because two unknown accounts cannot
+  be told apart. `login --account` checks that the browser holds the email before it signs in, so a typo
+  cannot overwrite the profile with another account.
+  `--yes` skips the question without recording consent. Without a terminal and without `--yes`, the
+  upload stops before any work.
+- **`setup` writes `.env` in place.** Other lines are kept, a key is replaced where it stands, and the file
+  is swapped in whole. The Gemini key is entered hidden and never printed.
+- **AI Pro does not change API quota.** Google's Google AI plans page (checked 2026-11-07) says plan
+  benefits apply only in the AI Studio web interface and API-key usage is billed separately.
+
 ## Audit remediation (#16)
 
 - **Sample data is opt-in.** The scanner and analyzer used to substitute a bundled catalog whenever a
