@@ -218,6 +218,41 @@ def test_tabs_only_with_no_videos_tab_raises(ydl: type[_FakeYDL]) -> None:
         ChannelScanner().scan("@t")
 
 
+def test_a_channel_reads_videos_and_streams_but_not_shorts_by_default(ydl: type[_FakeYDL]) -> None:
+    ydl.script["https://www.youtube.com/@x/videos"] = {
+        "title": "X - Videos",
+        "entries": [_entry(1), _entry(2)],
+    }
+    ydl.script["https://www.youtube.com/@x/streams"] = {
+        "title": "X - Live",
+        "entries": [_entry(3), _entry(1)],
+    }
+    ydl.script["https://www.youtube.com/@x/shorts"] = {"title": "X - Shorts", "entries": [_entry(9)]}
+    result = ChannelScanner().scan("@x")
+    assert result.channel_name == "X"
+    assert [v.id for v in result.videos] == ["vid00000001", "vid00000002", "vid00000003"]  # deduplicated
+    everything = ChannelScanner().scan("https://www.youtube.com/@x", tabs=("videos", "streams", "shorts"))
+    assert "vid00000009" in [v.id for v in everything.videos]
+
+
+def test_a_tab_the_channel_lacks_is_skipped_and_the_limit_counts_all_tabs(ydl: type[_FakeYDL]) -> None:
+    ydl.script["https://www.youtube.com/@x/videos"] = {
+        "title": "X - Videos",
+        "entries": [_entry(1), _entry(2)],
+    }
+    ydl.script["https://www.youtube.com/@x/streams"] = RuntimeError(
+        "This channel does not have a streams tab"
+    )
+    assert [v.id for v in ChannelScanner().scan("@x", limit=1).videos] == ["vid00000001"]
+    assert len(ChannelScanner().scan("@x").videos) == 2
+
+
+def test_a_playlist_ignores_tabs(ydl: type[_FakeYDL]) -> None:
+    url = "https://www.youtube.com/playlist?list=PL123"
+    ydl.script[url] = {"title": "List", "entries": [_entry(4)]}
+    assert [v.id for v in ChannelScanner().scan(url, tabs=("shorts",)).videos] == ["vid00000004"]
+
+
 def test_single_video_url(ydl: type[_FakeYDL]) -> None:
     url = "https://www.youtube.com/watch?v=abcdefghijk"
     ydl.script[url] = {"id": "abcdefghijk", "title": "Solo", "webpage_url": url}

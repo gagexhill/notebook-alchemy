@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .channel import ChannelScanner, video_id_from_url
+from .channel import DEFAULT_TABS, ChannelScanner, video_id_from_url
 from .client import NotebookLMClient
 from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig, is_usable_api_key
 from .errors import GeminiError, NotebookLMError, SessionError
@@ -219,12 +219,13 @@ class NotebookAnalyzer:
         *,
         use_mock: bool = False,
         limit: int | None = None,
+        tabs: tuple[str, ...] = DEFAULT_TABS,
         progress: ProgressFn | None = None,
     ) -> DryRunReport:
         """Analyse a YouTube URL, an existing notebook, or (only with use_mock) the sample catalog."""
         scanner = ChannelScanner()
         if not use_mock and scanner.is_youtube_url(notebook_query):
-            return self.scan_channel(notebook_query, limit=limit, progress=progress)
+            return self.scan_channel(notebook_query, limit=limit, tabs=tabs, progress=progress)
 
         if use_mock:
             sources = get_mock_sources()[:limit] if limit else get_mock_sources()
@@ -269,10 +270,11 @@ class NotebookAnalyzer:
         url: str,
         limit: int | None = None,
         *,
+        tabs: tuple[str, ...] = DEFAULT_TABS,
         progress: ProgressFn | None = None,
     ) -> DryRunReport:
         """Scan a YouTube channel, playlist or video. Raises ChannelScanError on failure."""
-        scan = ChannelScanner().scan(url, limit=limit)
+        scan = ChannelScanner().scan(url, limit=limit, tabs=tabs)
         videos = [
             VideoSourceSummary(
                 source_id=v.id,

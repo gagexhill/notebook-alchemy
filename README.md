@@ -301,6 +301,8 @@ A new AI Studio key starts on Google's free tier, which limits requests per day 
 
 Keyword grouping is the fallback when no key is set. It cannot tell what an unusual title is about, so some videos land in "General / Specialized Topics"; with a Gemini key the domains are named from the channel's own titles. Domains are discovered again on each run, so their names can differ between runs.
 
+A channel URL reads the channel's Videos and Live tabs; add Shorts with `--tabs videos,streams,shorts`, or read only one tab with `--tabs videos`. Playlist and video URLs are read as they are.
+
 Captions are fetched in English first; set `ALCHEMY_CAPTION_LANGUAGES` (for example `de,en`) for other languages. Without a match, the uploader's own captions are used in any language, then automatic ones.
 
 ### What It Stores
