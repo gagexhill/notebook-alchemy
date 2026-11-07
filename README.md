@@ -88,7 +88,7 @@ YouTube URL ──► discover ──► group ──► resolve transcripts ─
 | Build offline | `notebook-alchemy run <url> --no-sync --offline` | YouTube only | `vault/` | You want the index and catalog with no API cost |
 | Build and upload | `notebook-alchemy run <url>` | The above plus NotebookLM | `vault/`, one notebook | You are ready to use the result in NotebookLM |
 | Upload later | `notebook-alchemy sync -n <name>` | NotebookLM | One notebook | A build already exists in `vault/` |
-| Add one video | `notebook-alchemy append -n <name> --title … --url …` | Nothing | The catalog and one volume | A new video appeared and a rebuild is not worth it |
+| Add one video | `notebook-alchemy append -n <name> --title … --url …` | Gemini, only if a key is set and `--topic` is not given | The catalog and one volume | A new video appeared and a rebuild is not worth it |
 | Try it | `notebook-alchemy run --mock --no-sync` | Nothing | `vault/` | You want to see the output before pointing it at a channel |
 | Self-test | `notebook-alchemy test` | Nothing | A temporary folder | You want to check the install |
 | Set up | `notebook-alchemy setup` | `notebooklm` login, only if you sign in | `.env` | You want to set the Gemini key, the upload account or the vault folder; re-run it to change any of them |
@@ -102,14 +102,14 @@ YouTube URL ──► discover ──► group ──► resolve transcripts ─
 | Python | >=3.11 | Runtime |
 | Click | >=8.1.0 | Command-line parsing, prompts, help |
 | Rich | >=13.0.0 | Tables, progress bars, error panels |
-| httpx | >=0.25.0 | Gemini API calls |
-| yt-dlp | >=2025.1.0 | Flat channel and playlist metadata |
-| youtube-transcript-api | >=1.0.0 | Captions when no local transcript exists |
-| notebooklm-py | >=0.8.6 | The `notebooklm` command used for login, notebooks and uploads |
+| httpx | >=0.27, <1 | Gemini API calls |
+| yt-dlp[default] | >=2026.10.21 | Flat channel and playlist metadata; `[default]` adds the JavaScript solver YouTube requires |
+| youtube-transcript-api | >=1.2.4, <2 | Captions when no local transcript exists |
+| notebooklm-py | >=0.8.6, <0.9 | The `notebooklm` command used for login, notebooks and uploads |
 | Gemini API | `gemini-3.8-flash` by default, `gemini-3.5-flash-lite` as fallback | Domain discovery, title assignment, synthesis |
 | pytest, ruff, pip-audit | dev extras | Tests, lint and format, dependency audit |
 
-Versions are the minimums declared in `pyproject.toml`. Override the model with `ALCHEMY_GEMINI_MODEL`.
+Versions are the ranges declared in `pyproject.toml`; the upper bounds keep out a next major release until it is tested. Override the model with `ALCHEMY_GEMINI_MODEL`.
 
 ---
 
@@ -138,7 +138,7 @@ src/notebook_alchemy/
 ## ✨ Key Features
 
 - **Real input, real output** — a bad URL, an unknown notebook or a zero-video channel is an error with a next step. Sample data appears only behind `--mock`, with a banner.
-- **Checked uploads** — files are uploaded one by one, each result is verified, failures are listed by file, and the exit code is non-zero.
+- **Checked uploads** — files upload a few at a time, each result is verified, failures are listed by file, and the exit code is non-zero.
 - **Replace, not duplicate** — a re-run replaces same-titled sources and removes the ones it uploaded last time that are gone, so repeated runs do not pile up in the notebook. Sources you added yourself are never touched.
 - **Survives a busy model** — if the default Gemini model is overloaded, retired, or out of daily quota, the run moves to the fallback model and says so.
 - **Every title assigned** — clustering covers the whole channel, not a sample, and reports what it could not place.
@@ -146,7 +146,8 @@ src/notebook_alchemy/
 - **Safe writes** — output is namespaced per source, built in staging, and swapped in whole, so a failed run leaves the previous build intact.
 - **A known upload account** — `status`, `run` and `sync` name the Google account that receives uploads, or say `unknown` when the `notebooklm` profile did not record one. The first upload to an account asks first (`--yes` skips the question), and asks again if the account behind a profile changes. An account that cannot be identified is asked about on every upload.
 - **Key hygiene** — the Gemini key travels in a header only and is removed from every error and log line.
-- **Cost and quota before commitment** — `dry-run` estimates tokens from video length, prices them for the configured model, and prints how many Gemini requests a run needs.
+- **Cost and quota before commitment** — `dry-run` estimates tokens from video length, prices them for the configured model (with Google's scheduled price changes), and prints how many Gemini requests a run needs. After a build, the summary shows the tokens Gemini actually reported and their cost.
+- **Private by default** — no telemetry; nothing goes anywhere but YouTube, the Gemini API and NotebookLM; the upload confirmation keeps a salted hash of the account email, not the email; `clean --all` removes everything the tool stored.
 - **Guided terminal output** — numbered steps, progress bars on a terminal, plain lines when piped, and `NO_COLOR` honoured.
 - **Hermetic tests** — the suite runs in a temporary working directory and home, with real processes and sockets blocked.
 
@@ -223,6 +224,8 @@ with tempfile.TemporaryDirectory(prefix="notebook-alchemy-") as tmp:
             "file",
             "--title",
             document.title,
+            "--request-timeout",
+            f"{UPLOAD_HTTP_TIMEOUT:g}",
         ],
         timeout=UPLOAD_TIMEOUT,
     )
@@ -247,7 +250,20 @@ python -m pip install -e .
 notebook-alchemy test
 ```
 
-`notebook-alchemy test` builds the sample catalog in a temporary folder and needs no network or credentials. Then run the guided setup, which asks for the Gemini key (hidden as you type), the NotebookLM account and the vault folder, and writes them to `.env`. Run it again whenever you want to change one:
+`notebook-alchemy test` builds the sample catalog in a temporary folder and needs no network or credentials. Use `python3` on macOS and Linux if `python` is not Python 3, and run any command as `python -m notebook_alchemy.cli …` if `notebook-alchemy` is not on your `PATH`.
+
+### First run, no accounts needed
+
+Preview a channel, then build it offline into `vault/` (an index and a catalog, no API cost):
+
+```bash
+notebook-alchemy dry-run https://www.youtube.com/@Hyperplexed
+notebook-alchemy run https://www.youtube.com/@Hyperplexed --no-sync --offline
+```
+
+### Add Gemini and NotebookLM
+
+The guided setup asks for the Gemini key (hidden as you type), the NotebookLM account and the vault folder, and writes them to `.env`. Run it again whenever you want to change one:
 
 ```bash
 notebook-alchemy setup
@@ -256,19 +272,19 @@ notebook-alchemy status
 
 The Gemini key and the NotebookLM account are separate credentials and can belong to different Google accounts. The key bills to the Google Cloud project it was created in. Uploads go to whichever account the `notebooklm` profile is signed in to; `status` names it. A Google AI subscription plan does not change Gemini API quota or billing: Google's [Google AI plans page](https://ai.google.dev/gemini-api/docs/google-ai-plans) says plan benefits apply only inside the AI Studio web interface and API-key usage is billed separately.
 
-To pick one of several accounts signed in to a browser, and keep it in its own profile:
+The simplest sign-in reuses a browser you are already signed in to Google with; to pick one of several accounts there, name it, and keep it in its own profile:
 
 ```bash
+notebook-alchemy login --browser-cookies chrome
 notebooklm auth inspect --browser chrome
 notebook-alchemy login --browser-cookies chrome --account you@example.com --profile personal
 ```
 
-Set `ALCHEMY_NOTEBOOKLM_PROFILE=personal` in `.env` (setup does this), or pass `--profile personal` to `run`, `sync`, `status` and `login`.
+`notebook-alchemy login` on its own opens a sign-in window instead; it needs a browser for Playwright, installed once with `python -m playwright install chromium`. Set `ALCHEMY_NOTEBOOKLM_PROFILE=personal` in `.env` (setup does this), or pass `--profile personal` to `run`, `sync`, `status` and `login`.
 
-Preview a channel, then build it:
+Then build and upload:
 
 ```bash
-notebook-alchemy dry-run https://www.youtube.com/@Hyperplexed
 notebook-alchemy run https://www.youtube.com/@Hyperplexed
 ```
 
@@ -278,11 +294,26 @@ A real run on that channel, recorded from the terminal (the first is the preview
 
 ![Terminal output of a full run that builds and uploads the Hyperplexed channel](docs/images/run.svg)
 
-The cost estimate counts only the output you can see; Gemini 3.x models also think, and thinking tokens bill as output, so a real run costs somewhat more. `ALCHEMY_GEMINI_MODEL` selects a cheaper model such as `gemini-3.5-flash-lite`.
+The cost estimate counts only the output you can see; Gemini 3.x models also think, and thinking tokens bill as output, so the actual figure in the build summary is higher. `ALCHEMY_GEMINI_MODEL` selects a cheaper model such as `gemini-3.5-flash-lite`.
 
 A new AI Studio key starts on Google's free tier, which limits requests per day for each model. `dry-run` prints how many requests a run needs; when a limit is reached the run continues on the fallback model, and a large channel needs billing enabled on the key's project.
 
 Keyword grouping is the fallback when no key is set. It cannot tell what an unusual title is about, so some videos land in "General / Specialized Topics"; with a Gemini key the domains are named from the channel's own titles. Domains are discovered again on each run, so their names can differ between runs.
+
+Captions are fetched in English first; set `ALCHEMY_CAPTION_LANGUAGES` (for example `de,en`) for other languages. Without a match, the uploader's own captions are used in any language, then automatic ones.
+
+### What It Stores
+
+Everything stays on your machine. `notebook-alchemy clean --all` removes all of it (it asks first).
+
+| Where | What | Removed by |
+|---|---|---|
+| `.env` in the folder you run from | Your Gemini key, profile and vault folder, written by `setup` | Delete the file |
+| `vault/<source>/compendiums/` | The built compendiums, index and catalog | `clean --vaults` |
+| `~/.notebook-alchemy/cache/` | Fetched transcripts, and which videos had none (for a week) | `clean --cache` |
+| `~/.notebook-alchemy/sync/` | Per notebook id, the titles the last upload added, so the next can remove stale ones | `clean --records` |
+| `~/.notebook-alchemy/upload_accounts.json` | Per profile, a salted hash of the account you confirmed uploads to; never the email | `clean --records` |
+| `~/.notebooklm/profiles/<profile>/` | The Google sign-in, kept by the `notebooklm` command | `notebooklm auth logout` |
 
 ### Build for Production
 
@@ -293,7 +324,7 @@ python -m pip install build
 python -m build
 ```
 
-> **Notes.** Run commands as `python -m notebook_alchemy.cli …` if `notebook-alchemy` is not on your `PATH`. `dry-run` and `run` show an estimated cost; the estimate comes from video length and the price table in `src/notebook_alchemy/gemini.py`, so check Google's pricing page before a large run. `clean` deletes only this tool's own cache records and vault folders, and asks before deleting vaults.
+> **Notes.** `dry-run` and `run` show an estimated cost; the estimate comes from video length and the price table in `src/notebook_alchemy/gemini.py`, so check Google's pricing page before a large run. `clean` deletes only this tool's own files, and asks before deleting vaults or records.
 
 For contributors: [CONTRIBUTING.md](CONTRIBUTING.md) to propose a change, [AGENTS.md](AGENTS.md) for the rules every change keeps, [OPERATIONS.md](OPERATIONS.md) for the maintainer runbook, [DEVLOG.md](DEVLOG.md) for past design decisions, and [the issues](https://github.com/gagexhill/notebook-alchemy/issues) for current work.
 
@@ -349,6 +380,6 @@ notebook-alchemy/
 
 **Notebook Alchemy** — *a channel in, a notebook out.*
 
-MIT License
+© 2026 gagexhill and contributors · MIT License
 
 </div>
