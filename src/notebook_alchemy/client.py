@@ -6,10 +6,13 @@ success for work that did not happen.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -82,28 +85,44 @@ def _read_consents() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _account_hash(email: str, salt: str) -> str:
+    """Salted SHA-256 of the email: enough to notice the account changed, without storing who it is."""
+    return hashlib.sha256(f"{salt}:{email.strip().casefold()}".encode()).hexdigest()
+
+
 def upload_confirmed(identity: AccountIdentity) -> bool:
     """True when uploads to this profile were confirmed for this same, known account.
 
-    An unknown account is never confirmed: two different unknown accounts cannot be told apart.
+    An unknown account is never confirmed: two different unknown accounts cannot be told apart. A
+    record in any other shape (including the plain-email form of earlier versions) asks again.
     """
     if identity.email is None:
         return False
-    entry = _read_consents().get(identity.profile)
-    return isinstance(entry, dict) and "email" in entry and entry["email"] == identity.email
+    data = _read_consents()
+    salt = data.get("salt")
+    entry = data.get("profiles", {}).get(identity.profile) if isinstance(data.get("profiles"), dict) else None
+    if not isinstance(salt, str) or not isinstance(entry, str):
+        return False
+    return hmac.compare_digest(entry, _account_hash(identity.email, salt))
 
 
 def record_upload_consent(identity: AccountIdentity) -> None:
-    """Remember that the user confirmed uploads to this profile and account (a known one only)."""
+    """Remember that the user confirmed uploads to this profile and account (a known one only).
+
+    The file holds a random per-install salt and, per profile, a salted hash of the account email;
+    the email itself is never written.
+    """
     if identity.email is None:
         return
     path = consent_file()
     data = _read_consents()
-    data[identity.profile] = {"email": identity.email}
+    salt = data.get("salt") if isinstance(data.get("salt"), str) else secrets.token_hex(16)
+    profiles = data.get("profiles") if isinstance(data.get("profiles"), dict) else {}
+    profiles[identity.profile] = _account_hash(identity.email, salt)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps({"salt": salt, "profiles": profiles}, indent=2), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as exc:
         raise NotebookLMError(

@@ -52,8 +52,8 @@ jobs:
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
-    # Reports known vulnerabilities without blocking a merge. A finding follows the severity clock in
-    # maintainer-standards STANDARDS.md; blocking here would stop unrelated work on a third-party advisory.
+    # Reports known vulnerabilities without blocking a merge; blocking here would stop unrelated work
+    # on a third-party advisory. A finding is fixed in its own pull request.
     continue-on-error: true
     steps:
       - name: Check out repository

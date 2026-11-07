@@ -81,7 +81,7 @@ def test_normalize_url(raw: str, expected: str) -> None:
         ("my/c/notes", False),
         ("Learn youtube.com growth", False),
         ("@handle not a url", False),
-        ("00000000-0000-4000-8000-0000000000aa", False),
+        ("00000000-0000-4000-8000-000000000000", False),
         ("", False),
     ],
 )

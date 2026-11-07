@@ -23,6 +23,7 @@ from .channel import video_id_from_url
 from .client import (
     AccountIdentity,
     NotebookLMClient,
+    consent_file,
     record_upload_consent,
     upload_confirmed,
 )
@@ -68,7 +69,7 @@ COOKIE_BROWSERS = ("chrome", "edge", "firefox", "brave")
 SETUP_KEYS = ("GEMINI_API_KEY", "ALCHEMY_NOTEBOOKLM_PROFILE", "ALCHEMY_VAULT_PATH")
 KEY_BILLING_NOTE = (
     "The key bills to the Google Cloud project it was created in (see aistudio.google.com/apikey). "
-    "A Google AI Pro subscription does not change Gemini API quota or billing."
+    "A Google AI subscription plan does not change Gemini API quota or billing."
 )
 
 
@@ -799,7 +800,8 @@ def setup() -> None:
     ui.step(3, 3, "Vault folder")
     vault = click.prompt("  Where should compendiums be written?", default=str(config.vault_path))
     vault_path = Path(vault).expanduser().resolve()
-    save("ALCHEMY_VAULT_PATH", str(vault_path))
+    # Saved as typed (relative or ~/...), so .env does not carry the user's home folder name.
+    save("ALCHEMY_VAULT_PATH", vault.strip())
 
     ui.console.print(
         Panel(
@@ -929,17 +931,28 @@ def _remove(path: Path) -> int:
         "  notebook-alchemy clean --all --yes      both, without asking\n"
     ),
 )
-@click.option("--all", "clean_all", is_flag=True, help="Clear the cache and delete built vaults.")
+@click.option(
+    "--all", "clean_all", is_flag=True, help="Clear the cache, delete built vaults and local records."
+)
 @click.option("--cache", "clean_cache", is_flag=True, help="Clear the transcript cache.")
 @click.option("--vaults", "clean_vaults", is_flag=True, help="Delete built compendium folders.")
+@click.option(
+    "--records",
+    "clean_records",
+    is_flag=True,
+    help="Delete the records of past uploads and upload confirmations.",
+)
 @click.option("-y", "--yes", is_flag=True, help="Do not ask before deleting.")
 @handle_errors
-def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: bool) -> None:
-    """Reclaim disk space from the transcript cache and built vaults."""
+def clean_pipeline(
+    clean_all: bool, clean_cache: bool, clean_vaults: bool, clean_records: bool, yes: bool
+) -> None:
+    """Remove the transcript cache, built vaults, or this tool's local records."""
     config = _config()
     engine = AlchemyEngine(config)
     do_vaults = clean_all or clean_vaults
-    do_cache = clean_all or clean_cache or not do_vaults
+    do_records = clean_all or clean_records
+    do_cache = clean_all or clean_cache or not (do_vaults or do_records)
 
     targets: list[tuple[str, Path]] = []
     skipped: list[str] = []
@@ -957,6 +970,13 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: 
                 targets.append(("vault", d))
             else:
                 skipped.append(str(d))
+    if do_records:
+        # Records of past uploads (titles per notebook id) and the upload-confirmation hashes.
+        records_dir = engine.sync_records_dir()
+        if records_dir.is_dir():
+            targets += [("record", f) for f in sorted(records_dir.glob("*.json"))]
+        if consent_file().is_file():
+            targets.append(("record", consent_file()))
     for item in skipped:
         ui.warn(f"Skipped {esc(item)}: it does not look like Notebook Alchemy output.")
     if not targets:
@@ -965,7 +985,8 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: 
 
     cache_targets = [p for kind, p in targets if kind == "cache"]
     vault_targets = [p for kind, p in targets if kind == "vault"]
-    ask = (vault_targets or (cache_targets and custom_cache)) and not yes
+    record_targets = [p for kind, p in targets if kind == "record"]
+    ask = (vault_targets or record_targets or (cache_targets and custom_cache)) and not yes
     if ask:
         if cache_targets and custom_cache:
             ui.console.print(
@@ -976,6 +997,11 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: 
             ui.console.print("[bold]These built vault folders will be deleted:[/bold]")
             for p in vault_targets:
                 ui.console.print(f"  {esc(p)}")
+        if record_targets:
+            ui.console.print(
+                f"[bold]{len(record_targets)} local records will be deleted[/bold] (the next sync cannot "
+                "remove sources an earlier sync uploaded, and the next upload asks for confirmation again)."
+            )
         if not click.confirm("Continue?", default=False):
             ui.warn("Cancelled. Nothing was deleted.")
             return

@@ -14,7 +14,7 @@
 ![Gemini](https://img.shields.io/badge/Gemini-3.8%20Flash-4285F4?style=for-the-badge&logo=googlegemini&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
-**Owner:** gagexhill — personal open-source project
+**Maintainer:** [gagexhill](https://github.com/gagexhill) — open source, MIT licensed
 **Runtime:** A Python command-line tool on your machine; the Gemini API and Google NotebookLM only when you opt in
 **Status:** Alpha — [audit remediation #16](https://github.com/gagexhill/notebook-alchemy/issues/16) owns current progress
 
@@ -39,7 +39,6 @@
 - [Getting Started](#-getting-started)
 - [File Structure](#-file-structure)
 - [Concepts & References](#-concepts--references)
-- [About the Owner](#-about-the-owner)
 
 ---
 
@@ -49,7 +48,7 @@
 
 The compendiums come in two forms. With a Gemini API key, each volume is synthesized from the spoken transcripts of its videos and cites them by number. Without one, each volume is an offline index of titles and links that says plainly it contains no summary. Nothing is ever filled in with invented text, and the bundled sample catalog is used only when you pass `--mock`.
 
-This repository owns the command-line tool, its tests, and the operating records that go with it. Google owns the live state of NotebookLM and the Gemini API; `the maintainer's STANDARDS.md` owns the standards this repository follows.
+Everything runs on your machine. The tool keeps no account data beyond what a feature needs (see [What It Stores](#what-it-stores)), sends nothing anywhere except YouTube, the Gemini API and NotebookLM, and has no telemetry.
 
 ---
 
@@ -255,7 +254,7 @@ notebook-alchemy setup
 notebook-alchemy status
 ```
 
-The Gemini key and the NotebookLM account are separate credentials and can belong to different Google accounts. The key bills to the Google Cloud project it was created in. Uploads go to whichever account the `notebooklm` profile is signed in to; `status` names it. A Google AI Pro subscription does not change Gemini API quota or billing: Google's [Google AI plans page](https://ai.google.dev/gemini-api/docs/google-ai-plans) says plan benefits apply only inside the AI Studio web interface and API-key usage is billed separately.
+The Gemini key and the NotebookLM account are separate credentials and can belong to different Google accounts. The key bills to the Google Cloud project it was created in. Uploads go to whichever account the `notebooklm` profile is signed in to; `status` names it. A Google AI subscription plan does not change Gemini API quota or billing: Google's [Google AI plans page](https://ai.google.dev/gemini-api/docs/google-ai-plans) says plan benefits apply only inside the AI Studio web interface and API-key usage is billed separately.
 
 To pick one of several accounts signed in to a browser, and keep it in its own profile:
 
@@ -294,9 +293,9 @@ python -m pip install build
 python -m build
 ```
 
-> **Notes.** Run commands as `py -m notebook_alchemy.cli …` if `notebook-alchemy` is not on your `PATH`. `dry-run` and `run` show an estimated cost; the estimate comes from video length and the price table in `src/notebook_alchemy/gemini.py`, so check Google's pricing page before a large run. `clean` deletes only this tool's own cache records and vault folders, and asks before deleting vaults.
+> **Notes.** Run commands as `python -m notebook_alchemy.cli …` if `notebook-alchemy` is not on your `PATH`. `dry-run` and `run` show an estimated cost; the estimate comes from video length and the price table in `src/notebook_alchemy/gemini.py`, so check Google's pricing page before a large run. `clean` deletes only this tool's own cache records and vault folders, and asks before deleting vaults.
 
-Canonical owners for everything else: [AGENTS.md](AGENTS.md) for agent rules and validation, [OPERATIONS.md](OPERATIONS.md) for the operating map, [DEVLOG.md](DEVLOG.md) for completed decisions, and [issue #16](https://github.com/gagexhill/notebook-alchemy/issues/16) for current work.
+For contributors: [CONTRIBUTING.md](CONTRIBUTING.md) to propose a change, [AGENTS.md](AGENTS.md) for the rules every change keeps, [OPERATIONS.md](OPERATIONS.md) for the maintainer runbook, [DEVLOG.md](DEVLOG.md) for past design decisions, and [the issues](https://github.com/gagexhill/notebook-alchemy/issues) for current work.
 
 ---
 
@@ -309,10 +308,11 @@ notebook-alchemy/
 ├── prompts/                # AI Studio blueprint that mirrors the synthesis request
 ├── .github/                # Issue and PR templates, Dependabot, validate workflow
 ├── .githooks/              # pre-push secret scan (gitleaks)
-├── AGENTS.md               # Durable agent rules and validation commands
-├── CLAUDE.md               # Pointer to AGENTS.md
-├── DEVLOG.md               # Completed material decisions
-├── OPERATIONS.md           # Current operations map and native settings
+├── scripts/                # Regenerate the README recordings and the social preview
+├── docs/images/            # README recordings and the social preview image
+├── AGENTS.md               # Rules every change keeps (CLAUDE.md points here)
+├── DEVLOG.md               # Past design decisions and why
+├── OPERATIONS.md           # Maintainer runbook
 ├── SECURITY.md             # Credential handling and private reporting
 ├── CONTRIBUTING.md         # Setup, checks, pull requests
 ├── pyproject.toml          # Package, dependencies, ruff and pytest settings
@@ -345,23 +345,10 @@ notebook-alchemy/
 
 ---
 
-## 👤 About the Owner
-
-<div align="center">
-
-**gagexhill**
-Personal open-source project, MIT licensed
-
-[![GitHub](https://img.shields.io/badge/GitHub-gagexhill-181717?style=for-the-badge&logo=github)](https://github.com/gagexhill)
-
-</div>
-
----
-
 <div align="center">
 
 **Notebook Alchemy** — *a channel in, a notebook out.*
 
-© 2026 gagexhill · MIT License
+MIT License
 
 </div>
