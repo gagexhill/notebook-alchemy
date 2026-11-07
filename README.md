@@ -210,7 +210,8 @@ NotebookLM receives each document as a file. A compendium can be larger than one
 
 ```python
 safe = re.sub(r"[^\w\-]+", "_", document.title).strip("_") or "source"
-with tempfile.TemporaryDirectory(prefix="notebook-alchemy-") as tmp:
+# A scanner briefly holding the temp file must not turn a finished upload into an error.
+with tempfile.TemporaryDirectory(prefix="notebook-alchemy-", ignore_cleanup_errors=True) as tmp:
     path = Path(tmp) / f"{safe[:80]}.md"
     path.write_text(document.content, encoding="utf-8")
     data = self._run(
