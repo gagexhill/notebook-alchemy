@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import subprocess
 from pathlib import Path
@@ -348,6 +349,14 @@ def test_cli_version_comes_from_package_metadata_without_a_process(
     monkeypatch.setattr("shutil.which", lambda name: "/bin/notebooklm")
     monkeypatch.setattr("importlib.metadata.version", lambda name: "0.8.6")
     assert client.cli_version() == "notebooklm-py 0.8.6" and process.calls == []
+
+    def missing(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr("shutil.which", lambda name: "/home/private-person/bin/notebooklm")
+    monkeypatch.setattr("importlib.metadata.version", missing)
+    shown = client.cli_version() or ""
+    assert "not installed in this Python" in shown and "private-person" not in shown
 
 
 def test_a_hand_edited_consent_record_asks_again_instead_of_crashing() -> None:
