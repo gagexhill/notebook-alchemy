@@ -55,7 +55,8 @@ Actions setting before publishing a branch that would trigger a run.
 | Credential | Class | Where it lives | Rotation |
 |---|---|---|---|
 | `GEMINI_API_KEY` | credential | Local `.env` (git-ignored), never committed | 90 days, or at once if it was ever printed or logged |
-| NotebookLM session (cookies) | credential | `~/.notebooklm/profiles/<profile>/storage_state.json`, owned by the `notebooklm` CLI | Re-run `notebook-alchemy login` when `login --check` fails |
+| NotebookLM session (cookies) | credential | `~/.notebooklm/profiles/<profile>/storage_state.json`, owned by the `notebooklm` CLI; the profile is `ALCHEMY_NOTEBOOKLM_PROFILE` (default `default`) | Re-run `notebook-alchemy login` when `login --check` fails; `status` names the account the profile records |
+| Upload confirmations | local record | `~/.notebook-alchemy/upload_accounts.json` (profile to confirmed account email) | Delete it to be asked again before the next upload |
 
 Neither value goes in an issue, a log, a commit, or a test. Tests use obvious placeholders.
 

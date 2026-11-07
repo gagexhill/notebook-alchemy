@@ -92,6 +92,7 @@ YouTube URL ──► discover ──► group ──► resolve transcripts ─
 | Add one video | `notebook-alchemy append -n <name> --title … --url …` | Nothing | The catalog and one volume | A new video appeared and a rebuild is not worth it |
 | Try it | `notebook-alchemy run --mock --no-sync` | Nothing | `vault/` | You want to see the output before pointing it at a channel |
 | Self-test | `notebook-alchemy test` | Nothing | A temporary folder | You want to check the install |
+| Set up | `notebook-alchemy setup` | `notebooklm` login, only if you sign in | `.env` | You want to set the Gemini key, the upload account or the vault folder; re-run it to change any of them |
 
 ---
 
@@ -144,6 +145,7 @@ src/notebook_alchemy/
 - **Every title assigned** — clustering covers the whole channel, not a sample, and reports what it could not place.
 - **Honest offline mode** — without a key you get an index and a catalog, labelled as such.
 - **Safe writes** — output is namespaced per source, built in staging, and swapped in whole, so a failed run leaves the previous build intact.
+- **A known upload account** — `status`, `run` and `sync` name the Google account that receives uploads, or say `unknown` when the `notebooklm` profile did not record one. The first upload to an account asks first (`--yes` skips the question), and asks again if the account behind a profile changes. An account that cannot be identified is asked about on every upload.
 - **Key hygiene** — the Gemini key travels in a header only and is removed from every error and log line.
 - **Cost and quota before commitment** — `dry-run` estimates tokens from video length, prices them for the configured model, and prints how many Gemini requests a run needs.
 - **Guided terminal output** — numbered steps, progress bars on a terminal, plain lines when piped, and `NO_COLOR` honoured.
@@ -246,12 +248,23 @@ python -m pip install -e .
 notebook-alchemy test
 ```
 
-`notebook-alchemy test` builds the sample catalog in a temporary folder and needs no network or credentials. To use Gemini, copy `.env.example` to `.env` and set `GEMINI_API_KEY`. To upload, sign in once:
+`notebook-alchemy test` builds the sample catalog in a temporary folder and needs no network or credentials. Then run the guided setup, which asks for the Gemini key (hidden as you type), the NotebookLM account and the vault folder, and writes them to `.env`. Run it again whenever you want to change one:
 
 ```bash
-notebook-alchemy login
+notebook-alchemy setup
 notebook-alchemy status
 ```
+
+The Gemini key and the NotebookLM account are separate credentials and can belong to different Google accounts. The key bills to the Google Cloud project it was created in. Uploads go to whichever account the `notebooklm` profile is signed in to; `status` names it. A Google AI Pro subscription does not change Gemini API quota or billing: Google's [Google AI plans page](https://ai.google.dev/gemini-api/docs/google-ai-plans) says plan benefits apply only inside the AI Studio web interface and API-key usage is billed separately.
+
+To pick one of several accounts signed in to a browser, and keep it in its own profile:
+
+```bash
+notebooklm auth inspect --browser chrome
+notebook-alchemy login --browser-cookies chrome --account you@example.com --profile personal
+```
+
+Set `ALCHEMY_NOTEBOOKLM_PROFILE=personal` in `.env` (setup does this), or pass `--profile personal` to `run`, `sync`, `status` and `login`.
 
 Preview a channel, then build it:
 
@@ -321,6 +334,8 @@ notebook-alchemy/
 | Retry with backoff and `Retry-After` | `src/notebook_alchemy/gemini.py` (`GeminiClient.generate`) |
 | Model fallback after overload, retirement or quota | `src/notebook_alchemy/gemini.py` (`GeminiClient.generate`) |
 | Read-back verification after an upload | `src/notebook_alchemy/engine.py` (`sync_to_notebooklm`) |
+| Identity read from the credential's own record, never guessed | `src/notebook_alchemy/client.py` (`upload_account`) |
+| Consent recorded per profile and account | `src/notebook_alchemy/client.py` (`upload_confirmed`), `src/notebook_alchemy/cli.py` (`_confirm_first_upload`) |
 | Header-based API authentication and secret scrubbing | `src/notebook_alchemy/gemini.py` (`scrub`) |
 | Atomic directory replacement | `src/notebook_alchemy/vault.py` (`replace_dir`) |
 | Typed errors that carry a next action | `src/notebook_alchemy/errors.py`, `src/notebook_alchemy/ui.py` |
