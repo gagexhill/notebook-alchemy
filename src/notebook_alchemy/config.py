@@ -170,6 +170,7 @@ class AlchemyConfig:
     gemini_fallback_model: str = DEFAULT_GEMINI_FALLBACK_MODEL
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     notebooklm_profile: str = DEFAULT_NOTEBOOKLM_PROFILE
+    caption_languages: tuple[str, ...] = ("en", "en-US", "en-GB")
 
     @property
     def has_gemini_key(self) -> bool:
@@ -210,4 +211,10 @@ class AlchemyConfig:
             notebooklm_profile=validate_profile_name(
                 os.getenv("ALCHEMY_NOTEBOOKLM_PROFILE", "").strip() or DEFAULT_NOTEBOOKLM_PROFILE
             ),
+            caption_languages=tuple(
+                code.strip()
+                for code in os.getenv("ALCHEMY_CAPTION_LANGUAGES", "en,en-US,en-GB").split(",")
+                if code.strip()
+            )
+            or ("en",),
         )

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -17,27 +20,43 @@ logger = logging.getLogger(__name__)
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
-# USD per 1M tokens, (input, output). Output includes thinking tokens.
-# Source: the Gemini API pricing page. Update this table when the page changes.
-PRICING_USD_PER_M: dict[str, tuple[float, float]] = {
-    "gemini-3.8-flash": (0.75, 3.75),
-    "gemini-3.5-flash-lite": (0.30, 2.50),
-    "gemini-3.1-flash-lite": (0.25, 1.50),
-    "gemini-2.5-flash": (0.30, 2.50),
-    "gemini-2.5-flash-lite": (0.10, 0.40),
+# USD per 1M tokens, (input, output). Output includes thinking tokens. Each model lists its prices
+# with the date they take effect, oldest first, so a scheduled change needs no code change on the
+# day. Source: the Gemini API pricing page (aistudio.google.com/docs/pricing), read 2026-11-07.
+PRICING_USD_PER_M: dict[str, tuple[tuple[datetime.date, float, float], ...]] = {
+    "gemini-3.8-flash": (
+        (datetime.date(2026, 1, 1), 0.75, 3.75),  # introductory price, through 2026-12-31
+        (datetime.date(2027, 1, 1), 1.50, 7.50),
+    ),
+    "gemini-3.5-flash-lite": ((datetime.date(2026, 1, 1), 0.30, 2.50),),
+    "gemini-3.1-flash-lite": ((datetime.date(2026, 1, 1), 0.25, 1.50),),
+    "gemini-2.5-flash": ((datetime.date(2026, 1, 1), 0.30, 2.50),),
+    "gemini-2.5-flash-lite": ((datetime.date(2026, 1, 1), 0.10, 0.40),),
 }
-# An unlisted model is estimated at the highest listed rate, so the estimate errs high.
+# An unlisted model is estimated at the default model's rate, so the estimate errs high.
 FALLBACK_PRICING_MODEL = "gemini-3.8-flash"
 THINKING_NOTE = "Thinking tokens bill as output and are not in the output estimate."
 
 
-def price_for(model: str) -> tuple[float, float, str | None]:
-    """Return (input, output, note). The note flags an unlisted price or unbudgeted thinking."""
+def _rates_on(model: str, day: datetime.date) -> tuple[float, float]:
+    """The (input, output) price in effect on `day`: the latest entry that has started."""
+    entries = PRICING_USD_PER_M[model]
+    current = [e for e in entries if e[0] <= day] or [entries[0]]
+    _start, low, high = current[-1]
+    return low, high
+
+
+def price_for(model: str, day: datetime.date | None = None) -> tuple[float, float, str | None]:
+    """Return (input, output, note) for `day` (today by default).
+
+    The note flags an unlisted price or unbudgeted thinking.
+    """
+    day = day or datetime.datetime.now(datetime.UTC).date()
     notes: list[str] = []
     if model in PRICING_USD_PER_M:
-        low, high = PRICING_USD_PER_M[model]
+        low, high = _rates_on(model, day)
     else:
-        low, high = PRICING_USD_PER_M[FALLBACK_PRICING_MODEL]
+        low, high = _rates_on(FALLBACK_PRICING_MODEL, day)
         notes.append(f"No listed price for '{model}'; estimate uses {FALLBACK_PRICING_MODEL} rates.")
     if not model.startswith("gemini-2.5"):
         notes.append(THINKING_NOTE)  # only 2.5-family requests set the thinking budget to 0
@@ -64,8 +83,9 @@ class GeminiResult:
     text: str
     finish_reason: str
     prompt_tokens: int = 0
-    output_tokens: int = 0
+    output_tokens: int = 0  # the visible answer
     model: str = ""
+    thinking_tokens: int = 0  # billed as output too
 
     @property
     def truncated(self) -> bool:
@@ -105,6 +125,9 @@ class GeminiClient:
         self._sleep = sleep
         self._failed_over: set[str] = set()
         self._notices: list[str] = []
+        # Tokens Google reports per model for answered requests: [input, output incl. thinking].
+        self._usage: dict[str, list[int]] = {}
+        self._usage_lock = threading.Lock()
 
     @property
     def active_model(self) -> str:
@@ -176,14 +199,36 @@ class GeminiClient:
             # primary gets one retry, not the full set.
             attempts = min(self._retries, PRIMARY_RETRIES_WITH_FALLBACK) if has_next else self._retries
             try:
-                return self._call(model, body, attempts, timeout or self._timeout)
+                result = self._call(model, body, attempts, timeout or self._timeout)
             except GeminiError as exc:
                 if has_next and (exc.status is None or exc.status in FALLBACK_STATUSES):
                     self._failed_over.add(model)
                     self._notices.append(f"{model} was unavailable ({exc.detail}); used {models[index + 1]}.")
                     continue
                 raise
+            self._record_usage(result)
+            return result
         raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
+
+    def _record_usage(self, result: GeminiResult) -> None:
+        with self._usage_lock:
+            totals = self._usage.setdefault(result.model, [0, 0])
+            totals[0] += result.prompt_tokens
+            totals[1] += result.output_tokens + result.thinking_tokens
+
+    def usage(self) -> list[tuple[str, int, int, float]]:
+        """(model, input tokens, output tokens including thinking, USD at today's listed price).
+
+        Counts only requests Gemini answered, as Google reported them; a failed request can still be
+        billed, so this is a floor.
+        """
+        rows = []
+        with self._usage_lock:
+            items = sorted(self._usage.items())
+        for model, (tokens_in, tokens_out) in items:
+            price_in, price_out, _note = price_for(model)
+            rows.append((model, tokens_in, tokens_out, (tokens_in * price_in + tokens_out * price_out) / 1e6))
+        return rows
 
     def _call(self, model: str, body: dict, retries: int, timeout: float) -> GeminiResult:
         headers = {"x-goog-api-key": self._api_key, "content-type": "application/json"}
@@ -241,10 +286,34 @@ class GeminiClient:
         )
 
     @staticmethod
-    def _quota_exhausted(response: httpx.Response) -> bool:
-        """A 429 for a per-day (or longer) quota: waiting seconds will not help."""
+    def _error_details(response: httpx.Response, kind: str) -> list[dict[str, Any]]:
+        """Google's structured error details of one type (`QuotaFailure`, `RetryInfo`, ...)."""
+        try:
+            details = response.json().get("error", {}).get("details", [])
+        except (ValueError, AttributeError):
+            return []
+        if not isinstance(details, list):
+            return []
+        return [d for d in details if isinstance(d, dict) and str(d.get("@type", "")).endswith(f".{kind}")]
+
+    @classmethod
+    def _quota_exhausted(cls, response: httpx.Response) -> bool:
+        """A 429 for a per-day (or longer) quota: waiting seconds will not help.
+
+        Read from the structured QuotaFailure detail when Google sends one; the message text is
+        only a fallback, because its wording can change.
+        """
         if response.status_code != 429:
             return False
+        failures = cls._error_details(response, "QuotaFailure")
+        if failures:
+            quota_ids = [
+                str(v.get("quotaId", "")) + str(v.get("quotaMetric", ""))
+                for f in failures
+                for v in f.get("violations", [])
+                if isinstance(v, dict)
+            ]
+            return any("perday" in q.lower() for q in quota_ids)
         text = response.text.lower()
         return "perday" in text or "per day" in text or "free_tier" in text
 
@@ -255,9 +324,14 @@ class GeminiClient:
             return False
         return "thinking" in response.text.lower()
 
-    @staticmethod
-    def _delay(response: httpx.Response | None, attempt: int) -> float:
+    @classmethod
+    def _delay(cls, response: httpx.Response | None, attempt: int) -> float:
+        """Google's RetryInfo delay, else the Retry-After header, else exponential backoff."""
         if response is not None:
+            for info in cls._error_details(response, "RetryInfo"):
+                match = re.fullmatch(r"(\d+(?:\.\d+)?)s", str(info.get("retryDelay", "")))
+                if match:
+                    return min(float(match.group(1)), 60.0)
             retry_after = response.headers.get("retry-after", "")
             if retry_after.isdigit():
                 return min(float(retry_after), 60.0)
@@ -318,4 +392,5 @@ class GeminiClient:
             prompt_tokens=int(usage.get("promptTokenCount", 0) or 0),
             output_tokens=int(usage.get("candidatesTokenCount", 0) or 0),
             model=model,
+            thinking_tokens=int(usage.get("thoughtsTokenCount", 0) or 0),
         )

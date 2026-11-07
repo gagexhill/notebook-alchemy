@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .channel import ChannelScanner
+from .channel import ChannelScanner, video_id_from_url
 from .client import NotebookLMClient
 from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig, is_usable_api_key
 from .errors import GeminiError, NotebookLMError, SessionError
@@ -302,12 +302,19 @@ class NotebookAnalyzer:
         others: list[dict[str, Any]] = []
         for s in sources_raw:
             url = str(s.get("url") or "")
-            stype = str(s.get("type") or s.get("source_type") or "video").lower()
-            is_video = "youtube.com" in url or "youtu.be" in url or "youtube" in stype or "video" in stype
-            if is_video:
+            stype = str(s.get("type") or s.get("source_type") or "").lower()
+            # notebooklm-py reports YouTube sources as type "youtube"; other video types (a Drive
+            # video, an upload) have no captions to fetch, so only a YouTube URL counts otherwise.
+            youtube_id = video_id_from_url(url) if url else ""
+            is_youtube = stype == "youtube" or (bool(url) and not youtube_id.startswith("url_"))
+            if is_youtube:
                 videos.append(
                     VideoSourceSummary(
-                        source_id=str(s.get("id") or s.get("source_id") or ""),
+                        # The YouTube id, so transcripts can be fetched; NotebookLM's own source
+                        # id is not a video id.
+                        source_id=youtube_id
+                        if youtube_id and not youtube_id.startswith("url_")
+                        else str(s.get("id") or s.get("source_id") or ""),
                         title=str(s.get("title") or "Untitled Source"),
                         url=url,
                         status=str(s.get("status") or "ready"),

@@ -13,12 +13,12 @@ body:
       label: "Feature Category"
       description: "Which architectural subsystem does this proposal relate to?"
       options:
-        - "Ingestion Source (Audio, Video, PDF, RSS, API)"
-        - "Thematic Decomposition & Topic Clustering"
-        - "Compendium Synthesis & Prompt Lenses"
-        - "NotebookLM Sync & Atomic Source Swapping"
-        - "MCP Server & Agentic Tooling"
-        - "Local UI / CLI Experience"
+        - "YouTube scanning and transcripts"
+        - "Grouping videos into domains"
+        - "Writing compendiums (Gemini)"
+        - "NotebookLM upload and accounts"
+        - "Command-line experience"
+        - "Something else"
     validations:
       required: true
   - type: textarea

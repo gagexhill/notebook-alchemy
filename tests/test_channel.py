@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
-from youtube_transcript_api import NoTranscriptFound, RequestBlocked, TranscriptsDisabled
+from youtube_transcript_api import (
+    AgeRestricted,
+    NoTranscriptFound,
+    PoTokenRequired,
+    RequestBlocked,
+    TranscriptsDisabled,
+)
 
-from notebook_alchemy import channel
 from notebook_alchemy.channel import (
     ChannelScanner,
     TranscriptManager,
@@ -126,7 +131,7 @@ class _FakeYDL:
 def ydl(monkeypatch: pytest.MonkeyPatch) -> type[_FakeYDL]:
     _FakeYDL.script = {}
     _FakeYDL.opts_seen = []
-    monkeypatch.setattr(channel.yt_dlp, "YoutubeDL", _FakeYDL)
+    monkeypatch.setattr("yt_dlp.YoutubeDL", _FakeYDL)
     return _FakeYDL
 
 
@@ -301,7 +306,7 @@ def test_disabled_captions_are_remembered(tmp_path: Path) -> None:
 def test_negative_cache_expires(tmp_path: Path) -> None:
     api = _Api(lambda vid: [_Snippet(text="now available")])
     tm = _manager(tmp_path, api)
-    stale = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    stale = (datetime.now(UTC) - timedelta(days=30)).isoformat()
     (tmp_path / "cache").mkdir()
     (tmp_path / "cache" / "abcdefghijk.json").write_text(
         json.dumps({"full_text": "", "unavailable": True, "reason": "x", "checked_at": stale}),
@@ -318,6 +323,51 @@ def test_blocked_is_not_cached(tmp_path: Path) -> None:
     tm = _manager(tmp_path, api)
     assert tm.resolve("abcdefghijk").source == "blocked"
     assert not (tmp_path / "cache" / "abcdefghijk.json").exists()
+
+
+def test_a_proof_of_origin_demand_counts_as_blocked_and_stops_later_requests(tmp_path: Path) -> None:
+    def behaviour(vid: str):
+        raise PoTokenRequired(vid)
+
+    api = _Api(behaviour)
+    tm = _manager(tmp_path, api)
+    first = tm.resolve("abcdefghijk")
+    later = tm.resolve("bcdefghijkl")
+    assert first.source == "blocked" and later.source == "blocked"
+    assert len(api.fetches) == 1  # no retries, and the second video never asked
+    assert not (tmp_path / "cache").exists()  # a block is not remembered as "no captions"
+
+
+def test_any_other_retrieval_failure_is_remembered_as_unavailable(tmp_path: Path) -> None:
+    def behaviour(vid: str):
+        raise AgeRestricted(vid)
+
+    api = _Api(behaviour)
+    tm = _manager(tmp_path, api)
+    assert tm.resolve("abcdefghijk").source == "unavailable"
+    assert tm.resolve("abcdefghijk").detail == "AgeRestricted" and len(api.fetches) == 1
+
+
+class _Track(SimpleNamespace):
+    def fetch(self):
+        return [_Snippet(text=self.text)]
+
+
+def test_a_written_caption_track_is_preferred_over_an_automatic_one(tmp_path: Path) -> None:
+    class Api(_Api):
+        def list(self, video_id: str):
+            return [_Track(is_generated=True, text="auto"), _Track(is_generated=False, text="written")]
+
+    def behaviour(vid: str):
+        raise NoTranscriptFound(vid, ("en",), None)
+
+    assert _manager(tmp_path, Api(behaviour)).resolve("abcdefghijk").text == "written"
+
+
+def test_caption_languages_are_asked_for_in_order(tmp_path: Path) -> None:
+    api = _Api(lambda vid: [_Snippet(text="hola")])
+    _manager(tmp_path, api, languages=("es", "en")).resolve("abcdefghijk")
+    assert api.fetches == [("abcdefghijk", ("es", "en"))]
 
 
 def test_transient_errors_retry(tmp_path: Path) -> None:

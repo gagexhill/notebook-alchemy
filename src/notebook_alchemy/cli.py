@@ -158,6 +158,18 @@ def _same_account_as_confirmed(engine: AlchemyEngine, confirmed: AccountIdentity
         )
 
 
+def _gemini_usage_text(engine: AlchemyEngine) -> str:
+    """What Gemini actually used, as Google reported it, priced at today's listed rates."""
+    rows = engine.gemini.usage() if engine.gemini else []
+    if not rows:
+        return ""
+    lines = [
+        f"{esc(model)}: {tokens_in:,} input and {tokens_out:,} output tokens (about ${cost:.4f})"
+        for model, tokens_in, tokens_out, cost in rows
+    ]
+    return "\nGemini used " + "; ".join(lines) + " [dim](output includes thinking)[/dim]"
+
+
 def _target(source: str | None, notebook: str | None, mock: bool) -> str:
     target = notebook or source
     if target:
@@ -380,7 +392,7 @@ def run_pipeline(
         Panel(
             f"[bold]{result.total_compendiums}[/bold] compendiums from "
             f"[bold]{result.total_sources_scanned}[/bold] videos, ~{result.total_tokens:,} tokens\n"
-            f"Saved to: {esc(where)}",
+            f"Saved to: {esc(where)}" + _gemini_usage_text(engine),
             title="Build complete",
             border_style="green",
             padding=(0, 2),

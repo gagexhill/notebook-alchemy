@@ -7,24 +7,15 @@ import html
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-
-import yt_dlp
-from youtube_transcript_api import (
-    IpBlocked,
-    NoTranscriptFound,
-    RequestBlocked,
-    TranscriptsDisabled,
-    VideoUnavailable,
-    YouTubeTranscriptApi,
-)
 
 from .errors import ChannelScanError
 
@@ -34,6 +25,8 @@ YOUTUBE_HOSTS = frozenset({"youtube.com", "www.youtube.com", "m.youtube.com", "m
 _HANDLE_RE = re.compile(r"^@[\w.\-]+$")
 _CHANNEL_ROOT_RE = re.compile(r"^/(?:@[^/]+|channel/[^/]+|c/[^/]+|user/[^/]+)/?$")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# Caption languages to try first, in order; ALCHEMY_CAPTION_LANGUAGES overrides them. When none
+# exists, a caption track the uploader wrote is preferred over an automatic one in any language.
 PREFERRED_LANGUAGES = ("en", "en-US", "en-GB")
 NEGATIVE_CACHE_DAYS = 7
 
@@ -133,6 +126,8 @@ class ChannelScanner:
                 f"--limit must be 1 or more, got {limit}.", hint="Omit --limit to scan everything."
             )
         norm_url = self.normalize_url(url)
+        import yt_dlp  # imported on use: it is slow to import and most commands never scan
+
         logger_sink = _YdlLogger()
         ydl_opts: dict[str, Any] = {
             "extract_flat": "in_playlist",
@@ -271,12 +266,17 @@ class TranscriptManager:
         max_workers: int = 4,
         api_factory: Callable[[], Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        languages: tuple[str, ...] = PREFERRED_LANGUAGES,
     ) -> None:
         self.cache_dir = cache_dir or (Path.home() / ".notebook-alchemy" / "cache")
         self.transcripts_dir = transcripts_dir
         self.max_workers = max(1, max_workers)
-        self._api_factory = api_factory or YouTubeTranscriptApi
+        self._api_factory = api_factory
         self._sleep = sleep
+        self.languages = tuple(languages) or PREFERRED_LANGUAGES
+        # Set once YouTube blocks a request: the rest of the run would be blocked too, so later
+        # videos skip the network instead of each waiting for the same answer.
+        self._blocked = threading.Event()
 
     # -- helpers --
 
@@ -337,7 +337,7 @@ class TranscriptManager:
                 checked = datetime.fromisoformat(str(data.get("checked_at", "")))
             except ValueError:
                 return None
-            if datetime.now(timezone.utc) - checked < timedelta(days=NEGATIVE_CACHE_DAYS):
+            if datetime.now(UTC) - checked < timedelta(days=NEGATIVE_CACHE_DAYS):
                 return TranscriptResult(video_id, "", "unavailable", str(data.get("reason", "no captions")))
         return None
 
@@ -350,7 +350,7 @@ class TranscriptManager:
             record.update(
                 unavailable=True,
                 reason=reason,
-                checked_at=datetime.now(timezone.utc).isoformat(),
+                checked_at=datetime.now(UTC).isoformat(),
             )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,40 +370,59 @@ class TranscriptManager:
         cached = self._read_cache(video_id)
         if cached:
             return cached
+        if self._blocked.is_set():
+            return TranscriptResult(video_id, "", "blocked", "YouTube blocked an earlier request in this run")
         return self._fetch_remote(video_id, title)
 
     def _fetch_remote(self, video_id: str, title: str) -> TranscriptResult:
-        api = self._api_factory()
-        permanent = (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable)
+        import youtube_transcript_api as yta  # imported on use, like yt-dlp
+
+        api = (self._api_factory or yta.YouTubeTranscriptApi)()
+        # Blocked: this network is refused (an IP block, or YouTube wants a proof-of-origin token);
+        # every retry and every later video gets the same answer, so stop and do not cache it.
+        blocked = (yta.RequestBlocked, yta.PoTokenRequired)
+        # Retried: the request or the page YouTube sent back failed.
+        transient = (yta.YouTubeRequestFailed, yta.YouTubeDataUnparsable)
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
-                try:
-                    fetched = api.fetch(video_id, languages=list(PREFERRED_LANGUAGES))
-                except NoTranscriptFound:
-                    fetched = next(iter(api.list(video_id))).fetch()
-                text = " ".join(" ".join(s.text for s in fetched).split())
+                text = self._caption_text(api, video_id, yta.NoTranscriptFound)
                 if not text:
-                    raise NoTranscriptFound(video_id, PREFERRED_LANGUAGES, None)
+                    self._write_cache(video_id, title, "", reason="EmptyTranscript")
+                    return TranscriptResult(video_id, "", "unavailable", "EmptyTranscript")
                 self._write_cache(video_id, title, text)
                 return TranscriptResult(video_id, text, "youtube")
-            except (RequestBlocked, IpBlocked) as exc:
+            except blocked as exc:
+                self._blocked.set()
                 return TranscriptResult(
                     video_id, "", "blocked", f"YouTube blocked the request ({type(exc).__name__})"
                 )
-            except permanent as exc:
+            except transient as exc:
+                last_exc = exc
+            except yta.CouldNotRetrieveTranscript as exc:
+                # No captions, disabled, private, age-restricted, removed, invalid id, and any
+                # reason a later library version adds: this video has no transcript to fetch.
                 reason = type(exc).__name__
                 self._write_cache(video_id, title, "", reason=reason)
                 return TranscriptResult(video_id, "", "unavailable", reason)
-            except StopIteration:
-                self._write_cache(video_id, title, "", reason="NoTranscriptFound")
-                return TranscriptResult(video_id, "", "unavailable", "NoTranscriptFound")
-            except Exception as exc:  # noqa: BLE001 - library raises varied transient errors
+            except Exception as exc:  # noqa: BLE001 - network errors from the HTTP stack vary
                 last_exc = exc
-                logger.debug("Transcript fetch for %s failed (attempt %d): %s", video_id, attempt + 1, exc)
-                if attempt < 2:
-                    self._sleep(2**attempt)
+            logger.debug("Transcript fetch for %s failed (attempt %d): %s", video_id, attempt + 1, last_exc)
+            if attempt < 2:
+                self._sleep(2**attempt)
         return TranscriptResult(video_id, "", "unavailable", f"fetch failed: {type(last_exc).__name__}")
+
+    def _caption_text(self, api: Any, video_id: str, not_found: type[Exception]) -> str:
+        """Captions in a preferred language, else the uploader's own track, else an automatic one."""
+        try:
+            fetched = api.fetch(video_id, languages=list(self.languages))
+        except not_found:
+            tracks = list(api.list(video_id))
+            if not tracks:
+                raise
+            tracks.sort(key=lambda tr: bool(getattr(tr, "is_generated", False)))  # written first
+            fetched = tracks[0].fetch()
+        return " ".join(" ".join(s.text for s in fetched).split())
 
     def fetch_many(
         self,

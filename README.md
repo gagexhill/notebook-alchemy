@@ -7,10 +7,10 @@
 <div align="center">
 
 ![Notebook Alchemy](https://img.shields.io/badge/Notebook%20Alchemy-0.2.0-5B3FD0?style=for-the-badge)
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Click](https://img.shields.io/badge/Click-8.1%2B-4EAA25?style=for-the-badge)
 ![Rich](https://img.shields.io/badge/Rich-13%2B-FF6F61?style=for-the-badge)
-![yt-dlp](https://img.shields.io/badge/yt--dlp-2025.1%2B-FF0000?style=for-the-badge&logo=youtube&logoColor=white)
+![yt-dlp](https://img.shields.io/badge/yt--dlp-2026.10%2B-FF0000?style=for-the-badge&logo=youtube&logoColor=white)
 ![Gemini](https://img.shields.io/badge/Gemini-3.8%20Flash-4285F4?style=for-the-badge&logo=googlegemini&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
@@ -99,7 +99,7 @@ YouTube URL ──► discover ──► group ──► resolve transcripts ─
 
 | Technology | Version | Role |
 |---|---|---|
-| Python | >=3.10 | Runtime |
+| Python | >=3.11 | Runtime |
 | Click | >=8.1.0 | Command-line parsing, prompts, help |
 | Rich | >=13.0.0 | Tables, progress bars, error panels |
 | httpx | >=0.25.0 | Gemini API calls |
@@ -234,7 +234,7 @@ with tempfile.TemporaryDirectory(prefix="notebook-alchemy-") as tmp:
 
 ### Prerequisites
 
-- Python 3.10 or newer
+- Python 3.11 or newer
 - A Google account with NotebookLM, only if you want to upload
 - A [Gemini API key](https://aistudio.google.com/app/apikey), only if you want synthesized volumes
 

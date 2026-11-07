@@ -96,7 +96,9 @@ class AlchemyEngine:
         )
         self.analyzer = NotebookAnalyzer(self.config, client=self.client, gemini=self.gemini)
         self.transcripts = TranscriptManager(
-            cache_dir=self.config.cache_dir, max_workers=self.config.max_concurrency
+            cache_dir=self.config.cache_dir,
+            max_workers=self.config.max_concurrency,
+            languages=self.config.caption_languages,
         )
         self.synthesizer = Synthesizer(
             api_key=self.config.gemini_api_key,

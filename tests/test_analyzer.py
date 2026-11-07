@@ -224,3 +224,25 @@ def test_estimated_gemini_requests_cover_discovery_assignment_and_each_volume() 
     report = _analyzer(key="").generate_dry_run("x", use_mock=True)  # 288 videos, keyword domains
     volumes = sum(-(-len(v) // 50) for v in report.domain_videos.values())
     assert report.estimated_gemini_requests == 1 + 2 + volumes  # 288 titles = 2 assignment batches
+
+
+def test_notebook_sources_keep_only_youtube_videos_under_their_youtube_id() -> None:
+    sources = [
+        {
+            "id": "uuid-1",
+            "title": "A talk",
+            "type": "youtube",
+            "url": "https://www.youtube.com/watch?v=abcdefghijk",
+        },
+        {"id": "uuid-2", "title": "Short", "type": "", "url": "https://youtu.be/bcdefghijkl"},
+        {
+            "id": "uuid-3",
+            "title": "Drive video",
+            "type": "google_drive_video",
+            "url": "https://drive.google.com/x",
+        },
+        {"id": "uuid-4", "title": "Notes", "type": "pdf", "url": ""},
+    ]
+    videos, others = NotebookAnalyzer._summaries_from_sources(sources)
+    assert [v.source_id for v in videos] == ["abcdefghijk", "bcdefghijkl"]
+    assert [o["id"] for o in others] == ["uuid-3", "uuid-4"]
