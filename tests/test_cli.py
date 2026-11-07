@@ -282,6 +282,14 @@ def test_login_cookie_failure_does_not_fall_through(
     assert len(calls) == 1  # did not open an interactive browser afterwards
 
 
+def test_a_long_sign_in_failure_shows_its_cause(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    notes = "Note: sibling-product domains are not requested by default. " * 8
+    out = notes + "Reading cookies from chrome... Could not read chrome cookies: browser database is locked."
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 1, "", out))
+    result = runner.invoke(cli, ["login", "--browser-cookies", "chrome"], terminal_width=200)
+    assert result.exit_code == 1 and "database is locked" in " ".join(result.output.split())
+
+
 # --- clean ----------------------------------------------------------------------------------------
 
 
@@ -817,3 +825,8 @@ def test_login_writes_the_session_file_every_other_call_reads(
     assert result.exit_code == 0, result.output
     assert calls[0][:3] == ["notebooklm", "--storage", str(storage)] and "login" in calls[0]
     assert "session file" in result.output
+
+
+def test_tabs_option_rejects_unknown_tabs(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["dry-run", "@my", "--tabs", "videos,reels"])
+    assert result.exit_code == 2 and "shorts" in result.output

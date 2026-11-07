@@ -24,6 +24,10 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   `QuotaFailure` / `RetryInfo` details; every `CouldNotRetrieveTranscript` reason (including ones a
   later library adds) is classified; `PoTokenRequired` counts as blocked and stops the run's remaining
   caption requests.
+- **Channels include live streams.** A channel URL reads the Videos and Live tabs (`--tabs`; Shorts on
+  request). Live streams are long and captioned; Shorts are usually under a minute. A live test showed
+  why: a channel YouTube lists at 1.1K items had 508 videos, 246 streams and 440 Shorts, and the
+  Videos tab alone missed the streams.
 - **Faster where the time goes.** Uploads and waits run three `notebooklm` processes at a time (each
   takes seconds to start); titles are still corrected only after every wait. yt-dlp loads on first use,
   so `--help` went from about 1.5 s to 0.6 s.

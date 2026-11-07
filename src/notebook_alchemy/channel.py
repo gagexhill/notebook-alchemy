@@ -29,6 +29,10 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # exists, a caption track the uploader wrote is preferred over an automatic one in any language.
 PREFERRED_LANGUAGES = ("en", "en-US", "en-GB")
 NEGATIVE_CACHE_DAYS = 7
+# Channel tabs a scan can read. Videos and live streams have captions worth reading; Shorts are
+# usually under a minute, so they are left out unless asked for.
+CHANNEL_TABS = ("videos", "streams", "shorts")
+DEFAULT_TABS = ("videos", "streams")
 PO_TOKEN_STOP_AFTER = 2  # proof-of-origin demands before the run stops asking YouTube for captions
 _YOUTUBE_ID_RE = re.compile(r"^[\w-]{11}$")
 
@@ -104,6 +108,17 @@ class ChannelScanner:
             return f"https://www.youtube.com{parts.path.rstrip('/')}/videos"
         return url
 
+    def channel_root(self, raw_url: str) -> str | None:
+        """`https://www.youtube.com/@handle` (or /channel/..., /c/..., /user/...) for a channel URL."""
+        url = self.normalize_url(raw_url)
+        parts = urlsplit(url)
+        if (parts.hostname or "").lower() not in YOUTUBE_HOSTS:
+            return None
+        path = parts.path.rstrip("/")
+        if path.endswith("/videos") and _CHANNEL_ROOT_RE.match(path[: -len("/videos")]):
+            return f"https://www.youtube.com{path[: -len('/videos')]}"
+        return None
+
     def is_youtube_url(self, text: str) -> bool:
         """True for YouTube URLs and bare @handles; false for free text that mentions YouTube."""
         value = text.strip()
@@ -120,13 +135,55 @@ class ChannelScanner:
         url: str,
         limit: int | None = None,
         *,
-        _depth: int = 0,
+        tabs: tuple[str, ...] = DEFAULT_TABS,
     ) -> ChannelScanResult:
-        """Return video metadata, or raise ChannelScanError. Never substitutes sample data."""
+        """Return video metadata, or raise ChannelScanError. Never substitutes sample data.
+
+        A channel URL is read tab by tab (`tabs`, in order, a tab the channel does not have is
+        skipped); a playlist or video URL is read as it is.
+        """
         if limit is not None and limit < 1:
             raise ChannelScanError(
                 f"--limit must be 1 or more, got {limit}.", hint="Omit --limit to scan everything."
             )
+        unknown = [t for t in tabs if t not in CHANNEL_TABS]
+        if unknown or not tabs:
+            raise ChannelScanError(
+                f"Unknown channel tab: {', '.join(unknown) or '(none)'}.",
+                hint=f"Use one or more of: {', '.join(CHANNEL_TABS)}.",
+            )
+        root = self.channel_root(url)
+        if root is None:
+            return self._scan_one(url, limit)
+
+        name = ""
+        videos: list[ChannelVideo] = []
+        seen: set[str] = set()
+        for index, tab in enumerate(dict.fromkeys(tabs)):  # each tab once, in the order given
+            try:
+                result = self._scan_one(f"{root}/{tab}", limit)
+            except ChannelScanError as exc:
+                missing = f"does not have a {tab} tab" in exc.message or "No videos found" in exc.message
+                if missing or index > 0:
+                    # A tab the channel lacks is normal. A later tab failing after the first one
+                    # worked is not worth losing the scan over, so it is skipped and logged.
+                    logger.info("Skipped the %s tab of %s: %s", tab, root, exc.message)
+                    continue
+                raise
+            name = name or result.channel_name
+            for video in result.videos:
+                if video.id not in seen:
+                    seen.add(video.id)
+                    videos.append(video)
+        if not videos:
+            raise ChannelScanError(
+                f"No videos found at '{url}' (tabs: {', '.join(tabs)}).",
+                hint="Use a channel (@handle), a playlist, or a video URL that has public videos.",
+            )
+        return ChannelScanResult(channel_name=name, videos=videos[:limit] if limit else videos)
+
+    def _scan_one(self, url: str, limit: int | None, _depth: int = 0) -> ChannelScanResult:
+        """Read one channel tab, playlist or video."""
         norm_url = self.normalize_url(url)
         import yt_dlp  # imported on use: it is slow to import and most commands never scan
 
@@ -168,7 +225,7 @@ class ChannelScanner:
         if not videos and tab_urls and _depth == 0:
             videos_tab = next((u for u in tab_urls if u.rstrip("/").endswith("/videos")), None)
             if videos_tab:
-                return self.scan(videos_tab, limit, _depth=1)
+                return self._scan_one(videos_tab, limit, _depth=1)
 
         if not videos:
             raise ChannelScanError(
@@ -177,7 +234,7 @@ class ChannelScanner:
             )
 
         raw_title = info.get("title") or info.get("channel") or info.get("uploader") or "YouTube"
-        channel_name = str(raw_title).replace(" - Videos", "").strip() or "YouTube"
+        channel_name = re.sub(r" - (Videos|Live|Shorts)$", "", str(raw_title)).strip() or "YouTube"
         return ChannelScanResult(
             channel_name=channel_name,
             videos=videos,

@@ -19,7 +19,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__, ui
-from .channel import video_id_from_url
+from .channel import CHANNEL_TABS, DEFAULT_TABS, video_id_from_url
 from .client import (
     AccountIdentity,
     NotebookLMClient,
@@ -171,6 +171,29 @@ def _gemini_usage_text(engine: AlchemyEngine) -> str:
     return "\nGemini used " + "; ".join(lines) + " [dim](output includes thinking)[/dim]"
 
 
+def _parse_tabs(_ctx: click.Context, _param: click.Parameter, value: str) -> tuple[str, ...]:
+    tabs = tuple(dict.fromkeys(t.strip().lower() for t in value.split(",") if t.strip()))
+    unknown = [t for t in tabs if t not in CHANNEL_TABS]
+    if unknown or not tabs:
+        raise click.BadParameter(f"use one or more of {', '.join(CHANNEL_TABS)}, separated by commas.")
+    return tabs
+
+
+tabs_option = click.option(
+    "--tabs",
+    default=",".join(DEFAULT_TABS),
+    show_default=True,
+    callback=_parse_tabs,
+    help="Channel tabs to read: videos, streams, shorts (comma-separated). Ignored for playlists and videos.",
+)
+
+
+def _last_words(text: str, limit: int = 300) -> str:
+    """The end of a tool's output on one line: the cause is usually last, after progress notes."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else "..." + flat[-limit:].split(" ", 1)[-1]
+
+
 def _target(source: str | None, notebook: str | None, mock: bool) -> str:
     target = notebook or source
     if target:
@@ -273,6 +296,7 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
 @click.option("--offline", is_flag=True, help="No Gemini calls: keyword clustering, offline indexes.")
 @click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real source.")
 @click.option("--limit", type=click.IntRange(min=1), help="Only scan the first N videos.")
+@tabs_option
 @click.option(
     "--max-per-vol",
     type=click.IntRange(min=1),
@@ -292,6 +316,7 @@ def run_pipeline(
     offline: bool,
     mock: bool,
     limit: int | None,
+    tabs: tuple[str, ...],
     max_per_vol: int,
     write: bool,
     sync: bool,
@@ -326,7 +351,7 @@ def run_pipeline(
     ui.step(1, total_steps, "Discover and group videos")
     with ui.Reporter() as reporter:
         report = engine.analyzer_for(offline).generate_dry_run(
-            target, use_mock=mock, limit=limit, progress=reporter
+            target, use_mock=mock, limit=limit, tabs=tabs, progress=reporter
         )
     if report.is_mock:
         ui.banner("Sample data", MOCK_NOTE)
@@ -441,10 +466,18 @@ def run_pipeline(
 @click.argument("source", required=False)
 @click.option("-n", "--notebook", help="YouTube URL or existing notebook (alternative to SOURCE).")
 @click.option("--limit", type=click.IntRange(min=1), help="Only scan the first N videos.")
+@tabs_option
 @click.option("--offline", is_flag=True, help="No Gemini calls: keyword clustering only.")
 @click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real source.")
 @handle_errors
-def dry_run(source: str | None, notebook: str | None, limit: int | None, offline: bool, mock: bool) -> None:
+def dry_run(
+    source: str | None,
+    notebook: str | None,
+    limit: int | None,
+    tabs: tuple[str, ...],
+    offline: bool,
+    mock: bool,
+) -> None:
     """Preview videos, domains and cost. Writes and uploads nothing."""
     target = _target(source, notebook, mock)
     engine = _engine()
@@ -452,7 +485,7 @@ def dry_run(source: str | None, notebook: str | None, limit: int | None, offline
     ui.info(f"[bold cyan]Analyzing[/bold cyan] {esc(target)}")
     with ui.Reporter() as reporter:
         report = engine.analyzer_for(offline).generate_dry_run(
-            target, use_mock=mock, limit=limit, progress=reporter
+            target, use_mock=mock, limit=limit, tabs=tabs, progress=reporter
         )
     if report.is_mock:
         ui.banner("Sample data", MOCK_NOTE)
@@ -618,7 +651,7 @@ def _sign_in(
             )
         raise NotebookLMError(
             f"Sign-in did not complete (exit code {proc.returncode})."
-            + (f" {' '.join(detail.split())[:300]}" if detail else ""),
+            + (f" {_last_words(detail)}" if detail else ""),
             hint=hint,
         )
     identity = client.upload_account()
