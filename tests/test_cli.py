@@ -16,7 +16,14 @@ from notebook_alchemy import __version__, ui
 from notebook_alchemy import cli as cli_module
 from notebook_alchemy.channel import ChannelScanner, ChannelScanResult, ChannelVideo
 from notebook_alchemy.cli import cli
-from notebook_alchemy.client import AccountIdentity, NotebookLMClient, SessionStatus, upload_confirmed
+from notebook_alchemy.client import (
+    AccountIdentity,
+    NotebookLMClient,
+    SessionStatus,
+    consent_file,
+    record_upload_consent,
+    upload_confirmed,
+)
 from notebook_alchemy.engine import AlchemyEngine, SyncResult
 from notebook_alchemy.errors import ChannelScanError, SyncError
 
@@ -323,6 +330,32 @@ def test_clean_yes_skips_the_prompt(runner: CliRunner, isolated_environment) -> 
     assert not vault.exists()
 
 
+def test_setup_saves_a_home_relative_vault_path_without_the_home_folder(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, ["setup"], input="\ndefault\nkeep\n~/alchemy-vault\n")
+    assert result.exit_code == 0, result.output
+    text = (isolated_environment.work / ".env").read_text(encoding="utf-8")
+    assert "ALCHEMY_VAULT_PATH=~/alchemy-vault" in text
+    assert str(isolated_environment.home) not in text
+
+
+def test_clean_records_removes_upload_records_and_confirmations(
+    runner: CliRunner, isolated_environment
+) -> None:
+    cache, vault = _seed_cache_and_vault(isolated_environment)
+    sync_dir = isolated_environment.home / ".notebook-alchemy" / "sync"
+    sync_dir.mkdir(parents=True)
+    (sync_dir / "nb-1.json").write_text('{"titles": ["A"]}', encoding="utf-8")
+    record_upload_consent(AccountIdentity("default", ACCOUNT))
+    declined = runner.invoke(cli, ["clean", "--records"], input="n\n")
+    assert declined.exit_code == 0 and "local records" in declined.output and consent_file().exists()
+    assert runner.invoke(cli, ["clean", "--records", "--yes"]).exit_code == 0
+    assert not list(sync_dir.iterdir()) and not consent_file().exists()
+    assert list(cache.iterdir()) and vault.exists()  # --records touches nothing else
+
+
 def test_clean_reports_real_failures(
     runner: CliRunner, isolated_environment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -489,7 +522,7 @@ def test_status_shows_account_and_key_state_but_never_the_key(
     result = runner.invoke(cli, ["status", "--profile", "personal"])
     assert result.exit_code == 0, result.output
     assert "owner@example.test" in result.output and "personal" in result.output
-    assert "AI Pro" in result.output and key not in result.output and key[:10] not in result.output
+    assert "subscription plan" in result.output and key not in result.output and key[:10] not in result.output
 
 
 def test_first_upload_without_a_terminal_needs_yes(
@@ -629,7 +662,7 @@ def test_setup_writes_env_without_echoing_the_key_and_reruns(
     text = env.read_text(encoding="utf-8")
     assert text.startswith("# keep me\nALCHEMY_LOG_LEVEL=INFO\n")
     assert f"GEMINI_API_KEY={key}" in text and "ALCHEMY_NOTEBOOKLM_PROFILE=personal" in text
-    assert f'ALCHEMY_VAULT_PATH="{vault.resolve()}"' in text
+    assert f'ALCHEMY_VAULT_PATH="{vault}"' in text  # as typed
 
     for name in ("GEMINI_API_KEY", "ALCHEMY_NOTEBOOKLM_PROFILE", "ALCHEMY_VAULT_PATH"):
         os.environ.pop(name, None)  # loaded into this process by the first run

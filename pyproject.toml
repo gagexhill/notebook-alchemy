@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "Gage Hill" }
+    { name = "gagexhill" }
 ]
 keywords = ["notebooklm", "gemini", "youtube", "transcripts", "yt-dlp", "knowledge-base", "cli"]
 classifiers = [

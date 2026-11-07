@@ -267,6 +267,22 @@ def test_upload_consent_is_per_profile_and_per_account() -> None:
     assert not upload_confirmed(AccountIdentity("personal", "a@example.test"))
 
 
+def test_the_consent_record_never_holds_the_email() -> None:
+    record_upload_consent(AccountIdentity("work", "Private.Person@example.test"))
+    record_upload_consent(AccountIdentity("home", "other@example.test"))
+    text = consent_file().read_text(encoding="utf-8")
+    assert "example.test" not in text.lower() and "private" not in text.lower()
+    assert upload_confirmed(AccountIdentity("work", "private.person@EXAMPLE.test"))  # case-insensitive
+
+
+def test_a_plain_email_record_from_an_earlier_version_asks_again() -> None:
+    consent_file().parent.mkdir(parents=True, exist_ok=True)
+    consent_file().write_text(json.dumps({"work": {"email": "a@example.test"}}), encoding="utf-8")
+    assert not upload_confirmed(AccountIdentity("work", "a@example.test"))
+    record_upload_consent(AccountIdentity("work", "a@example.test"))  # rewrites it in the new form
+    assert "a@example.test" not in consent_file().read_text(encoding="utf-8")
+
+
 def test_unreadable_consent_record_asks_again() -> None:
     record_upload_consent(AccountIdentity("work", "a@example.test"))
     consent_file().write_text("{not json", encoding="utf-8")

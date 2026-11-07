@@ -264,9 +264,13 @@ class AlchemyEngine:
 
     # -- NotebookLM sync --
 
+    def sync_records_dir(self) -> Path:
+        """Where the per-notebook records of past uploads live (`clean --records` empties it)."""
+        return self.config.cache_dir.parent / "sync"
+
     def _sync_state_path(self, notebook_id: str) -> Path:
         """Per-user record of what the last successful sync uploaded to this notebook."""
-        return self.config.cache_dir.parent / "sync" / f"{safe_filename(notebook_id)}.json"
+        return self.sync_records_dir() / f"{safe_filename(notebook_id)}.json"
 
     def _read_synced_titles(self, notebook_id: str) -> list[str]:
         path = self._sync_state_path(notebook_id)
@@ -283,9 +287,7 @@ class AlchemyEngine:
         path = self._sync_state_path(notebook_id)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps({"notebook_id": notebook_id, "titles": sorted(titles)}), encoding="utf-8"
-            )
+            path.write_text(json.dumps({"titles": sorted(titles)}), encoding="utf-8")
         except OSError as exc:
             logger.warning(
                 "Could not record this sync (%s); stale sources will not be pruned next time.", exc

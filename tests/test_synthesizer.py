@@ -24,7 +24,7 @@ from notebook_alchemy.synthesizer import (
 )
 
 KEY = "K" * 24
-UUID = "6fd9a6b5-5065-4c0f-ba7e-711c712fc3c9"
+UUID = "00000000-0000-4000-8000-000000000000"
 
 
 def _videos(n: int) -> list[dict]:

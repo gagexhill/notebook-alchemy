@@ -1,17 +1,17 @@
 # AGENTS.md
 
-Durable rules for agents working in this repository. Company standards live in
-`ventryn-cloud/STANDARDS.md` and are consumed by pointer; this file adds only what is specific here.
+Rules for anyone changing this repository, people and coding agents alike. `CONTRIBUTING.md` covers how
+to propose a change; this file covers what a change must keep true.
 
 ## Orientation
 
-- `README.md` is orientation and follows the `readme-structure` skill. `OPERATIONS.md` is the current
-  operations map. `DEVLOG.md` records completed material decisions. Open work is a GitHub issue in
-  this repository, never a document or an inline comment.
+- `README.md` is the user guide. `OPERATIONS.md` is the maintainer runbook. `DEVLOG.md` records
+  completed design decisions and why. Open work is a GitHub issue, never a document or an inline comment.
 - Source is `src/notebook_alchemy/`: `cli.py` (commands), `ui.py` (output), `engine.py` (orchestration),
   `analyzer.py` (discovery, clustering, cost), `channel.py` (YouTube and transcripts), `synthesizer.py`
   (compendiums), `client.py` (NotebookLM through the `notebooklm` CLI), `gemini.py` (Gemini API),
-  `vault.py` (local output), `config.py`, `errors.py`.
+  `vault.py` (local output), `config.py` (settings), `errors.py` (typed errors), `mock_data.py` (the
+  sample catalog behind `--mock`).
 
 ## Invariants
 
@@ -20,40 +20,41 @@ Durable rules for agents working in this repository. Company standards live in
 - A success message is printed only after the work is confirmed: check return codes, parse results, and
   raise a typed error from `errors.py` with a message and a next action. No broad `except` that discards
   an outcome.
-- The Gemini key goes in the `x-goog-api-key` header only. Never log, print or store it, and never put
-  it in a URL. Every raised message passes through `gemini.scrub`.
+- The Gemini key goes in the `x-goog-api-key` header only. Never log, print or store it outside `.env`,
+  and never put it in a URL. Every raised message passes through `gemini.scrub`.
+- Nothing identifying the user is stored that a feature does not need. The upload confirmation keeps a
+  salted hash of the account email, not the email; nothing is sent anywhere except YouTube, the Gemini
+  API and NotebookLM. No telemetry.
 - Vault output is written to a staging directory and swapped in whole (`vault.replace_dir`). Output is
   namespaced `vault/<source-slug>/compendiums/`.
 - Upload content goes to `notebooklm` as a file, never on the command line (Windows limits one argument
   to about 32,000 characters). NotebookLM can reset a source title to its file name after processing, so
   a sync waits, corrects titles, and reads the notebook back before it reports success.
 - Text that comes from outside (titles, errors, paths) is passed through `ui.esc` before Rich prints it.
-- Model names and prices live in `config.py` and `gemini.py` only.
+- Model names live in `config.py`; prices and model capabilities live in `gemini.py`.
 
 ## Validation
 
-Run from the repository root; these are the owning commands.
+Run from the repository root (`python` may be `py` on Windows or `python3` on macOS and Linux).
 
-```powershell
-py -m ruff check .
-py -m ruff format --check .
-py -m pytest
-py -m notebook_alchemy.cli test
+```bash
+python -m ruff check .
+python -m ruff format --check .
+python -m pytest
+python -m notebook_alchemy.cli test
 ```
 
 - Tests are hermetic: `tests/conftest.py` isolates the working directory and home, and blocks real
   processes and sockets. Inject a runner or fake instead of calling out. A test that needs the real
   network or a real NotebookLM account does not belong in this suite.
 - A new guard needs a test that fails with the guard removed.
-- Do not run the NotebookLM upload or Gemini paths against real accounts without the Owner's say-so.
+- Do not run the NotebookLM upload or Gemini paths against an account without its owner's consent.
 
 ## Process
 
-- Select or open the owning GitHub issue before editing; reconcile it at each checkpoint with commit,
-  commands run and results, and the gates left open.
-- Hosted GitHub Actions are not authorized by default. `OPERATIONS.md` records the current authorization;
-  validate locally. Install hooks per clone: `git config core.hooksPath .githooks`.
-- Keep public surfaces free of internal contacts, token paths and secret names. Security reports go
-  through GitHub private vulnerability reporting, as `SECURITY.md` says.
-- Use the Owner or Managing Member wording, and the brand register in `ventryn-cloud/STANDARDS.md`
-  (Brand Voice) for any outward text.
+- Link the GitHub issue a change belongs to, and note in it what changed, the commands run with their
+  results, and anything left open.
+- Install the pre-push secret scan once per clone: `git config core.hooksPath .githooks`.
+- Keep the repository free of personal data: no real emails (use `@example.test`), names, local paths,
+  notebook ids or account details in code, tests, docs or recordings. Security reports go through
+  GitHub private vulnerability reporting, as `SECURITY.md` says.
