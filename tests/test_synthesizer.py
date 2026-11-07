@@ -77,6 +77,19 @@ def test_colliding_domains_get_distinct_slugs() -> None:
     assert slugs["A & B"] == "A_B"
 
 
+@pytest.mark.parametrize("domain", ["INDEX", "index", "Master Sources Catalog", "MASTER_SOURCES_CATALOG"])
+def test_a_domain_cannot_take_a_vault_file_name(domain: str) -> None:
+    slug = unique_slugs([domain])[domain]
+    assert slug.lower() not in {"index", "master_sources_catalog"}
+
+
+def test_a_domain_cannot_take_a_volume_file_name() -> None:
+    slugs = unique_slugs(["A", "A Vol 2", "Design vol 10"])
+    assert slugs["A"] == "A"
+    assert slugs["A Vol 2"].lower() != "a_vol_2"
+    assert not slugs["Design vol 10"].lower().endswith("_vol_10")
+
+
 def test_yaml_values_are_escaped() -> None:
     assert yaml_str('He said "hi" \\ done') == '"He said \\"hi\\" \\\\ done"'
     s = Synthesizer(api_key="")
