@@ -196,13 +196,12 @@ class NotebookLMClient:
 
         Read from package metadata: starting `notebooklm --version` takes seconds.
         """
-        found = shutil.which(NOTEBOOKLM_BIN)
-        if found is None:
+        if shutil.which(NOTEBOOKLM_BIN) is None:
             return None
         try:
             version = importlib.metadata.version("notebooklm-py")
         except importlib.metadata.PackageNotFoundError:
-            return f"found at {found}, not installed in this Python (version unknown)"
+            return "on PATH, but not installed in this Python (version unknown)"
         return f"notebooklm-py {version}"
 
     def check_session(self) -> SessionStatus:
