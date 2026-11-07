@@ -12,6 +12,8 @@ from notebook_alchemy.config import (
     AlchemyConfig,
     _load_dotenv_simple,
     is_usable_api_key,
+    update_dotenv,
+    validate_profile_name,
 )
 from notebook_alchemy.errors import ConfigError
 
@@ -88,3 +90,56 @@ def test_fallback_model_default_override_and_off(monkeypatch: pytest.MonkeyPatch
     assert AlchemyConfig.from_env().gemini_fallback_model == "gemini-other"
     monkeypatch.setenv("ALCHEMY_GEMINI_FALLBACK_MODEL", "")
     assert AlchemyConfig.from_env().gemini_fallback_model == ""
+
+
+def test_notebooklm_profile_default_override_and_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert AlchemyConfig.from_env().notebooklm_profile == "default"
+    monkeypatch.setenv("ALCHEMY_NOTEBOOKLM_PROFILE", "personal")
+    assert AlchemyConfig.from_env().notebooklm_profile == "personal"
+    monkeypatch.setenv("ALCHEMY_NOTEBOOKLM_PROFILE", "../escape")
+    with pytest.raises(ConfigError, match="profile name"):
+        AlchemyConfig.from_env()
+
+
+def test_update_dotenv_replaces_in_place_keeps_other_lines_and_round_trips() -> None:
+    env = Path(".env")
+    env.write_text(
+        "# my settings\nGEMINI_API_KEY=old_value_123456789\nOTHER=keep\nGEMINI_API_KEY=dup\n",
+        encoding="utf-8",
+    )
+    update_dotenv({"GEMINI_API_KEY": "new_value_123456789", "ALCHEMY_VAULT_PATH": "C:/My Vault"})
+    lines = env.read_text(encoding="utf-8").splitlines()
+    assert lines == [
+        "# my settings",
+        "GEMINI_API_KEY=new_value_123456789",
+        "OTHER=keep",
+        'ALCHEMY_VAULT_PATH="C:/My Vault"',
+    ]
+    _load_dotenv_simple(env)
+    assert os.environ["GEMINI_API_KEY"] == "new_value_123456789"
+    assert os.environ["ALCHEMY_VAULT_PATH"] == "C:/My Vault"
+
+
+@pytest.mark.parametrize("value", ['has"quote', "two\nlines", " padded"])
+def test_update_dotenv_rejects_values_it_cannot_round_trip(value: str) -> None:
+    with pytest.raises(ConfigError):
+        update_dotenv({"GEMINI_API_KEY": value})
+    assert not Path(".env").exists()
+
+
+@pytest.mark.parametrize("name", ["nul", "COM1", "work.", "a.b", "-x", "", "x" * 65])
+def test_unusable_profile_names_are_refused(name: str) -> None:
+    with pytest.raises(ConfigError, match="profile name"):
+        validate_profile_name(name)
+
+
+def test_update_dotenv_replaces_export_lines_and_quotes_hash_values() -> None:
+    env = Path(".env")
+    env.write_text("export GEMINI_API_KEY=old_value_123456789\n", encoding="utf-8")
+    update_dotenv({"GEMINI_API_KEY": "new_value_123456789", "ALCHEMY_VAULT_PATH": "C:/a#b"})
+    assert env.read_text(encoding="utf-8").splitlines() == [
+        "GEMINI_API_KEY=new_value_123456789",
+        'ALCHEMY_VAULT_PATH="C:/a#b"',
+    ]
+    _load_dotenv_simple(env)
+    assert os.environ["ALCHEMY_VAULT_PATH"] == "C:/a#b"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +20,13 @@ DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 # Used when the default is overloaded or unavailable; set ALCHEMY_GEMINI_FALLBACK_MODEL to an empty
 # value to turn the fallback off.
 DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_NOTEBOOKLM_PROFILE = "default"
+# notebooklm-py 0.8.6 accepts ^[a-zA-Z0-9][a-zA-Z0-9_-]*$; the name is also a folder, so Windows
+# device names are refused too.
+_PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_WINDOWS_RESERVED = frozenset(
+    {"con", "prn", "aux", "nul"} | {f"{p}{n}" for p in ("com", "lpt") for n in range(1, 10)}
+)
 DEFAULT_MAX_CONCURRENCY = 4
 DEFAULT_MAX_PER_VOLUME = 50
 MAX_ALLOWED_CONCURRENCY = 16
@@ -60,6 +69,69 @@ def _load_dotenv_simple(env_path: Path | None = None) -> None:
         os.environ[key] = value
 
 
+def validate_profile_name(name: str, *, source: str = "ALCHEMY_NOTEBOOKLM_PROFILE") -> str:
+    """A notebooklm profile name: letters, digits, `_` and `-`, starting with a letter or digit."""
+    value = name.strip()
+    if not _PROFILE_NAME.match(value) or value.lower() in _WINDOWS_RESERVED:
+        where = " (in .env or your environment)" if source.isupper() else ""
+        raise ConfigError(
+            f"{source}={name!r}{where} is not a usable NotebookLM profile name.",
+            hint="Use letters, digits, '_' or '-', and not a device name like nul (e.g. personal).",
+        )
+    return value
+
+
+def update_dotenv(values: dict[str, str], env_path: Path | None = None) -> Path:
+    """Set KEY=VALUE lines in a .env file, keeping every other line, and swap the file in whole.
+
+    Existing assignments of the same keys are replaced in place; new keys are appended. Values are
+    never logged. Returns the path written.
+    """
+    path = env_path or Path(".env")
+    for key, value in values.items():
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+            raise ConfigError(f"{key!r} is not an environment variable name.")
+        if any(ch in value for ch in '\r\n"') or value != value.strip():
+            raise ConfigError(
+                f"The value for {key} contains a quote, a line break or surrounding spaces.",
+                hint="Enter the value without those characters.",
+            )
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(
+            f"Could not read {path}: {exc}", hint="Fix or remove the file, then run setup again."
+        ) from exc
+
+    pending = dict(values)
+    out: list[str] = []
+    for raw in lines:
+        stripped = raw.strip()
+        body = stripped[len("export ") :].lstrip() if stripped.startswith("export ") else stripped
+        key = body.split("=", 1)[0].strip() if "=" in body and not body.startswith("#") else ""
+        if key in values:
+            if key in pending:
+                out.append(_dotenv_line(key, pending.pop(key)))
+            continue  # a later duplicate of a key already written
+        out.append(raw)
+    out.extend(_dotenv_line(k, v) for k, v in pending.items())
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".env.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(out) + "\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        Path(tmp).unlink(missing_ok=True)
+        raise ConfigError(f"Could not write {path}: {exc}") from exc
+    return path
+
+
+def _dotenv_line(key: str, value: str) -> str:
+    return f'{key}="{value}"' if (" " in value or "#" in value) else f"{key}={value}"
+
+
 def _int_env(name: str, default: int, *, low: int, high: int) -> int:
     raw = os.getenv(name)
     if raw is None or not raw.strip():
@@ -93,6 +165,7 @@ class AlchemyConfig:
     gemini_model: str = DEFAULT_GEMINI_MODEL
     gemini_fallback_model: str = DEFAULT_GEMINI_FALLBACK_MODEL
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
+    notebooklm_profile: str = DEFAULT_NOTEBOOKLM_PROFILE
 
     @property
     def has_gemini_key(self) -> bool:
@@ -131,5 +204,8 @@ class AlchemyConfig:
                 DEFAULT_MAX_CONCURRENCY,
                 low=1,
                 high=MAX_ALLOWED_CONCURRENCY,
+            ),
+            notebooklm_profile=validate_profile_name(
+                os.getenv("ALCHEMY_NOTEBOOKLM_PROFILE", "").strip() or DEFAULT_NOTEBOOKLM_PROFILE
             ),
         )

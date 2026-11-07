@@ -44,7 +44,7 @@ known-public value narrowly in `.gitleaks.toml`. A bypass is `GITLEAKS_BYPASS=1`
 
 | Purpose | Authorization | Reference |
 |---|---|---|
-| Development validation (`.github/workflows/validate.yml`) | Owner approved opening the audit remediation pull requests (#16), which run it on the `fix/audit-remediation` pull request to `main`. The Owner's merges of #36 and #37 (2026-11-06) each ran it once more on the push to `main`, because the workflow also triggers on that push. On 2026-11-07 the Owner approved opening and merging the `fix/reserved-vault-filenames` pull request (#28), which runs it on that pull request and on the merge push. Any other run needs a new record here | #30 |
+| Development validation (`.github/workflows/validate.yml`) | Owner approved opening the audit remediation pull requests (#16), which run it on the `fix/audit-remediation` pull request to `main`. The Owner's merges of #36 and #37 (2026-11-06) each ran it once more on the push to `main`, because the workflow also triggers on that push. On 2026-11-07 the Owner approved opening and merging the `fix/reserved-vault-filenames` pull request (#28), which runs it on that pull request and on the merge push. Also on 2026-11-07 the Owner approved opening and merging the `feat/39-upload-account` pull request (#39), which runs it on that pull request and on the merge push. Any other run needs a new record here | #30 |
 | Release | None on record | #33 |
 
 A workflow file, included runner allowance, or an older run is not permission. Verify the repository's
@@ -55,7 +55,8 @@ Actions setting before publishing a branch that would trigger a run.
 | Credential | Class | Where it lives | Rotation |
 |---|---|---|---|
 | `GEMINI_API_KEY` | credential | Local `.env` (git-ignored), never committed | 90 days, or at once if it was ever printed or logged |
-| NotebookLM session (cookies) | credential | `~/.notebooklm/profiles/<profile>/storage_state.json`, owned by the `notebooklm` CLI | Re-run `notebook-alchemy login` when `login --check` fails |
+| NotebookLM session (cookies) | credential | `~/.notebooklm/profiles/<profile>/storage_state.json`, owned by the `notebooklm` CLI; the profile is `ALCHEMY_NOTEBOOKLM_PROFILE` (default `default`) | Re-run `notebook-alchemy login` when `login --check` fails; `status` names the account the profile records |
+| Upload confirmations | local record | `~/.notebook-alchemy/upload_accounts.json` (profile to confirmed account email) | Delete it to be asked again before the next upload |
 
 Neither value goes in an issue, a log, a commit, or a test. Tests use obvious placeholders.
 

@@ -7,6 +7,7 @@ transcript cache, NotebookLM session, notebooks, or the network.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import socket
 import subprocess
@@ -25,13 +26,14 @@ _ENV_TO_CLEAR = (
     "ALCHEMY_CACHE_DIR",
     "ALCHEMY_GEMINI_MODEL",
     "ALCHEMY_MAX_CONCURRENCY",
+    "ALCHEMY_NOTEBOOKLM_PROFILE",
     "NOTEBOOKLM_AUTH_JSON",
     "NO_COLOR",
 )
 
 
 @pytest.fixture(autouse=True)
-def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home = tmp_path / "home"
     work = tmp_path / "work"
     home.mkdir()
@@ -51,7 +53,11 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Sim
     monkeypatch.setattr(subprocess, "run", _no_process)
     monkeypatch.setattr(subprocess, "Popen", _no_process)
     monkeypatch.setattr(socket.socket, "connect", _no_network)
-    return SimpleNamespace(home=home, work=work)
+    # .env loading writes to os.environ directly; put the environment back so nothing leaks onward.
+    snapshot = dict(os.environ)
+    yield SimpleNamespace(home=home, work=work)
+    os.environ.clear()
+    os.environ.update(snapshot)
 
 
 class FakeProcess:
