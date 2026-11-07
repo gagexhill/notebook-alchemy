@@ -41,7 +41,6 @@ class SourceDocument:
     source_id: str
     title: str
     content: str
-    source_type: str = "document"
 
 
 @dataclass

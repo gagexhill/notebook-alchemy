@@ -29,14 +29,10 @@ class VaultManager:
         return self.vault_path / source_slug(title) / "compendiums"
 
     def existing_compendium_dirs(self) -> list[Path]:
-        """Every generated compendium directory, including the pre-namespacing layout."""
+        """Every generated compendium directory (`<vault>/<source>/compendiums`)."""
         if not self.vault_path.is_dir():
             return []
-        found = [p for p in sorted(self.vault_path.glob("*/compendiums")) if p.is_dir()]
-        legacy = self.vault_path / "compendiums"
-        if legacy.is_dir():
-            found.insert(0, legacy)
-        return found
+        return [p for p in sorted(self.vault_path.glob("*/compendiums")) if p.is_dir()]
 
     @staticmethod
     def stage_dir(final: Path) -> Path:

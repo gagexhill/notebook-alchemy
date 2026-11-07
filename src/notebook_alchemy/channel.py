@@ -27,7 +27,6 @@ from youtube_transcript_api import (
 )
 
 from .errors import ChannelScanError
-from .mock_data import MOCK_NOTEBOOK_TITLE, SAMPLE_VIDEOS
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +46,6 @@ class ChannelVideo:
     title: str
     url: str
     duration_seconds: int = 0
-    upload_date: str = ""
-    view_count: int = 0
-    topic: str = "General"
 
 
 @dataclass
@@ -57,10 +53,7 @@ class ChannelScanResult:
     """Result of scanning a YouTube channel, playlist or video."""
 
     channel_name: str
-    channel_url: str
-    total_videos: int
     videos: list[ChannelVideo] = field(default_factory=list)
-    is_live: bool = True
 
 
 class _YdlLogger:
@@ -132,7 +125,6 @@ class ChannelScanner:
         url: str,
         limit: int | None = None,
         *,
-        use_mock: bool = False,
         _depth: int = 0,
     ) -> ChannelScanResult:
         """Return video metadata, or raise ChannelScanError. Never substitutes sample data."""
@@ -141,9 +133,6 @@ class ChannelScanner:
                 f"--limit must be 1 or more, got {limit}.", hint="Omit --limit to scan everything."
             )
         norm_url = self.normalize_url(url)
-        if use_mock:
-            return self._mock_result(norm_url, limit)
-
         logger_sink = _YdlLogger()
         ydl_opts: dict[str, Any] = {
             "extract_flat": "in_playlist",
@@ -194,10 +183,7 @@ class ChannelScanner:
         channel_name = str(raw_title).replace(" - Videos", "").strip() or "YouTube"
         return ChannelScanResult(
             channel_name=channel_name,
-            channel_url=norm_url,
-            total_videos=len(videos),
             videos=videos,
-            is_live=True,
         )
 
     @staticmethod
@@ -226,26 +212,9 @@ class ChannelScanner:
                     title=str(e.get("title") or "Untitled Video"),
                     url=v_url,
                     duration_seconds=int(e.get("duration") or 0),
-                    upload_date=str(e.get("upload_date") or ""),
-                    view_count=int(e.get("view_count") or 0),
                 )
             )
         return videos, tab_urls
-
-    @staticmethod
-    def _mock_result(url: str, limit: int | None) -> ChannelScanResult:
-        entries = SAMPLE_VIDEOS[:limit] if limit else SAMPLE_VIDEOS
-        videos = [
-            ChannelVideo(id=v["id"], title=v["title"], url=v["url"], topic=v.get("topic", "General"))
-            for v in entries
-        ]
-        return ChannelScanResult(
-            channel_name=MOCK_NOTEBOOK_TITLE,
-            channel_url=url,
-            total_videos=len(videos),
-            videos=videos,
-            is_live=False,
-        )
 
 
 # --- Transcripts -----------------------------------------------------------------------------
@@ -435,10 +404,6 @@ class TranscriptManager:
                 if attempt < 2:
                     self._sleep(2**attempt)
         return TranscriptResult(video_id, "", "unavailable", f"fetch failed: {type(last_exc).__name__}")
-
-    def fetch_transcript_text(self, video_id: str, title: str = "") -> str:
-        """Return transcript text, or an empty string when none is available."""
-        return self.resolve(video_id, title).text
 
     def fetch_many(
         self,

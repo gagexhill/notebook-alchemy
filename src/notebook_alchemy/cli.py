@@ -29,6 +29,7 @@ from .client import (
 )
 from .config import (
     DEFAULT_MAX_PER_VOLUME,
+    LOG_LEVELS,
     AlchemyConfig,
     is_usable_api_key,
     update_dotenv,
@@ -39,18 +40,8 @@ from .errors import AlchemyError, ConfigError, NotebookLMError, SessionError, Va
 from .synthesizer import (
     CATALOG_FILENAME,
     INDEX_FILENAME,
-    LEGACY_CATALOG_FILENAME,
-    LEGACY_INDEX_FILENAME,
 )
 from .ui import esc, handle_errors
-
-_LOG_LEVELS = {
-    "DEBUG": logging.DEBUG,
-    "INFO": logging.INFO,
-    "WARNING": logging.WARNING,
-    "ERROR": logging.ERROR,
-    "CRITICAL": logging.CRITICAL,
-}
 
 MOCK_NOTE = (
     "This run uses the bundled sample catalog, not a real source. Its output is for trying the tool "
@@ -239,7 +230,7 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
     ui.configure(quiet=quiet, no_color=no_color or bool(os.getenv("NO_COLOR")), debug=debug)
     # -vv / -v / -q win; otherwise ALCHEMY_LOG_LEVEL (validated in AlchemyConfig) or warnings only.
     env_level = os.getenv("ALCHEMY_LOG_LEVEL", "").strip().upper()
-    level = _LOG_LEVELS.get(env_level, logging.WARNING)
+    level = LOG_LEVELS.get(env_level, logging.WARNING)
     if verbose:
         level = logging.DEBUG if verbose > 1 else logging.INFO
     if quiet:
@@ -896,7 +887,7 @@ def append_video(
 
 
 # Files that mark a folder as this tool's vault output, in current and earlier layouts.
-_VAULT_MARKERS = (INDEX_FILENAME, CATALOG_FILENAME, LEGACY_INDEX_FILENAME, LEGACY_CATALOG_FILENAME)
+_VAULT_MARKERS = (INDEX_FILENAME, CATALOG_FILENAME)
 
 
 def _is_cache_record(path: Path) -> bool:
@@ -1047,7 +1038,6 @@ def run_automated_test() -> None:
         test_config = AlchemyConfig(
             env="test",
             vault_path=tmp_path / "vault",
-            state_dir=tmp_path / "state",
             cache_dir=tmp_path / "cache",
             gemini_api_key="",
         )

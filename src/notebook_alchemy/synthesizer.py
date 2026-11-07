@@ -14,7 +14,7 @@ from typing import Any
 from . import __version__
 from .channel import TranscriptManager, TranscriptResult
 from .client import normalize_title
-from .config import DEFAULT_GEMINI_MODEL, is_usable_api_key
+from .config import DEFAULT_GEMINI_MODEL, WINDOWS_RESERVED_NAMES, is_usable_api_key
 from .errors import GeminiError
 from .gemini import GeminiClient
 
@@ -27,22 +27,11 @@ MAX_CHARS_PER_VIDEO = 60_000
 LIVE_MAX_OUTPUT_TOKENS = 32_768
 LIVE_TIMEOUT_SECONDS = 150.0
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
-_WINDOWS_RESERVED = {
-    "con",
-    "prn",
-    "aux",
-    "nul",
-    *(f"com{i}" for i in range(1, 10)),
-    *(f"lpt{i}" for i in range(1, 10)),
-}
 # Files the vault writes beside the compendiums. The leading underscore sorts them above every
 # domain in NotebookLM's title sort and in file browsers, and no domain slug can take these names,
 # because safe_filename strips leading underscores.
 INDEX_FILENAME = "_INDEX.md"
 CATALOG_FILENAME = "_MASTER_SOURCES_CATALOG.md"
-# Names used by vaults built before the underscore prefix; still recognised there.
-LEGACY_INDEX_FILENAME = "INDEX.md"
-LEGACY_CATALOG_FILENAME = "MASTER_SOURCES_CATALOG.md"
 # Volume 2+ files end in _Vol_<n>; a domain slug of that form could take another domain's file.
 _VOLUME_FORM = re.compile(r"_vol_\d+$", re.IGNORECASE)
 
@@ -66,7 +55,7 @@ def safe_filename(text: str) -> str:
     stem = re.sub(r"[-\s]+", "_", cleaned).strip("_")[:80].strip("_")
     if not stem:
         stem = "domain"
-    if stem.lower() in _WINDOWS_RESERVED:
+    if stem.lower() in WINDOWS_RESERVED_NAMES:
         stem = f"{stem}_"
     return stem
 
@@ -81,10 +70,7 @@ def unique_slugs(domains: list[str]) -> dict[str, str]:
     the suffix, so no domain can take another's file.
     """
     slugs: dict[str, str] = {}
-    taken: set[str] = {
-        normalize_title(n)
-        for n in (INDEX_FILENAME, CATALOG_FILENAME, LEGACY_INDEX_FILENAME, LEGACY_CATALOG_FILENAME)
-    }
+    taken: set[str] = {normalize_title(n) for n in (INDEX_FILENAME, CATALOG_FILENAME)}
     for domain in domains:
         base = safe_filename(domain)
         slug = base
@@ -145,9 +131,6 @@ class Synthesizer:
 
     def _is_valid_api_key(self) -> bool:
         return is_usable_api_key(self.api_key)
-
-    def _safe_filename(self, text: str) -> str:
-        return safe_filename(text)
 
     def _client(self) -> GeminiClient:
         if self._gemini is None:

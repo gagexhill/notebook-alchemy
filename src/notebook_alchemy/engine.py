@@ -19,7 +19,6 @@ from .gemini import GeminiClient
 from .synthesizer import (
     CATALOG_FILENAME,
     INDEX_FILENAME,
-    LEGACY_CATALOG_FILENAME,
     DomainCompendium,
     Synthesizer,
     safe_filename,
@@ -54,10 +53,6 @@ class DistillationReport:
     @property
     def total_tokens(self) -> int:
         return sum(c.token_count for c in self.compendiums)
-
-    @property
-    def live_compendiums(self) -> int:
-        return sum(1 for c in self.compendiums if c.is_live_synthesized)
 
 
 @dataclass
@@ -329,7 +324,6 @@ class AlchemyEngine:
                 source_id=md_file.stem,
                 title=title,
                 content=md_file.read_text(encoding="utf-8"),
-                source_type="compendium",
             )
             try:
                 new_ids[title] = self.client.add_source_document(nb_id, doc)
@@ -422,9 +416,6 @@ class AlchemyEngine:
         """Add videos to the catalog and to the matching domain compendium. Duplicates are skipped."""
         source_dir.mkdir(parents=True, exist_ok=True)
         catalog_file = source_dir / CATALOG_FILENAME
-        legacy_catalog = source_dir / LEGACY_CATALOG_FILENAME
-        if legacy_catalog.is_file() and not catalog_file.exists():
-            legacy_catalog.rename(catalog_file)  # an older vault: keep one catalog, under the new name
         catalog_text = catalog_file.read_text(encoding="utf-8") if catalog_file.exists() else ""
 
         fresh: list[dict[str, Any]] = []

@@ -145,7 +145,7 @@ def test_scan_returns_real_videos(ydl: type[_FakeYDL]) -> None:
         "entries": [_entry(1), _entry(2), _entry(2), None],
     }
     result = ChannelScanner().scan("@x", limit=5)
-    assert result.is_live and result.channel_name == "X"
+    assert result.channel_name == "X"
     assert [v.id for v in result.videos] == ["vid00000001", "vid00000002"]  # duplicate id dropped
     assert result.videos[1].duration_seconds == 120
     assert ydl.opts_seen[0]["playlist_items"] == "1-5"
@@ -216,14 +216,7 @@ def test_single_video_url(ydl: type[_FakeYDL]) -> None:
     url = "https://www.youtube.com/watch?v=abcdefghijk"
     ydl.script[url] = {"id": "abcdefghijk", "title": "Solo", "webpage_url": url}
     result = ChannelScanner().scan(url)
-    assert result.total_videos == 1 and result.videos[0].title == "Solo"
-
-
-def test_mock_is_explicit_and_labelled() -> None:
-    result = ChannelScanner().scan("anything", limit=50, use_mock=True)
-    assert not result.is_live
-    assert len(result.videos) == 50
-    assert all(v.id.startswith("mock_") for v in result.videos)
+    assert len(result.videos) == 1 and result.videos[0].title == "Solo"
 
 
 # --- captions -------------------------------------------------------------------------------------
