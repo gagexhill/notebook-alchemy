@@ -8,7 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from notebook_alchemy.client import NotebookLMClient, SourceDocument, normalize_title
+from notebook_alchemy.client import (
+    AccountIdentity,
+    NotebookLMClient,
+    SourceDocument,
+    consent_file,
+    normalize_title,
+    record_upload_consent,
+    upload_confirmed,
+)
 from notebook_alchemy.config import AlchemyConfig
 from notebook_alchemy.errors import NotebookLMError, SessionError
 
@@ -182,3 +190,100 @@ def test_an_old_unprefixed_title_counts_as_a_copy_of_the_new_one() -> None:
     # A re-sync must replace the INDEX source an earlier version uploaded, not add a second index.
     assert normalize_title("_INDEX") == normalize_title("INDEX") == normalize_title("_INDEX.md")
     assert normalize_title("_MASTER SOURCES CATALOG") == normalize_title("MASTER_SOURCES_CATALOG.md")
+
+
+# --- profile and upload account ------------------------------------------------------------------
+
+
+def _auth_check(email: str | None, *, code: int = 0, account_key: bool = True) -> str:
+    report: dict[str, object] = {"status": "ok" if code == 0 else "error", "checks": {}}
+    if account_key:
+        report["account"] = {"email": email, "authuser": 0} if email else None
+    return json.dumps(report)
+
+
+def test_profile_comes_from_config_and_an_explicit_profile_wins(tmp_path: Path) -> None:
+    process = FakeProcess(("list", 0, "[]", ""))
+    _client(tmp_path, process, notebooklm_profile="work").list_notebooks()
+    assert process.calls[-1][:3] == ["notebooklm", "--profile", "work"]
+    config = AlchemyConfig(state_dir=tmp_path / "s", notebooklm_profile="work")
+    NotebookLMClient(config, "other", runner=process).list_notebooks()
+    assert process.calls[-1][:3] == ["notebooklm", "--profile", "other"]
+
+
+def test_upload_account_reads_the_profile_record(tmp_path: Path) -> None:
+    process = FakeProcess(("auth check", 0, _auth_check("me@example.test"), ""))
+    identity = _client(tmp_path, process, notebooklm_profile="work").upload_account()
+    assert identity.email == "me@example.test" and identity.profile == "work"
+    assert process.calls[0] == ["notebooklm", "--profile", "work", "auth", "check", "--json"]
+
+
+def test_upload_account_parses_a_failing_check_that_still_reports(tmp_path: Path) -> None:
+    process = FakeProcess(("auth check", 1, _auth_check("me@example.test", code=1), ""))
+    assert _client(tmp_path, process).upload_account().email == "me@example.test"
+
+
+@pytest.mark.parametrize(
+    ("process", "reason"),
+    [
+        (FakeProcess(("auth check", 0, _auth_check(None), "")), "did not record"),
+        (FakeProcess(("auth check", 1, _auth_check(None, account_key=False), "")), "no session"),
+        (FakeProcess(("auth check", 0, json.dumps({"account": {"email": "not-an-email"}}), "")), "record"),
+        (FakeProcess(("auth check", 2, "Traceback: boom", "")), "no report"),
+    ],
+)
+def test_upload_account_is_unknown_instead_of_guessed(
+    tmp_path: Path, process: FakeProcess, reason: str
+) -> None:
+    identity = _client(tmp_path, process).upload_account()
+    assert identity.email is None and identity.display == "unknown" and reason in identity.detail
+
+
+def test_upload_account_unknown_when_the_cli_is_missing_or_env_auth_is_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def absent(cmd, **kwargs):
+        raise FileNotFoundError(cmd[0])
+
+    assert "not found" in _client(tmp_path, absent).upload_account().detail
+    monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", "{}")
+    process = FakeProcess()
+    identity = _client(tmp_path, process).upload_account()
+    assert identity.email is None and "NOTEBOOKLM_AUTH_JSON" in identity.detail and not process.calls
+
+
+def test_upload_consent_is_per_profile_and_per_account() -> None:
+    first = AccountIdentity("work", "a@example.test")
+    assert not upload_confirmed(first)
+    record_upload_consent(first)
+    assert upload_confirmed(first)
+    assert not upload_confirmed(AccountIdentity("work", "b@example.test"))  # account changed
+    assert not upload_confirmed(AccountIdentity("work", None))
+    assert not upload_confirmed(AccountIdentity("personal", "a@example.test"))
+
+
+def test_unreadable_consent_record_asks_again() -> None:
+    record_upload_consent(AccountIdentity("work", "a@example.test"))
+    consent_file().write_text("{not json", encoding="utf-8")
+    assert not upload_confirmed(AccountIdentity("work", "a@example.test"))
+
+
+def test_browser_accounts_lists_emails(tmp_path: Path) -> None:
+    payload = json.dumps({"accounts": [{"email": "a@example.test"}, {"email": "b@example.test"}]})
+    process = FakeProcess(("auth inspect", 0, payload, ""))
+    assert _client(tmp_path, process).browser_accounts("edge") == ["a@example.test", "b@example.test"]
+    bad = FakeProcess(("auth inspect", 0, json.dumps({"nope": 1}), ""))
+    with pytest.raises(NotebookLMError, match="unexpected shape"):
+        _client(tmp_path, bad).browser_accounts("edge")
+
+
+def test_an_unknown_account_is_never_recorded_or_confirmed() -> None:
+    unknown = AccountIdentity("work", None)
+    record_upload_consent(unknown)
+    assert not consent_file().exists() and not upload_confirmed(unknown)
+
+
+def test_a_recorded_unknown_account_does_not_count_as_consent() -> None:
+    consent_file().parent.mkdir(parents=True, exist_ok=True)
+    consent_file().write_text(json.dumps({"work": {"email": None}}), encoding="utf-8")
+    assert not upload_confirmed(AccountIdentity("work", None))

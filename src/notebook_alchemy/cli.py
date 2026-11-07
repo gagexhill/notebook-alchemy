@@ -20,10 +20,21 @@ from rich.table import Table
 
 from . import __version__, ui
 from .channel import video_id_from_url
-from .client import NotebookLMClient
-from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig
+from .client import (
+    AccountIdentity,
+    NotebookLMClient,
+    record_upload_consent,
+    upload_confirmed,
+)
+from .config import (
+    DEFAULT_MAX_PER_VOLUME,
+    AlchemyConfig,
+    is_usable_api_key,
+    update_dotenv,
+    validate_profile_name,
+)
 from .engine import AlchemyEngine
-from .errors import AlchemyError, NotebookLMError, SessionError, VaultError
+from .errors import AlchemyError, ConfigError, NotebookLMError, SessionError, VaultError
 from .synthesizer import (
     CATALOG_FILENAME,
     INDEX_FILENAME,
@@ -53,12 +64,93 @@ class OrderedGroup(click.Group):
         return list(self.commands)
 
 
-def _config() -> AlchemyConfig:
-    return AlchemyConfig.from_env()
+COOKIE_BROWSERS = ("chrome", "edge", "firefox", "brave")
+SETUP_KEYS = ("GEMINI_API_KEY", "ALCHEMY_NOTEBOOKLM_PROFILE", "ALCHEMY_VAULT_PATH")
+KEY_BILLING_NOTE = (
+    "The key bills to the Google Cloud project it was created in (see aistudio.google.com/apikey). "
+    "A Google AI Pro subscription does not change Gemini API quota or billing."
+)
 
 
-def _engine() -> AlchemyEngine:
-    return AlchemyEngine(_config())
+def _config(profile: str | None = None) -> AlchemyConfig:
+    config = AlchemyConfig.from_env()
+    if profile:
+        config.notebooklm_profile = validate_profile_name(profile, source="--profile")
+    return config
+
+
+def _engine(profile: str | None = None) -> AlchemyEngine:
+    return AlchemyEngine(_config(profile))
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
+
+
+profile_option = click.option(
+    "-p",
+    "--profile",
+    help="notebooklm profile (Google account) to use. Default: ALCHEMY_NOTEBOOKLM_PROFILE or 'default'.",
+)
+
+
+def _cookie_browser(_ctx: click.Context, _param: click.Parameter, value: str | None) -> str | None:
+    """`chrome`, `edge`, `firefox` or `brave`, optionally `chrome::<browser profile>`."""
+    if value is None:
+        return None
+    base, sep, rest = value.partition("::")
+    base = base.strip().lower()
+    if base not in COOKIE_BROWSERS:
+        raise click.BadParameter(f"use one of {', '.join(COOKIE_BROWSERS)}, optionally as chrome::<profile>.")
+    return f"{base}{sep}{rest}"  # the browser lower-cased, its profile name as typed
+
+
+def _account_text(identity: AccountIdentity) -> str:
+    """Markup-safe description of the upload account. Unknown is said plainly, never guessed."""
+    if identity.email:
+        return f"{esc(identity.email)} [dim](profile {esc(identity.profile)})[/dim]"
+    reason = f"; {identity.detail}" if identity.detail else ""
+    return f"unknown [dim](profile {esc(identity.profile)}{esc(reason)})[/dim]"
+
+
+def _show_upload_target(engine: AlchemyEngine) -> AccountIdentity:
+    identity = engine.client.upload_account()
+    ui.info(f"  Upload account: {_account_text(identity)}")
+    if not identity.email:
+        ui.info(
+            "  [dim]Record it with `notebook-alchemy login --account <email> --browser-cookies edge`"
+            " or `notebook-alchemy setup`.[/dim]"
+        )
+    ui.info(f"  Gemini API key: {'set' if engine.config.has_gemini_key else 'not set'}")
+    return identity
+
+
+def _confirm_first_upload(identity: AccountIdentity, yes: bool) -> None:
+    """Ask before the first upload to a profile, and again if its account changes. --yes skips.
+
+    An unknown account is asked about every time: two different unknown accounts look the same.
+    """
+    if yes or upload_confirmed(identity):
+        return
+    target = f"profile '{identity.profile}' ({identity.display} Google account)"
+    first = "an upload" if identity.email is None else "the first upload"
+    if not _interactive():
+        raise SessionError(
+            f"This is {first} to NotebookLM {target}, and it needs your confirmation.",
+            hint=(
+                "Run the command in a terminal to confirm, or pass --yes. Record the account with "
+                "`notebook-alchemy login --browser-cookies edge --account <email>` so it is asked only once."
+            ),
+        )
+    ui.console.print(
+        f"\n[bold]Upload to NotebookLM {esc(target)}.[/bold] Notebooks will be created in that account."
+    )
+    if not click.confirm("Upload to this account?", default=False):
+        raise AlchemyError(
+            "Cancelled. Nothing was uploaded.",
+            hint="Choose another account with --profile, or run `notebook-alchemy setup`.",
+        )
+    record_upload_consent(identity)
 
 
 def _target(source: str | None, notebook: str | None, mock: bool) -> str:
@@ -112,6 +204,7 @@ def _cost_line(report) -> str:
     epilog=(
         "\b\nFirst run:\n"
         "  notebook-alchemy test                    check the install, no network needed\n"
+        "  notebook-alchemy setup                   Gemini key, NotebookLM account, vault\n"
         "  notebook-alchemy dry-run <youtube-url>   preview videos, domains and cost\n"
         "  notebook-alchemy run <youtube-url>       build compendiums (and upload them)\n"
         "\nDocs: https://github.com/gagexhill/notebook-alchemy"
@@ -172,6 +265,7 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
 @click.option("--write/--preview-only", default=True, help="Write the vault (default) or preview only.")
 @click.option("--sync/--no-sync", default=True, help="Upload to NotebookLM (default) or build locally.")
 @click.option("-y", "--yes", is_flag=True, help="Accept defaults without prompting.")
+@profile_option
 @handle_errors
 def run_pipeline(
     source: str | None,
@@ -184,10 +278,11 @@ def run_pipeline(
     write: bool,
     sync: bool,
     yes: bool,
+    profile: str | None,
 ) -> None:
     """Distill a YouTube channel, playlist or video into domain compendiums."""
     target = _target(source, notebook, mock)
-    engine = _engine()
+    engine = _engine(profile)
     console = ui.console
 
     if mock and sync:
@@ -204,6 +299,7 @@ def run_pipeline(
                 hint="Run `notebook-alchemy login`, or add --no-sync to build files without uploading.",
             )
         ui.success(f"NotebookLM session is active ({session.notebooks} notebook(s)).")
+        _confirm_first_upload(_show_upload_target(engine), yes)
 
     total_steps = 3 if do_sync else 2
     live = engine.config.has_gemini_key and not offline
@@ -382,11 +478,13 @@ def dry_run(source: str | None, notebook: str | None, limit: int | None, offline
 
 
 @cli.command(name="status")
+@profile_option
 @handle_errors
-def status() -> None:
-    """Check this install: NotebookLM CLI, session file, Gemini key, vault and cache."""
-    engine = _engine()
+def status(profile: str | None) -> None:
+    """Check this install: NotebookLM CLI, upload account, Gemini key, vault and cache."""
+    engine = _engine(profile)
     facts = engine.status()
+    identity = engine.client.upload_account()
     has_cli = not str(facts["notebooklm_cli"]).startswith("not found")
     has_session = not str(facts["session_file"]).startswith("none")
     has_key = facts["gemini_api_key"] == "set"
@@ -396,28 +494,37 @@ def status() -> None:
     table.add_column("Check", style="bold")
     table.add_column("Value", overflow="fold")
     rows = [
-        (has_cli, "notebooklm CLI", facts["notebooklm_cli"]),
-        (has_session, "NotebookLM session file", facts["session_file"]),
-        (has_key, "Gemini API key", facts["gemini_api_key"]),
-        (None, "Gemini model", facts["gemini_model"]),
-        (None, "Vault", facts["vault_path"]),
-        (None, "Transcript cache", facts["cache_dir"]),
-        (None, "Parallel fetches", facts["max_concurrency"]),
-        (None, "Environment", facts["environment"]),
+        (has_cli, "notebooklm CLI", esc(facts["notebooklm_cli"])),
+        (None, "NotebookLM profile", esc(facts["notebooklm_profile"])),
+        (has_session, "NotebookLM session file", esc(facts["session_file"])),
+        (bool(identity.email) if has_session else None, "Upload account", _account_text(identity)),
+        (has_key, "Gemini API key", esc(facts["gemini_api_key"])),
+        (None, "Gemini model", esc(facts["gemini_model"])),
+        (None, "Vault", esc(facts["vault_path"])),
+        (None, "Transcript cache", esc(facts["cache_dir"])),
+        (None, "Parallel fetches", esc(facts["max_concurrency"])),
+        (None, "Environment", esc(facts["environment"])),
     ]
     for ok, name, value in rows:
         glyph = "[green]✓[/green]" if ok else "[red]✗[/red]" if ok is False else "[dim]-[/dim]"
-        table.add_row(glyph, name, esc(value))
+        table.add_row(glyph, name, value)
     ui.console.print(table)
+    if has_key:
+        ui.console.print(f"[dim]{esc(KEY_BILLING_NOTE)}[/dim]")
 
     next_steps = []
     if not has_cli:
         next_steps.append("pip install notebooklm-py")
     if not has_session:
-        next_steps.append("notebook-alchemy login")
+        next_steps.append("notebook-alchemy setup (or: notebook-alchemy login)")
+    elif not identity.email:
+        next_steps.append(
+            "record the upload account: notebook-alchemy login --browser-cookies edge --account <email>"
+        )
     if not has_key:
         next_steps.append(
-            "set GEMINI_API_KEY in .env for synthesized compendiums (offline indexes work without it)"
+            "set GEMINI_API_KEY with `notebook-alchemy setup` for synthesized compendiums "
+            "(offline indexes work without it)"
         )
     if next_steps:
         ui.console.print("\n[bold]Next:[/bold]\n" + "\n".join(f"  - {esc(s)}" for s in next_steps))
@@ -425,52 +532,43 @@ def status() -> None:
         ui.console.print("\n[green]Ready.[/green] A session file exists. `login --check` confirms it works.")
 
 
-@cli.command(
-    name="login",
-    epilog=(
-        "\b\nExamples:\n"
-        "  notebook-alchemy login                        sign in through a browser window\n"
-        "  notebook-alchemy login --browser-cookies edge reuse an Edge sign-in, no window\n"
-        "  notebook-alchemy login --check                is the stored session still valid?\n"
-    ),
-)
-@click.option(
-    "--browser",
-    default="chromium",
-    show_default=True,
-    type=click.Choice(["chromium", "chrome", "msedge"]),
-    help="Browser to open for interactive sign-in.",
-)
-@click.option(
-    "--browser-cookies",
-    type=click.Choice(["chrome", "edge", "firefox"]),
-    help="Reuse an installed browser's sign-in instead of opening a window.",
-)
-@click.option("--check", is_flag=True, help="Verify the stored session without signing in.")
-@click.option(
-    "--timeout",
-    type=click.IntRange(min=30),
-    default=300,
-    show_default=True,
-    help="Seconds to wait for you to finish signing in.",
-)
-@handle_errors
-def login(browser: str, browser_cookies: str | None, check: bool, timeout: int) -> None:
-    """Sign in to Google NotebookLM (uses the `notebooklm` CLI)."""
-    client = NotebookLMClient(_config())
-    if check:
-        with ui.console.status("Checking your NotebookLM session..."):
-            result = client.check_session()
-        if not result.ok:
-            raise SessionError(result.detail, hint="Run `notebook-alchemy login`.")
-        ui.success(f"Session is active ({result.notebooks} notebook(s) visible).")
-        return
-
+def _sign_in(
+    client: NotebookLMClient,
+    *,
+    browser: str = "chromium",
+    browser_cookies: str | None = None,
+    account: str | None = None,
+    timeout: int = 300,
+    fresh: bool = False,
+) -> AccountIdentity:
+    """Run `notebooklm login` for this profile, then read back which account it recorded."""
+    if account and browser_cookies:
+        # Check before signing in: a login with the wrong account would overwrite the profile.
+        try:
+            available = client.browser_accounts(browser_cookies)
+        except NotebookLMError as exc:
+            available = None
+            ui.warn(f"Could not list the browser's accounts first ({esc(exc.message)}); trying the sign-in.")
+        if available is not None and account.strip().casefold() not in {a.casefold() for a in available}:
+            raise SessionError(
+                f"{account} is not signed in to {browser_cookies}. Signed in: "
+                + (", ".join(available) or "no Google accounts")
+                + ". Nothing was changed.",
+                hint=(
+                    f"Sign in to that account in {browser_cookies.split('::', 1)[0]} first, "
+                    "or pick a listed one."
+                ),
+            )
+    cmd = ["notebooklm", "--profile", client.profile, "login"]
     if browser_cookies:
-        cmd = ["notebooklm", "login", "--browser-cookies", browser_cookies]
-        ui.info(f"Importing your {browser_cookies} sign-in...")
+        cmd += ["--browser-cookies", browser_cookies]
+        if account:
+            cmd += ["--account", account]
+        ui.info(f"Importing your {esc(browser_cookies)} sign-in into profile '{esc(client.profile)}'...")
     else:
-        cmd = ["notebooklm", "login", "--browser", browser, "--browser-timeout", str(timeout)]
+        cmd += ["--browser", browser, "--browser-timeout", str(timeout)]
+        if fresh:
+            cmd.append("--fresh")
         ui.info(f"A {browser} window will open. Sign in to Google; this closes by itself when done.")
     try:
         proc = subprocess.run(
@@ -487,16 +585,218 @@ def login(browser: str, browser_cookies: str | None, check: bool, timeout: int) 
             f"Sign-in did not complete (exit code {proc.returncode})."
             + (f" {' '.join(detail.split())[:300]}" if detail else ""),
             hint=(
-                "Try `notebook-alchemy login --browser-cookies edge`, or set NOTEBOOKLM_AUTH_JSON "
+                "List the accounts a browser holds with `notebooklm auth inspect --browser edge`, "
+                "try `notebook-alchemy login --browser-cookies edge`, or set NOTEBOOKLM_AUTH_JSON "
                 "with exported session cookies."
+            ),
+        )
+    identity = client.upload_account()
+    if account and (identity.email or "").casefold() != account.strip().casefold():
+        raise SessionError(
+            f"Sign-in finished, but profile '{client.profile}' now records the account "
+            f"{identity.display}, not {account}. Uploads through this profile would go to that account.",
+            hint=(
+                "Check the email with `notebooklm auth inspect --browser "
+                f"{(browser_cookies or 'edge').split('::', 1)[0]}` and sign in again before uploading."
             ),
         )
     with ui.console.status("Confirming the session works..."):
         result = client.check_session()
-    if result.ok:
-        ui.success("Signed in to NotebookLM.")
-    else:
-        ui.warn(f"Sign-in finished but the session check failed: {esc(result.detail)}")
+    if not result.ok:
+        raise SessionError(
+            f"Sign-in finished but the session check failed: {result.detail}",
+            hint="Run `notebook-alchemy login` again.",
+        )
+    ui.success(f"Signed in to NotebookLM. Upload account: {esc(identity.display)}.")
+    return identity
+
+
+@cli.command(
+    name="login",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy login                        sign in through a browser window\n"
+        "  notebook-alchemy login --browser-cookies edge reuse an Edge sign-in, no window\n"
+        "  notebook-alchemy login --browser-cookies chrome --account you@example.com --profile personal\n"
+        "                                                pick one of several signed-in accounts\n"
+        "  notebook-alchemy login --check                is the stored session still valid?\n"
+    ),
+)
+@click.option(
+    "--browser",
+    default="chromium",
+    show_default=True,
+    type=click.Choice(["chromium", "chrome", "msedge"]),
+    help="Browser to open for interactive sign-in.",
+)
+@click.option(
+    "--browser-cookies",
+    callback=_cookie_browser,
+    help="Reuse an installed browser's sign-in (chrome, edge, firefox, brave; or chrome::<profile>).",
+)
+@click.option(
+    "--account",
+    help="Google account email to sign in, when the browser holds several. Needs --browser-cookies.",
+)
+@click.option("--fresh", is_flag=True, help="Start the sign-in window with a clean browser session.")
+@click.option("--check", is_flag=True, help="Verify the stored session without signing in.")
+@click.option(
+    "--timeout",
+    type=click.IntRange(min=30),
+    default=300,
+    show_default=True,
+    help="Seconds to wait for you to finish signing in.",
+)
+@profile_option
+@handle_errors
+def login(
+    browser: str,
+    browser_cookies: str | None,
+    account: str | None,
+    fresh: bool,
+    check: bool,
+    timeout: int,
+    profile: str | None,
+) -> None:
+    """Sign in to Google NotebookLM for one profile (uses the `notebooklm` CLI)."""
+    client = NotebookLMClient(_config(profile))
+    if check:
+        with ui.console.status("Checking your NotebookLM session..."):
+            result = client.check_session()
+        if not result.ok:
+            raise SessionError(result.detail, hint="Run `notebook-alchemy login`.")
+        identity = client.upload_account()
+        ui.success(f"Session is active ({result.notebooks} notebook(s) visible).")
+        ui.info(f"  Upload account: {_account_text(identity)}")
+        return
+    if account and not browser_cookies:
+        raise click.UsageError(
+            "--account needs --browser-cookies (for example: --browser-cookies edge --account "
+            "you@example.com). A sign-in window does not record the account."
+        )
+    _sign_in(
+        client,
+        browser=browser,
+        browser_cookies=browser_cookies,
+        account=account,
+        timeout=timeout,
+        fresh=fresh,
+    )
+
+
+@cli.command(
+    name="setup",
+    epilog=(
+        "\b\nRe-run it any time to change the key, the account or the vault.\n"
+        "Example:\n"
+        "  notebook-alchemy setup\n"
+    ),
+)
+@handle_errors
+def setup() -> None:
+    """Guided setup: Gemini API key, NotebookLM account and vault folder, saved to .env."""
+    if not _interactive():
+        raise click.UsageError("setup asks questions, so run it in a terminal.")
+    env_file = Path(".env")  # the file AlchemyConfig.from_env reads
+    # Read before .env is loaded: a value already in the process environment wins over .env.
+    from_process = {name for name in SETUP_KEYS if os.getenv(name)}
+    try:
+        config = _config()
+    except ConfigError as exc:
+        if "ALCHEMY_NOTEBOOKLM_PROFILE" not in exc.message:
+            raise
+        ui.warn(f"{esc(exc.message)} Setup will ask for a new one.")
+        os.environ["ALCHEMY_NOTEBOOKLM_PROFILE"] = "default"  # this process only
+        config = _config()
+    saved: list[str] = []
+
+    def save(name: str, value: str) -> None:
+        update_dotenv({name: value}, env_file)
+        saved.append(name)
+        if name in from_process:
+            ui.warn(
+                f"{name} is also set in your environment, and that value wins over .env. "
+                "Remove it from the environment to use what you entered here."
+            )
+
+    ui.step(1, 3, "Gemini API key")
+    ui.info(f"  Currently: {'set' if config.has_gemini_key else 'not set'} (the key is never shown)")
+    ui.info(f"  [dim]{esc(KEY_BILLING_NOTE)}[/dim]")
+    ui.info("  [dim]Create a key at https://aistudio.google.com/apikey[/dim]")
+    while True:
+        entered = click.prompt(
+            "  Paste a new key, or press Enter to keep the current one",
+            default="",
+            show_default=False,
+            hide_input=True,
+        ).strip()
+        if not entered or is_usable_api_key(entered):
+            break
+        ui.warn("That does not look like an API key. Try again, or press Enter to skip.")
+    if entered:
+        save("GEMINI_API_KEY", entered)
+        ui.success(f"Saved the key to {esc(_short(env_file))}.")
+    elif not config.has_gemini_key:
+        ui.warn("No key: compendiums will be offline indexes (titles only).")
+
+    ui.step(2, 3, "NotebookLM account")
+    ui.info(
+        "  [dim]Uploads go to the Google account of a notebooklm profile. It is independent of the "
+        "account that owns the Gemini key.[/dim]"
+    )
+    while True:
+        try:
+            profile = validate_profile_name(
+                click.prompt("  Profile name", default=config.notebooklm_profile), source="profile"
+            )
+            break
+        except ConfigError as exc:
+            ui.warn(f"{esc(exc.message)} {esc(exc.hint or '')}")
+    config.notebooklm_profile = profile
+    client = NotebookLMClient(config)
+    identity = client.upload_account()
+    ui.info(f"  Signed in as: {_account_text(identity)}")
+    choice = click.prompt(
+        "  Sign in: reuse a browser's sign-in (cookies), open a sign-in window (window), or keep",
+        type=click.Choice(["cookies", "window", "keep"]),
+        default="keep" if identity.email else "cookies",
+    )
+    if choice == "cookies":
+        browser_cookies = click.prompt(
+            "  Browser", type=click.Choice(list(COOKIE_BROWSERS)), default="chrome"
+        )
+        try:
+            emails = client.browser_accounts(browser_cookies)
+        except NotebookLMError as exc:
+            emails = []
+            ui.warn(f"Could not list that browser's accounts: {esc(exc.message)}")
+        for email in emails:
+            ui.info(f"    - {esc(email)}")
+        account = click.prompt(
+            "  Google account email for uploads", default=emails[0] if len(emails) == 1 else None
+        ).strip()
+        identity = _sign_in(client, browser_cookies=browser_cookies, account=account)
+    elif choice == "window":
+        _sign_in(client, fresh=click.confirm("  Start with a clean browser session?", default=True))
+        identity = client.upload_account()
+    save("ALCHEMY_NOTEBOOKLM_PROFILE", profile)
+
+    ui.step(3, 3, "Vault folder")
+    vault = click.prompt("  Where should compendiums be written?", default=str(config.vault_path))
+    vault_path = Path(vault).expanduser().resolve()
+    save("ALCHEMY_VAULT_PATH", str(vault_path))
+
+    ui.console.print(
+        Panel(
+            f"Gemini API key: {'set' if entered or config.has_gemini_key else 'not set'}\n"
+            f"Upload account: {_account_text(identity)}\n"
+            f"Vault: {esc(vault_path)}\n\n"
+            f"Saved {esc(', '.join(saved))} to {esc(_short(env_file))}.",
+            title="Setup complete",
+            border_style="green",
+            padding=(0, 2),
+        )
+    )
 
 
 # --- sync / append -------------------------------------------------------------------------------
@@ -507,6 +807,7 @@ def login(browser: str, browser_cookies: str | None, check: bool, timeout: int) 
     epilog=(
         "\b\nExamples:\n"
         "  notebook-alchemy sync -n Hyperplexed\n"
+        "  notebook-alchemy sync -n Hyperplexed --profile personal --yes\n"
         '  notebook-alchemy sync -n "CSS Course" --source-dir vault/hyperplexed/compendiums\n'
     ),
 )
@@ -520,12 +821,15 @@ def login(browser: str, browser_cookies: str | None, check: bool, timeout: int) 
     type=click.Path(file_okay=False, path_type=Path),
     help="Folder of compendiums to upload (default: the vault folder named after --notebook).",
 )
+@click.option("-y", "--yes", is_flag=True, help="Do not ask before the first upload to an account.")
+@profile_option
 @handle_errors
-def sync_to_notebooklm(notebook: str | None, source_dir: Path | None) -> None:
+def sync_to_notebooklm(notebook: str | None, source_dir: Path | None, yes: bool, profile: str | None) -> None:
     """Upload built compendiums to a notebook, replacing same-titled sources."""
-    engine = _engine()
+    engine = _engine(profile)
     directory = _source_dir(engine, notebook, source_dir)
     name = notebook or directory.parent.name
+    _confirm_first_upload(_show_upload_target(engine), yes)
     ui.info(f"Uploading {esc(_short(directory))} to notebook [bold]{esc(name)}[/bold]")
     with ui.Reporter() as reporter:
         result = engine.sync_to_notebooklm(name, directory, progress=reporter)
