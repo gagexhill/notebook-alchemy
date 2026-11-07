@@ -15,6 +15,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import youtube_transcript_api  # noqa: F401
+
+# The tool imports these on first use. Load them now, before the fixtures below replace
+# subprocess.Popen: yt-dlp subclasses Popen while it imports.
+import yt_dlp  # noqa: F401
 
 _ENV_TO_CLEAR = (
     "GEMINI_API_KEY",
@@ -22,6 +27,7 @@ _ENV_TO_CLEAR = (
     "ALCHEMY_LOG_LEVEL",
     "ALCHEMY_VAULT_PATH",
     "ALCHEMY_GEMINI_FALLBACK_MODEL",
+    "ALCHEMY_CAPTION_LANGUAGES",
     "ALCHEMY_SESSION_FILE",
     "ALCHEMY_CACHE_DIR",
     "ALCHEMY_GEMINI_MODEL",

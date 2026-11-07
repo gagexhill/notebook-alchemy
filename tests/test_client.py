@@ -90,6 +90,13 @@ def test_upload_sends_a_file_not_content_and_not_text_flag(tmp_path: Path) -> No
     assert "--text" not in uploaded["cmd"]
     assert big not in uploaded["cmd"]
     assert "--type file" in uploaded["cmd"] and "--title Big Doc" in uploaded["cmd"]
+    assert "--request-timeout 180" in uploaded["cmd"]  # notebooklm's own 30 s default is too short
+
+
+def test_an_upload_without_a_source_id_is_an_error(tmp_path: Path) -> None:
+    client = _client(tmp_path, FakeProcess(("source add", 0, json.dumps({"status": "ok"}), "")))
+    with pytest.raises(NotebookLMError, match="no source id"):
+        client.add_source_document("nb-1", SourceDocument("a", "Doc", "body"))
 
 
 def test_upload_failure_raises_with_cause(tmp_path: Path) -> None:

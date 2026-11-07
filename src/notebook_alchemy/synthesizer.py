@@ -93,7 +93,7 @@ def notebook_url(notebook_id: str) -> str:
 
 
 def _now() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
 @dataclass

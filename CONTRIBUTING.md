@@ -7,7 +7,7 @@ By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Set up
 
-Python 3.10 or newer and Git.
+Python 3.11 or newer and Git.
 
 ```bash
 git clone https://github.com/gagexhill/notebook-alchemy.git

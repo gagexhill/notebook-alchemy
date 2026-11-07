@@ -29,6 +29,9 @@ NOTEBOOKLM_BIN = "notebooklm"
 LIST_TIMEOUT = 60.0
 WRITE_TIMEOUT = 120.0
 UPLOAD_TIMEOUT = 300.0
+# notebooklm's own HTTP timeout for an upload (its default is 30 s, short for a large compendium);
+# kept below UPLOAD_TIMEOUT so notebooklm reports the timeout itself.
+UPLOAD_HTTP_TIMEOUT = 180.0
 _AUTH_HINTS = ("authentication", "auth not found", "sign-in", "signed-out", "login", "re-authenticate")
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]  # defaults to subprocess.run at call time
@@ -402,8 +405,17 @@ class NotebookLMClient:
                     "file",
                     "--title",
                     document.title,
+                    "--request-timeout",
+                    f"{UPLOAD_HTTP_TIMEOUT:g}",
                 ],
                 timeout=UPLOAD_TIMEOUT,
             )
         source_id = _first(data, "id", "source_id") or _first(_first(data, "source"), "id")
-        return str(source_id or document.source_id)
+        if not source_id:
+            # Without the new source's id it cannot be waited on, renamed or told apart from an
+            # older copy, so the upload is not reported as done.
+            raise NotebookLMError(
+                f"`notebooklm source add` returned no source id for '{document.title}'.",
+                hint="Check the notebook in NotebookLM, then run the sync again.",
+            )
+        return str(source_id)
