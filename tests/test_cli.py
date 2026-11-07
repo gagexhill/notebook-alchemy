@@ -130,7 +130,7 @@ def test_run_mock_builds_in_the_vault_and_never_uploads(runner: CliRunner, isola
     assert result.exit_code == 0, result.output
     assert "never uploaded" in result.output and "Build complete" in result.output
     assert (
-        isolated_environment.work / "vault" / "sample_catalog_mock_data" / "compendiums" / "INDEX.md"
+        isolated_environment.work / "vault" / "sample_catalog_mock_data" / "compendiums" / "_INDEX.md"
     ).exists()
 
 
@@ -148,7 +148,7 @@ def test_run_no_sync_builds_for_real_sources(runner: CliRunner, fake_channel, is
     fake_channel("Build a REST API", "CSS grid tricks", "AI agents explained")
     result = runner.invoke(cli, ["run", "@my", "--no-sync", "--offline", "-y"])
     assert result.exit_code == 0, result.output
-    assert (isolated_environment.work / "vault" / "my_channel" / "compendiums" / "INDEX.md").exists()
+    assert (isolated_environment.work / "vault" / "my_channel" / "compendiums" / "_INDEX.md").exists()
     assert "notebook-alchemy sync -n" in result.output
 
 
@@ -270,8 +270,19 @@ def _seed_cache_and_vault(env) -> tuple[Path, Path]:
     vault = env.work / "vault" / "chan" / "compendiums"
     vault.mkdir(parents=True)
     (vault / "A.md").write_text("built", encoding="utf-8")
-    (vault / "INDEX.md").write_text("index", encoding="utf-8")
+    (vault / "_INDEX.md").write_text("index", encoding="utf-8")
     return cache, vault
+
+
+def test_clean_recognises_a_vault_from_before_the_underscore_names(
+    runner: CliRunner, isolated_environment
+) -> None:
+    vault = isolated_environment.work / "vault" / "old" / "compendiums"
+    vault.mkdir(parents=True)
+    (vault / "MASTER_SOURCES_CATALOG.md").write_text("catalog", encoding="utf-8")
+    result = runner.invoke(cli, ["clean", "--vaults", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert not vault.exists()
 
 
 def test_clean_defaults_to_the_cache_and_keeps_vaults(runner: CliRunner, isolated_environment) -> None:

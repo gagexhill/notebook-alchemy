@@ -19,9 +19,11 @@ from .gemini import GeminiClient
 from .synthesizer import (
     CATALOG_FILENAME,
     INDEX_FILENAME,
+    LEGACY_CATALOG_FILENAME,
     DomainCompendium,
     Synthesizer,
     safe_filename,
+    source_title,
     unique_slugs,
 )
 from .vault import VaultManager
@@ -319,7 +321,7 @@ class AlchemyEngine:
         new_ids: dict[str, str] = {}  # wanted title -> id of the source we just added
         total_steps = len(files) * 2
         for done, md_file in enumerate(files, 1):
-            title = md_file.stem.replace("_", " ")
+            title = source_title(md_file.stem)
             doc = SourceDocument(
                 source_id=md_file.stem,
                 title=title,
@@ -417,6 +419,9 @@ class AlchemyEngine:
         """Add videos to the catalog and to the matching domain compendium. Duplicates are skipped."""
         source_dir.mkdir(parents=True, exist_ok=True)
         catalog_file = source_dir / CATALOG_FILENAME
+        legacy_catalog = source_dir / LEGACY_CATALOG_FILENAME
+        if legacy_catalog.is_file() and not catalog_file.exists():
+            legacy_catalog.rename(catalog_file)  # an older vault: keep one catalog, under the new name
         catalog_text = catalog_file.read_text(encoding="utf-8") if catalog_file.exists() else ""
 
         fresh: list[dict[str, Any]] = []

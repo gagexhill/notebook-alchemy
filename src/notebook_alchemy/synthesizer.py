@@ -34,10 +34,14 @@ _WINDOWS_RESERVED = {
     *(f"com{i}" for i in range(1, 10)),
     *(f"lpt{i}" for i in range(1, 10)),
 }
-# Files the vault writes beside the compendiums; a domain may not take these names.
-INDEX_FILENAME = "INDEX.md"
-CATALOG_FILENAME = "MASTER_SOURCES_CATALOG.md"
-_RESERVED_STEMS = {INDEX_FILENAME[:-3].lower(), CATALOG_FILENAME[:-3].lower()}
+# Files the vault writes beside the compendiums. The leading underscore sorts them above every
+# domain in NotebookLM's title sort and in file browsers, and no domain slug can take these names,
+# because safe_filename strips leading underscores.
+INDEX_FILENAME = "_INDEX.md"
+CATALOG_FILENAME = "_MASTER_SOURCES_CATALOG.md"
+# Names used by vaults built before the underscore prefix; still recognised there.
+LEGACY_INDEX_FILENAME = "INDEX.md"
+LEGACY_CATALOG_FILENAME = "MASTER_SOURCES_CATALOG.md"
 # Volume 2+ files end in _Vol_<n>; a domain slug of that form could take another domain's file.
 _VOLUME_FORM = re.compile(r"_vol_\d+$", re.IGNORECASE)
 
@@ -69,12 +73,11 @@ def safe_filename(text: str) -> str:
 def unique_slugs(domains: list[str]) -> dict[str, str]:
     """One distinct slug per domain; later collisions get a short stable hash suffix.
 
-    A slug that would match the vault's own files (INDEX, MASTER_SOURCES_CATALOG, compared without
-    case for case-insensitive file systems) or the `_Vol_<n>` form of a volume file also gets the
-    suffix, so no domain can overwrite another file.
+    Collisions are compared without case, for case-insensitive file systems. A slug of the
+    `_Vol_<n>` form of a volume file also gets the suffix, so no domain can take another's file.
     """
     slugs: dict[str, str] = {}
-    taken: set[str] = set(_RESERVED_STEMS)
+    taken: set[str] = set()
     for domain in domains:
         base = safe_filename(domain)
         slug = base
@@ -83,6 +86,12 @@ def unique_slugs(domains: list[str]) -> dict[str, str]:
         taken.add(slug.lower())
         slugs[domain] = slug
     return slugs
+
+
+def source_title(stem: str) -> str:
+    """The NotebookLM title for a vault file: underscores become spaces, except a leading one."""
+    lead = "_" if stem.startswith("_") else ""
+    return lead + " ".join(stem.lstrip("_").replace("_", " ").split())
 
 
 def notebook_url(notebook_id: str) -> str:

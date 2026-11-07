@@ -11,10 +11,13 @@ from notebook_alchemy.channel import TranscriptResult
 from notebook_alchemy.errors import GeminiError
 from notebook_alchemy.gemini import GeminiResult
 from notebook_alchemy.synthesizer import (
+    CATALOG_FILENAME,
+    INDEX_FILENAME,
     SECTION_RELATED,
     Synthesizer,
     notebook_url,
     safe_filename,
+    source_title,
     unique_slugs,
     yaml_str,
 )
@@ -77,10 +80,24 @@ def test_colliding_domains_get_distinct_slugs() -> None:
     assert slugs["A & B"] == "A_B"
 
 
-@pytest.mark.parametrize("domain", ["INDEX", "index", "Master Sources Catalog", "MASTER_SOURCES_CATALOG"])
+@pytest.mark.parametrize("domain", ["_INDEX", "__index", "_Master Sources Catalog", "INDEX"])
 def test_a_domain_cannot_take_a_vault_file_name(domain: str) -> None:
     slug = unique_slugs([domain])[domain]
-    assert slug.lower() not in {"index", "master_sources_catalog"}
+    assert f"{slug}.md".lower() not in {INDEX_FILENAME.lower(), CATALOG_FILENAME.lower()}
+
+
+def test_vault_files_sort_above_every_domain() -> None:
+    # NotebookLM's title sort puts a leading underscore before digits and letters (checked live on
+    # 2026-11-07 against a title starting "2026"). That holds only while no domain title also
+    # starts with an underscore or a space, so assert that.
+    domains = ["0 Basics", "AI", "aardvark", "_Hidden", " spaced", "日本語", "!!! Hype", "___"]
+    stems = list(unique_slugs(domains).values())
+    special = [INDEX_FILENAME[:-3], CATALOG_FILENAME[:-3]]
+    assert all(s.startswith("_") for s in special)
+    assert not any(source_title(s)[:1] in {"_", " "} for s in stems)
+    assert sorted(special, key=str.casefold) == special  # the index above the catalog
+    assert [source_title(s) for s in special] == ["_INDEX", "_MASTER SOURCES CATALOG"]
+    assert source_title("Web_Design_Vol_2") == "Web Design Vol 2"
 
 
 def test_a_domain_cannot_take_a_volume_file_name() -> None:
