@@ -402,7 +402,7 @@ def run_pipeline(
             str(c.volume),
             str(len(c.titles)),
             f"~{c.token_count:,}",
-            "gemini" if c.is_live_synthesized else "offline",
+            "gemini" if c.is_live_synthesized else ("index (no transcripts)" if c.title_only else "offline"),
         )
     console.print(table)
     for w in result.warnings:

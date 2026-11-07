@@ -338,6 +338,7 @@ class TranscriptManager:
         self._blocked = threading.Event()
         self._po_token_demands = 0
         self._po_lock = threading.Lock()
+        self.blocked_total = 0  # videos this run could not get captions for because YouTube blocked it
 
     # -- helpers --
 
@@ -510,6 +511,8 @@ class TranscriptManager:
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             for result in pool.map(lambda pair: self.resolve(pair[0], pair[1]), items):
                 results[result.video_id] = result
+                if result.source == "blocked":
+                    self.blocked_total += 1  # counted here, on the caller's thread
                 done += 1
                 if progress:
                     progress(done, total)

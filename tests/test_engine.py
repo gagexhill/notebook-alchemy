@@ -14,7 +14,7 @@ from notebook_alchemy.client import NotebookLMClient
 from notebook_alchemy.config import AlchemyConfig
 from notebook_alchemy.engine import AlchemyEngine
 from notebook_alchemy.errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
-from notebook_alchemy.synthesizer import Synthesizer
+from notebook_alchemy.synthesizer import DomainCompendium, Synthesizer
 
 from .conftest import FakeNotebookLM, FakeProcess
 
@@ -446,3 +446,17 @@ def test_status_shows_home_paths_as_tilde(tmp_path: Path, monkeypatch: pytest.Mo
     facts = AlchemyEngine(config).status()
     assert facts["vault_path"] == str(Path("~") / "my-vault")
     assert str(Path.home()) not in json.dumps(facts)
+
+
+def test_missing_transcripts_are_summarised_once_for_the_whole_run(engine: AlchemyEngine) -> None:
+    engine.transcripts.blocked_total = 40
+    comps = [
+        DomainCompendium("A", 1, [], [], "a.md", "", 1, title_only=True),
+        DomainCompendium("A", 2, [], [], "a2.md", "", 1, title_only=True),
+        DomainCompendium("B", 1, [], [], "b.md", "", 1, is_live_synthesized=True),
+    ]
+    lines = engine._transcript_summary(comps)
+    assert len(lines) == 2
+    assert "40 videos" in lines[0] and "2 of 3 volumes" in lines[1]
+    engine.transcripts.blocked_total = 0
+    assert engine._transcript_summary(comps[2:]) == []

@@ -109,6 +109,12 @@ class DomainCompendium:
     token_count: int
     is_live_synthesized: bool = False
     warnings: list[str] = field(default_factory=list)
+    # Live mode was asked for, but no video in the volume had a transcript, so it is an offline index.
+    title_only: bool = False
+
+
+class _NoTranscripts(Exception):
+    """Every video in a volume lacks a transcript; Gemini would only have titles to work from."""
 
 
 class Synthesizer:
@@ -165,13 +171,17 @@ class Synthesizer:
 
         warnings: list[str] = []
         content = ""
-        is_live = False
+        is_live = title_only = False
         if not force_offline and self._is_valid_api_key():
             try:
                 content = self._synthesize_live(
                     domain, videos, volume, notebook_title, notebook_id, warnings, progress
                 )
                 is_live = True
+            except _NoTranscripts:
+                # Titles alone are not material for a synthesis; an index says honestly what it is,
+                # and the Gemini request is saved. The engine reports these volumes once.
+                title_only = True
             except GeminiError as exc:
                 if self._gemini is not None:
                     warnings.extend(f"{domain} (Vol. {volume}): {n}" for n in self._gemini.drain_notices())
@@ -194,6 +204,7 @@ class Synthesizer:
             token_count=max(len(content) // 4, 1),
             is_live_synthesized=is_live,
             warnings=warnings,
+            title_only=title_only,
         )
 
     def _frontmatter(
@@ -280,17 +291,12 @@ class Synthesizer:
             blocks.append(f"### [{n}] {v.get('title') or 'Untitled'}\n{body}\n")
 
         no_text = sum(1 for s in status.values() if s.startswith("none"))
+        if no_text == len(videos):
+            raise _NoTranscripts
         if no_text:
             warnings.append(f"{label}: {no_text} of {len(videos)} videos had no transcript (title only).")
         if shortened:
             warnings.append(f"{label}: {shortened} transcripts were shortened to {per_video:,} characters.")
-        blocked = [r for r in results.values() if r.source == "blocked"]
-        if blocked:
-            noun = "request" if len(blocked) == 1 else "requests"
-            warnings.append(
-                f"{label}: YouTube blocked {len(blocked)} transcript {noun}; retry later or add "
-                "local transcript files."
-            )
 
         prompt = (
             f"Synthesize the {len(videos)} numbered videos below, from '{notebook_title}', into one "
