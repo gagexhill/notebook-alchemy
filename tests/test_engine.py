@@ -34,8 +34,9 @@ def engine(tmp_path: Path) -> AlchemyEngine:
 
 
 def _session(tmp_path: Path) -> None:
-    (tmp_path / "state").mkdir(exist_ok=True)
-    (tmp_path / "state" / "storage_state.json").write_text("{}", encoding="utf-8")
+    state = Path.home() / ".notebooklm" / "profiles" / "default" / "storage_state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("{}", encoding="utf-8")
 
 
 def _real_dir(tmp_path: Path, names: tuple[str, ...] = ("Alpha_Topics", "Beta_Topics")) -> Path:

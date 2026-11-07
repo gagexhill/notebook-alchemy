@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import AlchemyConfig
-from .errors import NotebookLMError, SessionError
+from .config import DEFAULT_NOTEBOOKLM_PROFILE, AlchemyConfig
+from .errors import ConfigError, NotebookLMError, SessionError
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ class AccountIdentity:
     profile: str
     email: str | None
     detail: str = ""
+    storage: str = ""  # set when ALCHEMY_SESSION_FILE, not the profile, holds the session
 
     @property
     def display(self) -> str:
@@ -146,14 +147,22 @@ class NotebookLMClient:
     def profile_state_path(self) -> Path:
         return Path.home() / ".notebooklm" / "profiles" / self.profile / "storage_state.json"
 
+    def storage_override(self) -> Path | None:
+        """The ALCHEMY_SESSION_FILE in use, if it exists. notebooklm then ignores --profile."""
+        path = self.config.session_file
+        return path if path and path.is_file() else None
+
     def session_file(self) -> Path | None:
-        """First existing session file: explicit file, state dir, then the notebooklm profile."""
-        candidates: list[Path] = []
-        if self.config.session_file:
-            candidates.append(self.config.session_file)
-        candidates.append(self.config.state_dir / "storage_state.json")
-        candidates.append(self.profile_state_path())
-        return next((p for p in candidates if p.is_file()), None)
+        """The session file notebooklm will use: ALCHEMY_SESSION_FILE if it exists, else the profile's."""
+        override = self.storage_override()
+        if override:
+            return override
+        state = self.profile_state_path()
+        return state if state.is_file() else None
+
+    def login_command(self, *extra: str) -> list[str]:
+        """`notebooklm login` for the same session file every other call uses."""
+        return self._command(["login", *extra], as_json=False)
 
     def is_authenticated(self) -> bool:
         """True when session material exists. Use check_session() to know it still works."""
@@ -213,10 +222,14 @@ class NotebookLMClient:
         account = data.get("account") if isinstance(data, dict) else None
         email = account.get("email") if isinstance(account, dict) else None
         if isinstance(email, str) and "@" in email.strip():
-            return AccountIdentity(self.profile, email.strip())
-        if isinstance(data, dict) and "account" not in data:
-            return AccountIdentity(self.profile, None, "no session is stored for this profile")
-        return AccountIdentity(self.profile, None, "this profile's sign-in did not record an account")
+            return AccountIdentity(self.profile, email.strip(), storage=str(self.storage_override() or ""))
+        storage = str(self.storage_override() or "")
+        checks = data.get("checks") if isinstance(data, dict) else None
+        if isinstance(checks, dict) and checks.get("storage_exists") is False:
+            return AccountIdentity(self.profile, None, "no session is stored for this profile", storage)
+        return AccountIdentity(
+            self.profile, None, "this profile's sign-in did not record an account", storage
+        )
 
     def browser_accounts(self, browser: str) -> list[str]:
         """Emails of the Google accounts a browser has signed in (`notebooklm auth inspect`)."""
@@ -232,8 +245,16 @@ class NotebookLMClient:
         cmd = [NOTEBOOKLM_BIN]
         # A configured path that does not exist (for example one copied from an old .env) is
         # ignored, so the notebooklm profile's own session is used.
-        if self.config.session_file and self.config.session_file.is_file():
-            cmd += ["--storage", str(self.config.session_file)]
+        override = self.storage_override()
+        if override:
+            if self.profile != DEFAULT_NOTEBOOKLM_PROFILE:
+                raise ConfigError(
+                    f"ALCHEMY_SESSION_FILE ({override}) is set, so notebooklm would ignore "
+                    f"profile '{self.profile}' and use that file's account instead.",
+                    hint="Remove ALCHEMY_SESSION_FILE from .env to use profiles, or drop --profile "
+                    "and ALCHEMY_NOTEBOOKLM_PROFILE to use that file.",
+                )
+            cmd += ["--storage", str(override)]
         cmd += ["--profile", self.profile, *args]
         if as_json:
             cmd.append("--json")

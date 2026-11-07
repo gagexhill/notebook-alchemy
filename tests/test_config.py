@@ -143,3 +143,14 @@ def test_update_dotenv_replaces_export_lines_and_quotes_hash_values() -> None:
     ]
     _load_dotenv_simple(env)
     assert os.environ["ALCHEMY_VAULT_PATH"] == "C:/a#b"
+
+
+def test_a_byte_order_mark_does_not_hide_the_first_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = Path(".env")
+    env.write_bytes("\ufeffGEMINI_API_KEY=old_value_123456789\nOTHER=1\n".encode())
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    _load_dotenv_simple(env)
+    assert os.environ["GEMINI_API_KEY"] == "old_value_123456789"
+    update_dotenv({"GEMINI_API_KEY": "new_value_123456789"}, env)
+    text = env.read_text(encoding="utf-8-sig")
+    assert text.count("GEMINI_API_KEY=") == 1 and "old_value" not in text and "OTHER=1" in text
