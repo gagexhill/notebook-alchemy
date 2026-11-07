@@ -811,7 +811,11 @@ def setup() -> None:
     save("ALCHEMY_NOTEBOOKLM_PROFILE", profile)
 
     ui.step(3, 3, "Vault folder")
-    vault = click.prompt("  Where should compendiums be written?", default=str(config.vault_path))
+    # The default is what .env already says (or "vault"), never the resolved path with the home folder.
+    vault = click.prompt(
+        "  Where should compendiums be written?",
+        default=os.getenv("ALCHEMY_VAULT_PATH", "").strip() or "vault",
+    )
     vault_path = Path(vault).expanduser().resolve()
     # Saved as typed (relative or ~/...), so .env does not carry the user's home folder name.
     save("ALCHEMY_VAULT_PATH", vault.strip())
@@ -912,6 +916,16 @@ def append_video(
 _VAULT_MARKERS = (INDEX_FILENAME, CATALOG_FILENAME)
 
 
+def _is_sync_record(path: Path) -> bool:
+    """A record this tool wrote after a sync: a JSON object whose `titles` is a list of strings."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    titles = data.get("titles") if isinstance(data, dict) else None
+    return isinstance(titles, list) and all(isinstance(t, str) for t in titles)
+
+
 def _is_cache_record(path: Path) -> bool:
     """True for a transcript cache file this tool wrote (JSON object with a video_id)."""
     try:
@@ -941,7 +955,8 @@ def _remove(path: Path) -> int:
         "\b\nExamples:\n"
         "  notebook-alchemy clean                  clear the transcript cache\n"
         "  notebook-alchemy clean --vaults         delete built compendiums (asks first)\n"
-        "  notebook-alchemy clean --all --yes      both, without asking\n"
+        "  notebook-alchemy clean --records        forget past uploads and upload confirmations\n"
+        "  notebook-alchemy clean --all --yes      cache, vaults and records, without asking\n"
     ),
 )
 @click.option(
@@ -987,7 +1002,11 @@ def clean_pipeline(
         # Records of past uploads (titles per notebook id) and the upload-confirmation hashes.
         records_dir = engine.sync_records_dir()
         if records_dir.is_dir():
-            targets += [("record", f) for f in sorted(records_dir.glob("*.json"))]
+            for f in sorted(records_dir.glob("*.json")):
+                if _is_sync_record(f):
+                    targets.append(("record", f))
+                else:
+                    skipped.append(str(f))
         if consent_file().is_file():
             targets.append(("record", consent_file()))
     for item in skipped:

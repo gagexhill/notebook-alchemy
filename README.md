@@ -147,7 +147,7 @@ src/notebook_alchemy/
 - **A known upload account** — `status`, `run` and `sync` name the Google account that receives uploads, or say `unknown` when the `notebooklm` profile did not record one. The first upload to an account asks first (`--yes` skips the question), and asks again if the account behind a profile changes. An account that cannot be identified is asked about on every upload.
 - **Key hygiene** — the Gemini key travels in a header only and is removed from every error and log line.
 - **Cost and quota before commitment** — `dry-run` estimates tokens from video length, prices them for the configured model (with Google's scheduled price changes), and prints how many Gemini requests a run needs. After a build, the summary shows the tokens Gemini actually reported and their cost.
-- **Private by default** — no telemetry; nothing goes anywhere but YouTube, the Gemini API and NotebookLM; the upload confirmation keeps a salted hash of the account email, not the email; `clean --all` removes everything the tool stored.
+- **Private by default** — no telemetry; nothing goes anywhere but YouTube, the Gemini API and NotebookLM; the upload confirmation keeps a salted hash of the account email, not the email; `clean --all` removes its cache, vaults and records (`.env` and the `notebooklm` sign-in stay; the table under [What It Stores](#what-it-stores) says how to remove them).
 - **Guided terminal output** — numbered steps, progress bars on a terminal, plain lines when piped, and `NO_COLOR` honoured.
 - **Hermetic tests** — the suite runs in a temporary working directory and home, with real processes and sockets blocked.
 
@@ -304,7 +304,7 @@ Captions are fetched in English first; set `ALCHEMY_CAPTION_LANGUAGES` (for exam
 
 ### What It Stores
 
-Everything stays on your machine. `notebook-alchemy clean --all` removes all of it (it asks first).
+Everything stays on your machine. `notebook-alchemy clean --all` removes the cache, the vaults and the records, and asks before deleting vaults or records; the last two rows are removed as shown.
 
 | Where | What | Removed by |
 |---|---|---|
@@ -312,7 +312,7 @@ Everything stays on your machine. `notebook-alchemy clean --all` removes all of 
 | `vault/<source>/compendiums/` | The built compendiums, index and catalog | `clean --vaults` |
 | `~/.notebook-alchemy/cache/` | Fetched transcripts, and which videos had none (for a week) | `clean --cache` |
 | `~/.notebook-alchemy/sync/` | Per notebook id, the titles the last upload added, so the next can remove stale ones | `clean --records` |
-| `~/.notebook-alchemy/upload_accounts.json` | Per profile, a salted hash of the account you confirmed uploads to; never the email | `clean --records` |
+| `~/.notebook-alchemy/upload_accounts.json` | Per profile, a salted hash of the account you confirmed uploads to (the email is not stored, though a known email can be checked against it) | `clean --records` |
 | `~/.notebooklm/profiles/<profile>/` | The Google sign-in, kept by the `notebooklm` command | `notebooklm auth logout` |
 
 ### Build for Production

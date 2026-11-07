@@ -55,6 +55,9 @@ python -m notebook_alchemy.cli test
 - Link the GitHub issue a change belongs to, and note in it what changed, the commands run with their
   results, and anything left open.
 - Install the pre-push secret scan once per clone: `git config core.hooksPath .githooks`.
+- Hosted GitHub Actions runs are not authorized by default. Validate locally; open a pull request
+  to `main` or push to `main` (both start `validate.yml`) only after the maintainer approves that
+  run, and record the approval as `OPERATIONS.md` (Hosted Execution) says.
 - Keep the repository free of personal data: no real emails (use `@example.test`), names, local paths,
   notebook ids or account details in code, tests, docs or recordings. Security reports go through
   GitHub private vulnerability reporting, as `SECURITY.md` says.

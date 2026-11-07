@@ -330,6 +330,16 @@ def test_setup_saves_a_home_relative_vault_path_without_the_home_folder(
     assert str(isolated_environment.home) not in text
 
 
+def test_setup_default_vault_path_carries_no_home_folder(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, ["setup"], input="\ndefault\nkeep\n\n")  # Enter at every prompt
+    assert result.exit_code == 0, result.output
+    text = (isolated_environment.work / ".env").read_text(encoding="utf-8")
+    assert "ALCHEMY_VAULT_PATH=vault" in text and str(isolated_environment.work) not in text
+
+
 def test_clean_records_removes_upload_records_and_confirmations(
     runner: CliRunner, isolated_environment
 ) -> None:
@@ -343,6 +353,16 @@ def test_clean_records_removes_upload_records_and_confirmations(
     assert runner.invoke(cli, ["clean", "--records", "--yes"]).exit_code == 0
     assert not list(sync_dir.iterdir()) and not consent_file().exists()
     assert list(cache.iterdir()) and vault.exists()  # --records touches nothing else
+
+
+def test_clean_records_leaves_files_it_did_not_write(runner: CliRunner, isolated_environment) -> None:
+    sync_dir = isolated_environment.home / ".notebook-alchemy" / "sync"
+    sync_dir.mkdir(parents=True)
+    (sync_dir / "mine.json").write_text('{"titles": ["A"]}', encoding="utf-8")
+    (sync_dir / "theirs.json").write_text('{"settings": true}', encoding="utf-8")
+    result = runner.invoke(cli, ["clean", "--records", "--yes"])
+    assert result.exit_code == 0 and "theirs.json" in result.output
+    assert [p.name for p in sync_dir.iterdir()] == ["theirs.json"]
 
 
 def test_clean_reports_real_failures(

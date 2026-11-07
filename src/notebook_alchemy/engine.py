@@ -7,6 +7,7 @@ import logging
 import re
 import shutil
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +85,22 @@ def _dir_size(path: Path) -> int:
 SYNC_WORKERS = 3
 
 
+def _run_pool(func: Callable[[Any], Any], items: list[Any]) -> list[Any]:
+    """Map `func` over `items` on SYNC_WORKERS threads, in order.
+
+    On Ctrl+C, calls not yet started are cancelled; the ones already running finish, because a
+    `notebooklm` process cannot be stopped half-way. The interrupt then propagates.
+    """
+    pool = ThreadPoolExecutor(max_workers=SYNC_WORKERS)
+    try:
+        return list(pool.map(func, items))
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    finally:
+        pool.shutdown(wait=True)
+
+
 class _Counter:
     """Thread-safe progress steps for work that finishes in any order."""
 
@@ -101,10 +118,12 @@ class _Counter:
 
 def _home_relative(path: Path) -> str:
     """A path with the home folder shown as ~, so pasted output does not carry the user name."""
-    try:
-        return str(Path("~") / path.relative_to(Path.home()))
-    except ValueError:
-        return str(path)
+    for home in (Path.home(), Path.home().resolve()):
+        try:
+            return str(Path("~") / path.relative_to(home))
+        except ValueError:
+            continue
+    return str(path)
 
 
 class AlchemyEngine:
@@ -364,11 +383,12 @@ class AlchemyEngine:
                 return title, source_id, None
             except AlchemyError as exc:
                 return title, None, f"{md_file.name}: {exc.message}"
+            except Exception as exc:  # noqa: BLE001 - reported per file, so the rest still reconcile
+                return title, None, f"{md_file.name}: {type(exc).__name__}: {exc}"
             finally:
                 steps.tick()
 
-        with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
-            added_results = list(pool.map(add, files))
+        added_results = _run_pool(add, files)
         new_ids: dict[str, str] = {}  # wanted title -> id of the source we just added
         for title, source_id, error in added_results:
             if source_id:
@@ -385,12 +405,13 @@ class AlchemyEngine:
                 return None
             except AlchemyError as exc:
                 return f"{title}: processing did not finish: {exc.message}"
+            except Exception as exc:  # noqa: BLE001 - reported per source, like the typed errors
+                return f"{title}: processing did not finish: {type(exc).__name__}: {exc}"
             finally:
                 steps.tick()
 
         pending = list(new_ids.items())
-        with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
-            waited = list(pool.map(wait, pending))
+        waited = _run_pool(wait, pending)
         for (title, _source_id), error in zip(pending, waited, strict=True):
             if error:
                 failed.append(error)

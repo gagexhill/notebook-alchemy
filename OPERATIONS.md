@@ -29,10 +29,17 @@ python -m pip_audit
 
 `pip_audit` reports known vulnerabilities in installed dependencies.
 
-## Continuous Integration
+## Hosted Execution
 
-`.github/workflows/validate.yml` runs the same checks, a dependency audit and a secret scan on every pull
-request to `main` and every push to `main`, on Linux and Windows. It needs no secrets.
+`.github/workflows/validate.yml` runs the same checks, a dependency audit and a secret scan on Linux and
+Windows, and needs no secrets. It starts on every pull request to `main` and every push to `main`, so
+those steps spend hosted runner time.
+
+Hosted runs are not authorized by default. Local validation is the gate; a run happens only after the
+maintainer approves it for that pull request. The approval is recorded in the pull request description
+("Hosted run approved by the maintainer"), so the record lives with the run it covers. A workflow file,
+an included runner allowance, or an earlier approved run is not permission for the next one. Dependabot
+pull requests start a run too; review them in a batch rather than one at a time.
 
 ## Secret Scan Hook
 

@@ -348,3 +348,9 @@ def test_cli_version_comes_from_package_metadata_without_a_process(
     monkeypatch.setattr("shutil.which", lambda name: "/bin/notebooklm")
     monkeypatch.setattr("importlib.metadata.version", lambda name: "0.8.6")
     assert client.cli_version() == "notebooklm-py 0.8.6" and process.calls == []
+
+
+def test_a_hand_edited_consent_record_asks_again_instead_of_crashing() -> None:
+    consent_file().parent.mkdir(parents=True, exist_ok=True)
+    consent_file().write_text(json.dumps({"salt": "s", "profiles": {"work": "\u00e9"}}), encoding="utf-8")
+    assert not upload_confirmed(AccountIdentity("work", "a@example.test"))
