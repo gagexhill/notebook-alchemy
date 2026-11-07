@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from notebook_alchemy.client import NotebookLMClient, SourceDocument
+from notebook_alchemy.client import NotebookLMClient, SourceDocument, normalize_title
 from notebook_alchemy.config import AlchemyConfig
 from notebook_alchemy.errors import NotebookLMError, SessionError
 
@@ -176,3 +176,9 @@ def test_check_session_reports_any_cli_failure_instead_of_raising(tmp_path: Path
     client = _client(tmp_path, FakeProcess(("list", 1, "", "something unexpected broke")))
     status = client.check_session()
     assert not status.ok and "something unexpected broke" in status.detail
+
+
+def test_an_old_unprefixed_title_counts_as_a_copy_of_the_new_one() -> None:
+    # A re-sync must replace the INDEX source an earlier version uploaded, not add a second index.
+    assert normalize_title("_INDEX") == normalize_title("INDEX") == normalize_title("_INDEX.md")
+    assert normalize_title("_MASTER SOURCES CATALOG") == normalize_title("MASTER_SOURCES_CATALOG.md")

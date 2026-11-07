@@ -67,7 +67,7 @@ Notebook Alchemy changes the unit. The videos are grouped by subject first, then
 
 ```text
 YouTube URL ──► discover ──► group ──► resolve transcripts ──► write volumes ──► vault ──► NotebookLM
-              yt-dlp       Gemini or    local files, cache,    Gemini synthesis   INDEX.md   file sources,
+              yt-dlp       Gemini or    local files, cache,    Gemini synthesis   _INDEX.md  file sources,
               metadata     keywords     captions API           or offline index   + catalog  replace by title
 ```
 
@@ -75,7 +75,7 @@ YouTube URL ──► discover ──► group ──► resolve transcripts ─
 2. **Group.** With a Gemini key, domains are discovered from a sample of titles and every title is then assigned by number; anything unassigned lands in a visible Miscellaneous domain. Without a key, a keyword table groups the titles.
 3. **Resolve transcripts** (live mode). Each video's text comes from your own `.txt`, `.vtt` or `.srt` files, then the local cache, then YouTube captions, fetched with a bounded worker pool. Videos with no captions are remembered for a week.
 4. **Write volumes.** A domain with more than `--max-per-vol` videos (50 by default) splits into volumes. Live volumes are synthesized by Gemini and end with a generated source table; offline volumes are indexes.
-5. **Write the vault.** Everything is built in a staging folder and swapped into `vault/<source>/compendiums/` only when complete, together with `INDEX.md` and `MASTER_SOURCES_CATALOG.md`.
+5. **Write the vault.** Everything is built in a staging folder and swapped into `vault/<source>/compendiums/` only when complete, together with `_INDEX.md` and `_MASTER_SOURCES_CATALOG.md`. The leading underscore keeps those two at the top of NotebookLM's source list (sorted by title) and of most file browsers.
 6. **Upload.** Each file goes to NotebookLM as a file source. The tool waits for NotebookLM to process each one, corrects any title NotebookLM rewrites to the file name, replaces older copies with the same title, removes sources it uploaded last time that this build no longer has, and reads the notebook back to confirm each title appears once. Any file that fails is listed with its cause.
 
 ---

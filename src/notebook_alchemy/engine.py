@@ -16,7 +16,16 @@ from .client import NotebookLMClient, SourceDocument, normalize_title
 from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig
 from .errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
 from .gemini import GeminiClient
-from .synthesizer import DomainCompendium, Synthesizer, safe_filename, unique_slugs
+from .synthesizer import (
+    CATALOG_FILENAME,
+    INDEX_FILENAME,
+    LEGACY_CATALOG_FILENAME,
+    DomainCompendium,
+    Synthesizer,
+    safe_filename,
+    source_title,
+    unique_slugs,
+)
 from .vault import VaultManager
 
 logger = logging.getLogger(__name__)
@@ -203,11 +212,23 @@ class AlchemyEngine:
 
     def _write_vault(self, report: DryRunReport, compendiums: list[DomainCompendium], final: Path) -> Path:
         """Build into a staging directory, then swap it in. A failed run leaves the old vault intact."""
+        names = [Path(c.relative_path).name for c in compendiums] + [INDEX_FILENAME, CATALOG_FILENAME]
+        seen: set[str] = set()
+        clashes: set[str] = set()
+        for name in names:  # compared without case: Windows and macOS file systems ignore it
+            if name.lower() in seen:
+                clashes.add(name)
+            seen.add(name.lower())
+        if clashes:
+            raise VaultError(
+                f"Two vault files would share a name: {', '.join(sorted(clashes))}.",
+                hint="Rename the colliding domain and run again; nothing was written.",
+            )
         stage = self.vault.stage_dir(final)
         try:
             for comp in compendiums:
                 (stage / Path(comp.relative_path).name).write_text(comp.content, encoding="utf-8")
-            (stage / "INDEX.md").write_text(
+            (stage / INDEX_FILENAME).write_text(
                 self.synthesizer.generate_index(
                     compendiums,
                     notebook_title=report.notebook_title,
@@ -225,7 +246,7 @@ class AlchemyEngine:
                 }
                 for v in report.youtube_videos
             ]
-            (stage / "MASTER_SOURCES_CATALOG.md").write_text(
+            (stage / CATALOG_FILENAME).write_text(
                 self.synthesizer.generate_master_sources_catalog(
                     catalog, notebook_title=report.notebook_title
                 ),
@@ -238,7 +259,7 @@ class AlchemyEngine:
         except BaseException:
             shutil.rmtree(stage, ignore_errors=True)  # best-effort cleanup before re-raising
             raise
-        return final / "INDEX.md"
+        return final / INDEX_FILENAME
 
     # -- NotebookLM sync --
 
@@ -300,7 +321,7 @@ class AlchemyEngine:
         new_ids: dict[str, str] = {}  # wanted title -> id of the source we just added
         total_steps = len(files) * 2
         for done, md_file in enumerate(files, 1):
-            title = md_file.stem.replace("_", " ")
+            title = source_title(md_file.stem)
             doc = SourceDocument(
                 source_id=md_file.stem,
                 title=title,
@@ -397,7 +418,10 @@ class AlchemyEngine:
     ) -> AppendResult:
         """Add videos to the catalog and to the matching domain compendium. Duplicates are skipped."""
         source_dir.mkdir(parents=True, exist_ok=True)
-        catalog_file = source_dir / "MASTER_SOURCES_CATALOG.md"
+        catalog_file = source_dir / CATALOG_FILENAME
+        legacy_catalog = source_dir / LEGACY_CATALOG_FILENAME
+        if legacy_catalog.is_file() and not catalog_file.exists():
+            legacy_catalog.rename(catalog_file)  # an older vault: keep one catalog, under the new name
         catalog_text = catalog_file.read_text(encoding="utf-8") if catalog_file.exists() else ""
 
         fresh: list[dict[str, Any]] = []
