@@ -59,7 +59,8 @@ def test_output_is_namespaced_per_source(engine: AlchemyEngine, tmp_path: Path) 
     report = engine.run_distillation(use_mock=True, force_offline=True)
     final = tmp_path / "vault" / MOCK_DIR / "compendiums"
     assert report.vault_directory == final
-    assert (final / "INDEX.md").exists() and (final / "MASTER_SOURCES_CATALOG.md").exists()
+    assert (final / "_INDEX.md").exists() and (final / "_MASTER_SOURCES_CATALOG.md").exists()
+    assert not (final / "INDEX.md").exists()
     assert not (tmp_path / "vault" / "compendiums").exists()
     assert (other / "keep.md").read_text(encoding="utf-8") == "other channel"
     assert report.is_mock
@@ -75,7 +76,7 @@ def test_every_video_lands_in_exactly_one_volume(engine: AlchemyEngine) -> None:
 
 def test_catalog_records_each_videos_domain(engine: AlchemyEngine, tmp_path: Path) -> None:
     engine.run_distillation(use_mock=True, force_offline=True)
-    catalog = (tmp_path / "vault" / MOCK_DIR / "compendiums" / "MASTER_SOURCES_CATALOG.md").read_text(
+    catalog = (tmp_path / "vault" / MOCK_DIR / "compendiums" / "_MASTER_SOURCES_CATALOG.md").read_text(
         encoding="utf-8"
     )
     assert "Distilled Source" not in catalog
@@ -129,6 +130,48 @@ def test_duplicate_titles_keep_distinct_ids(engine: AlchemyEngine) -> None:
         "id2",
         "id3",
     ]
+
+
+def _report_with_domains(engine: AlchemyEngine, domains: dict[str, int]):  # type: ignore[no-untyped-def]
+    videos = [
+        VideoSourceSummary(f"{d[:3]}{i}", f"{d} talk {i}", f"https://u/{d}/{i}", "yt", "ready")
+        for d, n in domains.items()
+        for i in range(n)
+    ]
+    report = engine.analyzer._build_report(
+        nb_id="nb_names",
+        nb_title="Names",
+        videos=videos,
+        others=[],
+        total_sources=len(videos),
+        origin="youtube",
+        progress=None,
+    )
+    report.domain_videos = {d: [v for v in videos if v.url.startswith(f"https://u/{d}/")] for d in domains}
+    return report
+
+
+def test_domains_named_like_vault_files_get_their_own_files(engine: AlchemyEngine) -> None:
+    domains = {"_INDEX": 1, "Master Sources Catalog": 1, "A": 2, "A Vol 2": 1}
+    result = engine.run_distillation(
+        dry_run=_report_with_domains(engine, domains), force_offline=True, max_videos_per_volume=1
+    )
+    assert result.vault_directory is not None
+    files = sorted(p.name.lower() for p in result.vault_directory.glob("*.md"))
+    assert len(files) == len(set(files)) == 5 + 2  # five volume files, the index and the catalog
+    index = (result.vault_directory / "_INDEX.md").read_text(encoding="utf-8")
+    assert "# " in index and "Names" in index  # the index was not overwritten by a domain
+    catalog = (result.vault_directory / "_MASTER_SOURCES_CATALOG.md").read_text(encoding="utf-8")
+    assert catalog.count("https://u/") == 5
+
+
+def test_colliding_vault_file_names_are_refused_before_writing(
+    engine: AlchemyEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("notebook_alchemy.engine.unique_slugs", lambda ds: {d: "_INDEX" for d in ds})
+    with pytest.raises(VaultError, match="share a name"):
+        engine.run_distillation(dry_run=_report_with_domains(engine, {"X": 1}), force_offline=True)
+    assert not engine.vault.compendium_dir("Names").exists()
 
 
 def test_source_without_videos_is_an_error(engine: AlchemyEngine) -> None:
@@ -274,9 +317,7 @@ def _built(engine: AlchemyEngine, tmp_path: Path) -> Path:
 
 def test_append_adds_once_and_skips_duplicates(engine: AlchemyEngine, tmp_path: Path) -> None:
     directory = _built(engine, tmp_path)
-    domain = next(
-        p for p in directory.glob("*.md") if p.name not in ("INDEX.md", "MASTER_SOURCES_CATALOG.md")
-    ).read_text(encoding="utf-8")
+    domain = next(p for p in directory.glob("*.md") if not p.name.startswith("_")).read_text(encoding="utf-8")
     domain_name = next(line for line in domain.splitlines() if line.startswith("domain:")).split('"')[1]
     video = {"id": "n1", "title": "New video", "url": "https://youtu.be/n1"}
 
@@ -284,10 +325,21 @@ def test_append_adds_once_and_skips_duplicates(engine: AlchemyEngine, tmp_path: 
     again = engine.append_incremental_sources([video], directory, domain=domain_name)
     assert (first.added, first.skipped) == (1, 0)
     assert (again.added, again.skipped) == (0, 1)
-    catalog = (directory / "MASTER_SOURCES_CATALOG.md").read_text(encoding="utf-8")
+    catalog = (directory / "_MASTER_SOURCES_CATALOG.md").read_text(encoding="utf-8")
     assert catalog.count("`n1`") == 1 and "total_sources: 2" in catalog
     body = (directory / first.updated_files[0]).read_text(encoding="utf-8")
     assert "source_count: 2" in body and "[Added] [New video]" in body
+
+
+def test_append_moves_an_older_catalog_to_the_new_name(engine: AlchemyEngine, tmp_path: Path) -> None:
+    directory = _built(engine, tmp_path)
+    (directory / "_MASTER_SOURCES_CATALOG.md").rename(directory / "MASTER_SOURCES_CATALOG.md")
+    video = {"id": "n2", "title": "Another video", "url": "https://youtu.be/n2"}
+    result = engine.append_incremental_sources([video], directory)
+    assert result.added == 1
+    assert not (directory / "MASTER_SOURCES_CATALOG.md").exists()
+    catalog = (directory / "_MASTER_SOURCES_CATALOG.md").read_text(encoding="utf-8")
+    assert "`n2`" in catalog and "total_sources: 2" in catalog
 
 
 def test_append_creates_a_new_domain_file(engine: AlchemyEngine, tmp_path: Path) -> None:

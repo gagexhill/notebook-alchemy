@@ -44,7 +44,7 @@ known-public value narrowly in `.gitleaks.toml`. A bypass is `GITLEAKS_BYPASS=1`
 
 | Purpose | Authorization | Reference |
 |---|---|---|
-| Development validation (`.github/workflows/validate.yml`) | Owner approved opening the audit remediation pull requests (#16), which run it on the `fix/audit-remediation` pull request to `main`. Any other run needs a new record here | #30 |
+| Development validation (`.github/workflows/validate.yml`) | Owner approved opening the audit remediation pull requests (#16), which run it on the `fix/audit-remediation` pull request to `main`. The Owner's merges of #36 and #37 (2026-11-06) each ran it once more on the push to `main`, because the workflow also triggers on that push. On 2026-11-07 the Owner approved opening and merging the `fix/reserved-vault-filenames` pull request (#28), which runs it on that pull request and on the merge push. Any other run needs a new record here | #30 |
 | Release | None on record | #33 |
 
 A workflow file, included runner allowance, or an older run is not permission. Verify the repository's

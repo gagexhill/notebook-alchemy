@@ -13,6 +13,7 @@ from typing import Any
 
 from . import __version__
 from .channel import TranscriptManager, TranscriptResult
+from .client import normalize_title
 from .config import DEFAULT_GEMINI_MODEL, is_usable_api_key
 from .errors import GeminiError
 from .gemini import GeminiClient
@@ -34,6 +35,16 @@ _WINDOWS_RESERVED = {
     *(f"com{i}" for i in range(1, 10)),
     *(f"lpt{i}" for i in range(1, 10)),
 }
+# Files the vault writes beside the compendiums. The leading underscore sorts them above every
+# domain in NotebookLM's title sort and in file browsers, and no domain slug can take these names,
+# because safe_filename strips leading underscores.
+INDEX_FILENAME = "_INDEX.md"
+CATALOG_FILENAME = "_MASTER_SOURCES_CATALOG.md"
+# Names used by vaults built before the underscore prefix; still recognised there.
+LEGACY_INDEX_FILENAME = "INDEX.md"
+LEGACY_CATALOG_FILENAME = "MASTER_SOURCES_CATALOG.md"
+# Volume 2+ files end in _Vol_<n>; a domain slug of that form could take another domain's file.
+_VOLUME_FORM = re.compile(r"_vol_\d+$", re.IGNORECASE)
 
 SYSTEM_PROMPT = (
     "You are a Principal Knowledge Architect. Synthesize raw video transcripts into a dense, "
@@ -61,17 +72,33 @@ def safe_filename(text: str) -> str:
 
 
 def unique_slugs(domains: list[str]) -> dict[str, str]:
-    """One distinct slug per domain; later collisions get a short stable hash suffix."""
+    """One distinct slug per domain; later collisions get a short stable hash suffix.
+
+    Slugs are compared the way the sync compares NotebookLM titles (`normalize_title`: no case, no
+    underscores), so no domain can collide with another domain or with the vault's own files on a
+    case-insensitive file system or in the notebook; a domain named INDEX would otherwise be taken
+    for an old copy of _INDEX and replaced. A slug of the `_Vol_<n>` form of a volume file also gets
+    the suffix, so no domain can take another's file.
+    """
     slugs: dict[str, str] = {}
-    taken: set[str] = set()
+    taken: set[str] = {
+        normalize_title(n)
+        for n in (INDEX_FILENAME, CATALOG_FILENAME, LEGACY_INDEX_FILENAME, LEGACY_CATALOG_FILENAME)
+    }
     for domain in domains:
         base = safe_filename(domain)
         slug = base
-        if slug.lower() in taken:
+        if normalize_title(slug) in taken or _VOLUME_FORM.search(slug):
             slug = f"{base[:72]}_{hashlib.sha256(domain.encode('utf-8')).hexdigest()[:6]}"
-        taken.add(slug.lower())
+        taken.add(normalize_title(slug))
         slugs[domain] = slug
     return slugs
+
+
+def source_title(stem: str) -> str:
+    """The NotebookLM title for a vault file: underscores become spaces, except a leading one."""
+    lead = "_" if stem.startswith("_") else ""
+    return lead + " ".join(stem.lstrip("_").replace("_", " ").split())
 
 
 def notebook_url(notebook_id: str) -> str:
