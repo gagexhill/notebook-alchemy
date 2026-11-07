@@ -8,6 +8,7 @@ import pytest
 
 from notebook_alchemy import __version__
 from notebook_alchemy.channel import TranscriptResult
+from notebook_alchemy.client import normalize_title
 from notebook_alchemy.errors import GeminiError
 from notebook_alchemy.gemini import GeminiResult
 from notebook_alchemy.synthesizer import (
@@ -80,10 +81,15 @@ def test_colliding_domains_get_distinct_slugs() -> None:
     assert slugs["A & B"] == "A_B"
 
 
-@pytest.mark.parametrize("domain", ["_INDEX", "__index", "_Master Sources Catalog", "INDEX"])
+@pytest.mark.parametrize(
+    "domain", ["_INDEX", "__index", "_Master Sources Catalog", "INDEX", "Master Sources Catalog", "index"]
+)
 def test_a_domain_cannot_take_a_vault_file_name(domain: str) -> None:
     slug = unique_slugs([domain])[domain]
-    assert f"{slug}.md".lower() not in {INDEX_FILENAME.lower(), CATALOG_FILENAME.lower()}
+    # Neither the file name nor the NotebookLM title may match a vault file's, or a re-sync would
+    # treat the domain as an old copy of the index or catalog and replace it.
+    reserved = {normalize_title(INDEX_FILENAME), normalize_title(CATALOG_FILENAME)}
+    assert normalize_title(source_title(slug)) not in reserved
 
 
 def test_vault_files_sort_above_every_domain() -> None:
