@@ -111,7 +111,7 @@ def _show_upload_target(engine: AlchemyEngine) -> AccountIdentity:
     ui.info(f"  Upload account: {_account_text(identity)}")
     if not identity.email:
         ui.info(
-            "  [dim]Record it with `notebook-alchemy login --account <email> --browser-cookies edge`"
+            "  [dim]Record it with `notebook-alchemy login --account <email> --browser-cookies chrome`"
             " or `notebook-alchemy setup`.[/dim]"
         )
     ui.info(f"  Gemini API key: {'set' if engine.config.has_gemini_key else 'not set'}")
@@ -132,7 +132,8 @@ def _confirm_first_upload(identity: AccountIdentity, yes: bool) -> None:
             f"This is {first} to NotebookLM {target}, and it needs your confirmation.",
             hint=(
                 "Run the command in a terminal to confirm, or pass --yes. Record the account with "
-                "`notebook-alchemy login --browser-cookies edge --account <email>` so it is asked only once."
+                "`notebook-alchemy login --browser-cookies chrome --account <email>` so it is asked "
+                "only once."
             ),
         )
     ui.console.print(
@@ -538,7 +539,7 @@ def status(profile: str | None) -> None:
         next_steps.append("notebook-alchemy setup (or: notebook-alchemy login)")
     elif not identity.email:
         next_steps.append(
-            "record the upload account: notebook-alchemy login --browser-cookies edge --account <email>"
+            "record the upload account: notebook-alchemy login --browser-cookies chrome --account <email>"
         )
     if not has_key:
         next_steps.append(
@@ -602,14 +603,23 @@ def _sign_in(
         ) from exc
     if proc.returncode != 0:
         detail = ((proc.stderr or proc.stdout or "") if browser_cookies else "").strip()
+        if browser_cookies:
+            browser_name = browser_cookies.split("::", 1)[0]
+            hint = (
+                f"List the accounts that browser holds with `notebooklm auth inspect --browser "
+                f"{browser_name}`, sign in to Google in it first, or try another browser "
+                f"({', '.join(COOKIE_BROWSERS)})."
+            )
+        else:
+            hint = (
+                "If no window opened, install its browser once with `python -m playwright install "
+                "chromium`, or use `--browser chrome`. Reusing a browser you are already signed in "
+                "to also works: `notebook-alchemy login --browser-cookies chrome`."
+            )
         raise NotebookLMError(
             f"Sign-in did not complete (exit code {proc.returncode})."
             + (f" {' '.join(detail.split())[:300]}" if detail else ""),
-            hint=(
-                "List the accounts a browser holds with `notebooklm auth inspect --browser edge`, "
-                "try `notebook-alchemy login --browser-cookies edge`, or set NOTEBOOKLM_AUTH_JSON "
-                "with exported session cookies."
-            ),
+            hint=hint,
         )
     identity = client.upload_account()
     if account and (identity.email or "").casefold() != account.strip().casefold():
@@ -618,7 +628,7 @@ def _sign_in(
             f"{identity.display}, not {account}. Uploads through this profile would go to that account.",
             hint=(
                 "Check the email with `notebooklm auth inspect --browser "
-                f"{(browser_cookies or 'edge').split('::', 1)[0]}` and sign in again before uploading."
+                f"{(browser_cookies or 'chrome').split('::', 1)[0]}` and sign in again before uploading."
             ),
         )
     with ui.console.status("Confirming the session works..."):
@@ -637,7 +647,7 @@ def _sign_in(
     epilog=(
         "\b\nExamples:\n"
         "  notebook-alchemy login                        sign in through a browser window\n"
-        "  notebook-alchemy login --browser-cookies edge reuse an Edge sign-in, no window\n"
+        "  notebook-alchemy login --browser-cookies chrome  reuse a Chrome sign-in, no window\n"
         "  notebook-alchemy login --browser-cookies chrome --account you@example.com --profile personal\n"
         "                                                pick one of several signed-in accounts\n"
         "  notebook-alchemy login --check                is the stored session still valid?\n"
