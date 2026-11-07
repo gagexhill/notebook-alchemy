@@ -197,6 +197,7 @@ def test_sync_failure_exits_non_zero_and_lists_files(
         )
 
     monkeypatch.setattr(AlchemyEngine, "sync_to_notebooklm", boom)
+    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 1))
     result = runner.invoke(cli, ["sync", "-n", "chan", "--yes"])
     assert result.exit_code == 1
     assert "Beta.md: No such option" in result.output and "Run it again" in result.output
@@ -431,6 +432,7 @@ def _record_uploads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         return SyncResult("nb-1", True, 1, 0)
 
     monkeypatch.setattr(AlchemyEngine, "sync_to_notebooklm", fake_sync)
+    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 1))
     return uploads
 
 
@@ -544,9 +546,22 @@ def test_run_asks_before_building_and_shows_key_state(
 # --- login --account --------------------------------------------------------------------------------
 
 
-def test_login_account_needs_browser_cookies(runner: CliRunner) -> None:
-    result = runner.invoke(cli, ["login", "--account", "me@example.test"])
-    assert result.exit_code == 2 and "--browser-cookies" in result.output
+def test_login_window_with_account_checks_the_account_afterwards(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def ok(cmd, **k):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", ok)
+    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 2))
+    wrong = runner.invoke(cli, ["login", "--account", "someone-else@example.test"])
+    assert wrong.exit_code == 1 and "not someone-else@example.test" in wrong.output
+    assert "--account" not in calls[0]  # a window sign-in is checked afterwards, not steered
+    right = runner.invoke(cli, ["login", "--account", ACCOUNT])
+    assert right.exit_code == 0, right.output
 
 
 def test_login_rejects_an_unknown_cookie_browser(runner: CliRunner) -> None:
@@ -711,3 +726,52 @@ def test_setup_repairs_a_bad_profile_in_env(
     assert "Setup will ask for a new one" in result.output
     assert "ALCHEMY_NOTEBOOKLM_PROFILE=fixed" in env.read_text(encoding="utf-8")
     assert "bad/name" not in env.read_text(encoding="utf-8")
+
+
+def test_sync_checks_the_session_before_asking(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _built_vault(isolated_environment)
+    uploads = _record_uploads(monkeypatch)
+    monkeypatch.setattr(
+        NotebookLMClient, "check_session", lambda self: SessionStatus(False, "No NotebookLM session found.")
+    )
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, ["sync", "-n", "chan"])
+    assert result.exit_code == 1 and "No NotebookLM session" in result.output
+    assert "notebook-alchemy login" in result.output and "Upload to this account?" not in result.output
+    assert uploads == []
+
+
+def test_run_stops_if_the_account_changes_during_the_build(
+    runner: CliRunner, fake_channel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("Build a REST API", "CSS grid tricks")
+    uploads = _record_uploads(monkeypatch)
+    seen = iter([ACCOUNT, "other@example.test"])
+    monkeypatch.setattr(
+        NotebookLMClient, "upload_account", lambda self: AccountIdentity(self.profile, next(seen))
+    )
+    result = runner.invoke(cli, ["run", "@my", "--offline", "-N", "My Notebook", "--yes"])
+    assert result.exit_code == 1 and "changed during the build" in result.output
+    assert "other@example.test" in result.output and uploads == []
+
+
+def test_login_writes_the_session_file_every_other_call_reads(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    storage = isolated_environment.work / "my_session.json"
+    storage.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ALCHEMY_SESSION_FILE", str(storage))
+    calls: list[list[str]] = []
+
+    def ok(cmd, **k):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", ok)
+    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 2))
+    result = runner.invoke(cli, ["login", "--browser-cookies", "edge"])
+    assert result.exit_code == 0, result.output
+    assert calls[0][:3] == ["notebooklm", "--storage", str(storage)] and "login" in calls[0]
+    assert "session file" in result.output

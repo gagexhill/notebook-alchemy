@@ -18,7 +18,7 @@ from notebook_alchemy.client import (
     upload_confirmed,
 )
 from notebook_alchemy.config import AlchemyConfig
-from notebook_alchemy.errors import NotebookLMError, SessionError
+from notebook_alchemy.errors import ConfigError, NotebookLMError, SessionError
 
 from .conftest import FakeProcess
 
@@ -40,25 +40,28 @@ def test_session_found_in_notebooklm_profile_dir(tmp_path: Path) -> None:
     assert client.session_file() == state
 
 
-def test_session_found_in_state_dir_and_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _profile_session(client: NotebookLMClient) -> Path:
+    state = client.profile_state_path()
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("{}", encoding="utf-8")
+    return state
+
+
+def test_only_a_session_notebooklm_will_use_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(tmp_path)
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "storage_state.json").write_text("{}", encoding="utf-8")
-    assert client.is_authenticated()
-    other = _client(tmp_path / "elsewhere")
-    assert not other.is_authenticated()
+    assert not client.is_authenticated()  # never passed to notebooklm, so it is not a session
     monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", "{}")
-    assert other.is_authenticated()
+    assert client.is_authenticated()
 
 
 def test_check_session_states(tmp_path: Path) -> None:
     missing = _client(tmp_path).check_session()
     assert not missing.ok and "No NotebookLM session" in missing.detail
 
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "storage_state.json").write_text("{}", encoding="utf-8")
     good = _client(tmp_path, FakeProcess(("list", 0, NOTEBOOKS, "")))
+    _profile_session(good)
     status = good.check_session()
     assert status.ok and status.notebooks == 2
 
@@ -178,10 +181,8 @@ def test_auth_not_found_is_a_session_error(tmp_path: Path) -> None:
 
 
 def test_check_session_reports_any_cli_failure_instead_of_raising(tmp_path: Path) -> None:
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "storage_state.json").write_text("{}", encoding="utf-8")
     client = _client(tmp_path, FakeProcess(("list", 1, "", "something unexpected broke")))
+    _profile_session(client)
     status = client.check_session()
     assert not status.ok and "something unexpected broke" in status.detail
 
@@ -195,11 +196,15 @@ def test_an_old_unprefixed_title_counts_as_a_copy_of_the_new_one() -> None:
 # --- profile and upload account ------------------------------------------------------------------
 
 
-def _auth_check(email: str | None, *, code: int = 0, account_key: bool = True) -> str:
-    report: dict[str, object] = {"status": "ok" if code == 0 else "error", "checks": {}}
-    if account_key:
-        report["account"] = {"email": email, "authuser": 0} if email else None
-    return json.dumps(report)
+def _auth_check(email: str | None, *, code: int = 0, stored: bool = True) -> str:
+    """The shape notebooklm-py 0.8.6 prints: `account` is always present, null when unknown."""
+    return json.dumps(
+        {
+            "status": "ok" if code == 0 else "error",
+            "account": {"email": email, "authuser": 0} if email else None,
+            "checks": {"storage_exists": stored, "json_valid": stored},
+        }
+    )
 
 
 def test_profile_comes_from_config_and_an_explicit_profile_wins(tmp_path: Path) -> None:
@@ -227,7 +232,7 @@ def test_upload_account_parses_a_failing_check_that_still_reports(tmp_path: Path
     ("process", "reason"),
     [
         (FakeProcess(("auth check", 0, _auth_check(None), "")), "did not record"),
-        (FakeProcess(("auth check", 1, _auth_check(None, account_key=False), "")), "no session"),
+        (FakeProcess(("auth check", 1, _auth_check(None, stored=False), "")), "no session"),
         (FakeProcess(("auth check", 0, json.dumps({"account": {"email": "not-an-email"}}), "")), "record"),
         (FakeProcess(("auth check", 2, "Traceback: boom", "")), "no report"),
     ],
@@ -287,3 +292,24 @@ def test_a_recorded_unknown_account_does_not_count_as_consent() -> None:
     consent_file().parent.mkdir(parents=True, exist_ok=True)
     consent_file().write_text(json.dumps({"work": {"email": None}}), encoding="utf-8")
     assert not upload_confirmed(AccountIdentity("work", None))
+
+
+def test_a_session_file_setting_overrides_the_profile_and_is_named(tmp_path: Path) -> None:
+    storage = tmp_path / "my_session.json"
+    storage.write_text("{}", encoding="utf-8")
+    process = FakeProcess(("auth check", 0, _auth_check("me@example.test"), ""))
+    client = _client(tmp_path, process, session_file=storage)
+    identity = client.upload_account()
+    assert identity.storage == str(storage) and client.session_file() == storage
+    assert process.calls[0][:3] == ["notebooklm", "--storage", str(storage)]
+    assert client.login_command()[:4] == ["notebooklm", "--storage", str(storage), "--profile"]
+
+
+def test_an_explicit_profile_with_a_session_file_is_refused(tmp_path: Path) -> None:
+    storage = tmp_path / "my_session.json"
+    storage.write_text("{}", encoding="utf-8")
+    process = FakeProcess(("list", 0, "[]", ""))
+    client = _client(tmp_path, process, session_file=storage, notebooklm_profile="work")
+    with pytest.raises(ConfigError, match="ALCHEMY_SESSION_FILE"):
+        client.list_notebooks()
+    assert process.calls == []  # refused before anything ran

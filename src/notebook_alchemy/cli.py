@@ -107,10 +107,11 @@ def _cookie_browser(_ctx: click.Context, _param: click.Parameter, value: str | N
 
 def _account_text(identity: AccountIdentity) -> str:
     """Markup-safe description of the upload account. Unknown is said plainly, never guessed."""
+    where = f"session file {identity.storage}" if identity.storage else f"profile {identity.profile}"
     if identity.email:
-        return f"{esc(identity.email)} [dim](profile {esc(identity.profile)})[/dim]"
+        return f"{esc(identity.email)} [dim]({esc(where)})[/dim]"
     reason = f"; {identity.detail}" if identity.detail else ""
-    return f"unknown [dim](profile {esc(identity.profile)}{esc(reason)})[/dim]"
+    return f"unknown [dim]({esc(where)}{esc(reason)})[/dim]"
 
 
 def _show_upload_target(engine: AlchemyEngine) -> AccountIdentity:
@@ -151,6 +152,18 @@ def _confirm_first_upload(identity: AccountIdentity, yes: bool) -> None:
             hint="Choose another account with --profile, or run `notebook-alchemy setup`.",
         )
     record_upload_consent(identity)
+
+
+def _same_account_as_confirmed(engine: AlchemyEngine, confirmed: AccountIdentity) -> None:
+    """Read the account again before uploading: the profile may have been re-signed during the build."""
+    now = engine.client.upload_account()
+    if (now.email or "").casefold() != (confirmed.email or "").casefold():
+        raise SessionError(
+            f"The upload account changed during the build: it was {confirmed.display}, "
+            f"now it is {now.display}. Nothing was uploaded.",
+            hint="The files are built; check the account with `notebook-alchemy status`, then run "
+            "`notebook-alchemy sync` to upload them.",
+        )
 
 
 def _target(source: str | None, notebook: str | None, mock: bool) -> str:
@@ -299,7 +312,8 @@ def run_pipeline(
                 hint="Run `notebook-alchemy login`, or add --no-sync to build files without uploading.",
             )
         ui.success(f"NotebookLM session is active ({session.notebooks} notebook(s)).")
-        _confirm_first_upload(_show_upload_target(engine), yes)
+        confirmed = _show_upload_target(engine)
+        _confirm_first_upload(confirmed, yes)
 
     total_steps = 3 if do_sync else 2
     live = engine.config.has_gemini_key and not offline
@@ -385,6 +399,7 @@ def run_pipeline(
         ui.step(3, total_steps, f"Upload to NotebookLM: {final_name}")
         if result.vault_directory is None:
             raise AlchemyError("Nothing was written, so there is nothing to upload.")
+        _same_account_as_confirmed(engine, confirmed)
         with ui.Reporter() as reporter:
             synced = engine.sync_to_notebooklm(final_name, result.vault_directory, progress=reporter)
         action = "Created" if synced.created else "Updated"
@@ -559,12 +574,14 @@ def _sign_in(
                     "or pick a listed one."
                 ),
             )
-    cmd = ["notebooklm", "--profile", client.profile, "login"]
+    cmd = client.login_command()
     if browser_cookies:
         cmd += ["--browser-cookies", browser_cookies]
         if account:
             cmd += ["--account", account]
-        ui.info(f"Importing your {esc(browser_cookies)} sign-in into profile '{esc(client.profile)}'...")
+        override = client.storage_override()
+        into = f"session file {override}" if override else f"profile '{client.profile}'"
+        ui.info(f"Importing your {esc(browser_cookies)} sign-in into {esc(into)}...")
     else:
         cmd += ["--browser", browser, "--browser-timeout", str(timeout)]
         if fresh:
@@ -607,7 +624,7 @@ def _sign_in(
             f"Sign-in finished but the session check failed: {result.detail}",
             hint="Run `notebook-alchemy login` again.",
         )
-    ui.success(f"Signed in to NotebookLM. Upload account: {esc(identity.display)}.")
+    ui.success(f"Signed in to NotebookLM. Upload account: {_account_text(identity)}.")
     return identity
 
 
@@ -636,7 +653,10 @@ def _sign_in(
 )
 @click.option(
     "--account",
-    help="Google account email to sign in, when the browser holds several. Needs --browser-cookies.",
+    help=(
+        "Google account email. With --browser-cookies it picks that account; with a sign-in window "
+        "it is checked after you sign in."
+    ),
 )
 @click.option("--fresh", is_flag=True, help="Start the sign-in window with a clean browser session.")
 @click.option("--check", is_flag=True, help="Verify the stored session without signing in.")
@@ -669,11 +689,6 @@ def login(
         ui.success(f"Session is active ({result.notebooks} notebook(s) visible).")
         ui.info(f"  Upload account: {_account_text(identity)}")
         return
-    if account and not browser_cookies:
-        raise click.UsageError(
-            "--account needs --browser-cookies (for example: --browser-cookies edge --account "
-            "you@example.com). A sign-in window does not record the account."
-        )
     _sign_in(
         client,
         browser=browser,
@@ -829,6 +844,10 @@ def sync_to_notebooklm(notebook: str | None, source_dir: Path | None, yes: bool,
     engine = _engine(profile)
     directory = _source_dir(engine, notebook, source_dir)
     name = notebook or directory.parent.name
+    with ui.console.status("Checking your NotebookLM session..."):
+        session = engine.client.check_session()
+    if not session.ok:
+        raise SessionError(session.detail, hint="Run `notebook-alchemy login`, then sync again.")
     _confirm_first_upload(_show_upload_target(engine), yes)
     ui.info(f"Uploading {esc(_short(directory))} to notebook [bold]{esc(name)}[/bold]")
     with ui.Reporter() as reporter:

@@ -4,10 +4,17 @@ Completed material decisions, newest first. Current work is in GitHub issues.
 
 ## Upload account and setup (#39)
 
+- **Review fixes (2026-11-07).** `run` reads the account again just before uploading and stops if it
+  changed during the build. `ALCHEMY_SESSION_FILE` overrides any notebooklm profile, so an explicit
+  profile with it set is refused, the account is labelled with the session file, and `login` writes that
+  file. "No session" is read from `checks.storage_exists`, which notebooklm-py 0.8.6 always reports.
+  `sync` checks the session before asking. `.env` reading tolerates a UTF-8 byte-order mark.
+
 - **The upload account is read from the profile's own record, and shown as `unknown` otherwise.**
   `notebooklm --profile <p> auth check --json` reports the account email notebooklm-py 0.8.6 stored on the
-  profile, without a network call. A sign-in window does not record one; `login --browser-cookies <b>
-  --account <email>` does, and the login reads it back and fails if it differs. Why: the Owner's uploads
+  profile, without a network call. A sign-in window records it when the account is unambiguous, and
+  `login --browser-cookies <b> --account <email>` picks one; with `--account`, either way, the login
+  reads it back and fails if it differs. Why: the Owner's uploads
   went to a business account while the Gemini key belonged to a personal one, and nothing said so.
   `notebooklm profile list` reads the same record; `status` (session context) and `auth inspect` (browser
   accounts) do not identify the profile's account, so they are not used for it.
