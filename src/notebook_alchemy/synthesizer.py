@@ -13,6 +13,7 @@ from typing import Any
 
 from . import __version__
 from .channel import TranscriptManager, TranscriptResult
+from .client import normalize_title
 from .config import DEFAULT_GEMINI_MODEL, is_usable_api_key
 from .errors import GeminiError
 from .gemini import GeminiClient
@@ -73,17 +74,23 @@ def safe_filename(text: str) -> str:
 def unique_slugs(domains: list[str]) -> dict[str, str]:
     """One distinct slug per domain; later collisions get a short stable hash suffix.
 
-    Collisions are compared without case, for case-insensitive file systems. A slug of the
-    `_Vol_<n>` form of a volume file also gets the suffix, so no domain can take another's file.
+    Slugs are compared the way the sync compares NotebookLM titles (`normalize_title`: no case, no
+    underscores), so no domain can collide with another domain or with the vault's own files on a
+    case-insensitive file system or in the notebook; a domain named INDEX would otherwise be taken
+    for an old copy of _INDEX and replaced. A slug of the `_Vol_<n>` form of a volume file also gets
+    the suffix, so no domain can take another's file.
     """
     slugs: dict[str, str] = {}
-    taken: set[str] = set()
+    taken: set[str] = {
+        normalize_title(n)
+        for n in (INDEX_FILENAME, CATALOG_FILENAME, LEGACY_INDEX_FILENAME, LEGACY_CATALOG_FILENAME)
+    }
     for domain in domains:
         base = safe_filename(domain)
         slug = base
-        if slug.lower() in taken or _VOLUME_FORM.search(slug):
+        if normalize_title(slug) in taken or _VOLUME_FORM.search(slug):
             slug = f"{base[:72]}_{hashlib.sha256(domain.encode('utf-8')).hexdigest()[:6]}"
-        taken.add(slug.lower())
+        taken.add(normalize_title(slug))
         slugs[domain] = slug
     return slugs
 
