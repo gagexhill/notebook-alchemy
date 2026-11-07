@@ -336,3 +336,15 @@ def test_an_explicit_profile_with_a_session_file_is_refused(tmp_path: Path) -> N
     with pytest.raises(ConfigError, match="ALCHEMY_SESSION_FILE"):
         client.list_notebooks()
     assert process.calls == []  # refused before anything ran
+
+
+def test_cli_version_comes_from_package_metadata_without_a_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = FakeProcess()
+    client = _client(tmp_path, process)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    assert client.cli_version() is None
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/notebooklm")
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "0.8.6")
+    assert client.cli_version() == "notebooklm-py 0.8.6" and process.calls == []
