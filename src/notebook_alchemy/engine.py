@@ -6,6 +6,8 @@ import json
 import logging
 import re
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -77,6 +79,34 @@ def _dir_size(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
+# `notebooklm` processes run at once during a sync. Each takes seconds to start; notebooklm's own
+# help suggests waiting on sources in parallel. Kept small to stay clear of rate limits.
+SYNC_WORKERS = 3
+
+
+class _Counter:
+    """Thread-safe progress steps for work that finishes in any order."""
+
+    def __init__(self, progress: ProgressFn | None, label: str, total: int) -> None:
+        self._progress, self._label, self._total = progress, label, total
+        self._done = 0
+        self._lock = threading.Lock()
+
+    def tick(self) -> None:
+        with self._lock:
+            self._done += 1
+            if self._progress:
+                self._progress(self._label, self._done, self._total)
+
+
+def _home_relative(path: Path) -> str:
+    """A path with the home folder shown as ~, so pasted output does not carry the user name."""
+    try:
+        return str(Path("~") / path.relative_to(Path.home()))
+    except ValueError:
+        return str(path)
+
+
 class AlchemyEngine:
     """Discovery, clustering, synthesis and vault output."""
 
@@ -120,11 +150,12 @@ class AlchemyEngine:
             "environment": self.config.env,
             "notebooklm_cli": self.client.cli_version() or "not found (pip install notebooklm-py)",
             "notebooklm_profile": self.client.profile,
-            "session_file": str(session) if session else "none (run: notebook-alchemy login)",
+            "session_file": _home_relative(session) if session else "none (run: notebook-alchemy login)",
             "gemini_api_key": "set" if self.config.has_gemini_key else "unset",
             "gemini_model": self.config.gemini_model,
-            "vault_path": str(self.config.vault_path),
-            "cache_dir": f"{self.config.cache_dir} ({_dir_size(self.config.cache_dir) / 1024:.0f} KB)",
+            "vault_path": _home_relative(self.config.vault_path),
+            "cache_dir": f"{_home_relative(self.config.cache_dir)} "
+            f"({_dir_size(self.config.cache_dir) / 1024:.0f} KB)",
             "max_concurrency": self.config.max_concurrency,
         }
 
@@ -318,33 +349,53 @@ class AlchemyEngine:
         before = [] if created else [s for s in self.client.list_sources(nb_id) if s.get("id")]
 
         failed: list[str] = []
-        new_ids: dict[str, str] = {}  # wanted title -> id of the source we just added
-        total_steps = len(files) * 2
-        for done, md_file in enumerate(files, 1):
+        steps = _Counter(progress, "Uploading to NotebookLM", len(files) * 2)
+
+        # Each `notebooklm` call is its own process and takes seconds, so uploads and waits run a
+        # few at a time. Results are gathered in file order, so the outcome does not depend on
+        # which call finishes first; titles are corrected only after every wait has finished.
+        def add(md_file: Path) -> tuple[str, str | None, str | None]:
             title = source_title(md_file.stem)
-            doc = SourceDocument(
-                source_id=md_file.stem,
-                title=title,
-                content=md_file.read_text(encoding="utf-8"),
-            )
+            content = md_file.read_text(encoding="utf-8")
             try:
-                new_ids[title] = self.client.add_source_document(nb_id, doc)
+                source_id = self.client.add_source_document(
+                    nb_id, SourceDocument(md_file.stem, title, content)
+                )
+                return title, source_id, None
             except AlchemyError as exc:
-                failed.append(f"{md_file.name}: {exc.message}")
-            if progress:
-                progress("Uploading to NotebookLM", done, total_steps)
+                return title, None, f"{md_file.name}: {exc.message}"
+            finally:
+                steps.tick()
+
+        with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
+            added_results = list(pool.map(add, files))
+        new_ids: dict[str, str] = {}  # wanted title -> id of the source we just added
+        for title, source_id, error in added_results:
+            if source_id:
+                new_ids[title] = source_id
+            if error:
+                failed.append(error)
 
         # NotebookLM can reset a title to the file name once processing ends, so wait for every
         # source, then read the titles back and correct any that changed.
-        titles_by_id: dict[str, str] = {}
-        for done, (title, source_id) in enumerate(list(new_ids.items()), 1):
+        def wait(item: tuple[str, str]) -> str | None:
+            title, source_id = item
             try:
                 self.client.wait_for_source(nb_id, source_id)
+                return None
             except AlchemyError as exc:
-                failed.append(f"{title}: processing did not finish: {exc.message}")
+                return f"{title}: processing did not finish: {exc.message}"
+            finally:
+                steps.tick()
+
+        pending = list(new_ids.items())
+        with ThreadPoolExecutor(max_workers=SYNC_WORKERS) as pool:
+            waited = list(pool.map(wait, pending))
+        for (title, _source_id), error in zip(pending, waited, strict=True):
+            if error:
+                failed.append(error)
                 new_ids.pop(title)
-            if progress:
-                progress("Uploading to NotebookLM", len(files) + done, total_steps)
+        titles_by_id: dict[str, str] = {}
         if new_ids:
             titles_by_id = {str(s["id"]): str(s.get("title", "")) for s in self.client.list_sources(nb_id)}
             for title, source_id in list(new_ids.items()):

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -223,6 +225,31 @@ def test_sync_creates_the_notebook_and_uploads_every_file(tmp_path: Path) -> Non
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]
 
 
+def test_uploads_and_waits_overlap_but_titles_are_fixed_only_after_all_waits(tmp_path: Path) -> None:
+    fake = FakeNotebookLM(reset_titles=True)
+    active, peak, order = [0], [0], []
+    lock = threading.Lock()
+
+    def slow(cmd: list[str], **kw: object):
+        verb = cmd[cmd.index("source") + 1] if "source" in cmd else cmd[3]
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+            order.append(verb)
+        time.sleep(0.05 if verb in ("add", "wait") else 0)
+        with lock:
+            active[0] -= 1
+        return fake(cmd, **kw)
+
+    names = tuple(f"Topic_{i}" for i in range(6))
+    result = _fake_engine(tmp_path, slow).sync_to_notebooklm("Chan", _real_dir(tmp_path, names))  # type: ignore[arg-type]
+    assert result.uploaded == 6 and fake.titles("Chan") == sorted(n.replace("_", " ") for n in names)
+    assert peak[0] > 1  # several notebooklm processes ran at once
+    assert max(i for i, v in enumerate(order) if v == "wait") < min(
+        i for i, v in enumerate(order) if v == "rename"
+    )
+
+
 def test_resync_replaces_old_copies_including_filename_titled_ones(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     fake.seed("Chan", ["Alpha Topics", "Alpha Topics", "Beta_Topics.md", "My own notes"])
@@ -397,3 +424,11 @@ def test_a_failed_sync_does_not_overwrite_the_record(tmp_path: Path) -> None:
     engine.client = NotebookLMClient(engine.config, runner=fake)
     engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Gamma_Topics",)))
     assert fake.titles("Chan") == ["Gamma Topics"]  # Alpha was still recorded, so it is pruned now
+
+
+def test_status_shows_home_paths_as_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(NotebookLMClient, "cli_version", lambda self: None)
+    config = AlchemyConfig(vault_path=Path.home() / "my-vault", cache_dir=Path.home() / "c")
+    facts = AlchemyEngine(config).status()
+    assert facts["vault_path"] == str(Path("~") / "my-vault")
+    assert str(Path.home()) not in json.dumps(facts)

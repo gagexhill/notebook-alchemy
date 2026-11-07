@@ -11,6 +11,7 @@ import os
 import pathlib
 import socket
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -98,6 +99,7 @@ class FakeNotebookLM:
         self.fail = fail or {}
         self.calls: list[list[str]] = []
         self._n = 0
+        self._lock = threading.Lock()  # the sync uploads from several threads
 
     def seed(self, notebook_title: str, source_titles: list[str]) -> str:
         nb_id = self._new_id("nb")
@@ -116,6 +118,10 @@ class FakeNotebookLM:
         return f"{prefix}-{self._n}"
 
     def __call__(self, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        with self._lock:
+            return self._handle(cmd)
+
+    def _handle(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(cmd))
         args = [a for a in cmd[1:] if a != "--json"]
         if "--storage" in args:

@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib.metadata
 import json
 import logging
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -190,19 +192,16 @@ class NotebookLMClient:
         return bool(os.getenv("NOTEBOOKLM_AUTH_JSON")) or self.session_file() is not None
 
     def cli_version(self) -> str | None:
-        """Version text from `notebooklm --version`, or None when the CLI cannot run."""
-        try:
-            res = (self._runner or subprocess.run)(
-                [NOTEBOOKLM_BIN, "--version"],
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=15.0,
-            )
-        except (OSError, subprocess.TimeoutExpired):
+        """The installed notebooklm-py version, or None when the `notebooklm` command is missing.
+
+        Read from package metadata: starting `notebooklm --version` takes seconds.
+        """
+        if shutil.which(NOTEBOOKLM_BIN) is None:
             return None
-        return (res.stdout or "").strip() or None if res.returncode == 0 else None
+        try:
+            return f"notebooklm-py {importlib.metadata.version('notebooklm-py')}"
+        except importlib.metadata.PackageNotFoundError:
+            return "installed (version unknown)"
 
     def check_session(self) -> SessionStatus:
         """Ask NotebookLM whether the stored session works (one read-only list call)."""
