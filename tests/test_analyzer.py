@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -69,10 +70,10 @@ def test_mock_requires_the_flag() -> None:
 
 
 def test_unknown_notebook_is_an_error(tmp_path) -> None:
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "storage_state.json").write_text("{}", encoding="utf-8")
-    config = AlchemyConfig(state_dir=state, gemini_api_key="")
+    state = Path.home() / ".notebooklm" / "profiles" / "default" / "storage_state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text("{}", encoding="utf-8")
+    config = AlchemyConfig(state_dir=tmp_path / "state", gemini_api_key="")
     client = NotebookLMClient(
         config, runner=lambda cmd, **kw: __import__("subprocess").CompletedProcess(cmd, 0, "[]", "")
     )

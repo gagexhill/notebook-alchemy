@@ -47,7 +47,7 @@ def _load_dotenv_simple(env_path: Path | None = None) -> None:
     if not path.is_file():
         return
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8-sig").splitlines()  # -sig: tolerate a BOM
     except (OSError, UnicodeDecodeError) as exc:
         logger.warning("Could not read %s (%s); using process environment only.", path, exc)
         return
@@ -97,7 +97,7 @@ def update_dotenv(values: dict[str, str], env_path: Path | None = None) -> Path:
                 hint="Enter the value without those characters.",
             )
     try:
-        lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+        lines = path.read_text(encoding="utf-8-sig").splitlines() if path.is_file() else []
     except (OSError, UnicodeDecodeError) as exc:
         raise ConfigError(
             f"Could not read {path}: {exc}", hint="Fix or remove the file, then run setup again."
