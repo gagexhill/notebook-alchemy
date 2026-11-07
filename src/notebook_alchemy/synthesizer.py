@@ -34,6 +34,12 @@ _WINDOWS_RESERVED = {
     *(f"com{i}" for i in range(1, 10)),
     *(f"lpt{i}" for i in range(1, 10)),
 }
+# Files the vault writes beside the compendiums; a domain may not take these names.
+INDEX_FILENAME = "INDEX.md"
+CATALOG_FILENAME = "MASTER_SOURCES_CATALOG.md"
+_RESERVED_STEMS = {INDEX_FILENAME[:-3].lower(), CATALOG_FILENAME[:-3].lower()}
+# Volume 2+ files end in _Vol_<n>; a domain slug of that form could take another domain's file.
+_VOLUME_FORM = re.compile(r"_vol_\d+$", re.IGNORECASE)
 
 SYSTEM_PROMPT = (
     "You are a Principal Knowledge Architect. Synthesize raw video transcripts into a dense, "
@@ -61,13 +67,18 @@ def safe_filename(text: str) -> str:
 
 
 def unique_slugs(domains: list[str]) -> dict[str, str]:
-    """One distinct slug per domain; later collisions get a short stable hash suffix."""
+    """One distinct slug per domain; later collisions get a short stable hash suffix.
+
+    A slug that would match the vault's own files (INDEX, MASTER_SOURCES_CATALOG, compared without
+    case for case-insensitive file systems) or the `_Vol_<n>` form of a volume file also gets the
+    suffix, so no domain can overwrite another file.
+    """
     slugs: dict[str, str] = {}
-    taken: set[str] = set()
+    taken: set[str] = set(_RESERVED_STEMS)
     for domain in domains:
         base = safe_filename(domain)
         slug = base
-        if slug.lower() in taken:
+        if slug.lower() in taken or _VOLUME_FORM.search(slug):
             slug = f"{base[:72]}_{hashlib.sha256(domain.encode('utf-8')).hexdigest()[:6]}"
         taken.add(slug.lower())
         slugs[domain] = slug

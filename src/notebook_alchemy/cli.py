@@ -24,6 +24,7 @@ from .client import NotebookLMClient
 from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig
 from .engine import AlchemyEngine
 from .errors import AlchemyError, NotebookLMError, SessionError, VaultError
+from .synthesizer import CATALOG_FILENAME, INDEX_FILENAME
 from .ui import esc, handle_errors
 
 _LOG_LEVELS = {
@@ -620,7 +621,7 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: 
                 skipped.append(f.name)
     if do_vaults:
         for d in engine.vault.existing_compendium_dirs():
-            if (d / "INDEX.md").is_file() or (d / "MASTER_SOURCES_CATALOG.md").is_file():
+            if (d / INDEX_FILENAME).is_file() or (d / CATALOG_FILENAME).is_file():
                 targets.append(("vault", d))
             else:
                 skipped.append(str(d))
@@ -716,7 +717,7 @@ def run_automated_test() -> None:
             files = [
                 f
                 for f in built.vault_directory.glob("*.md")
-                if f.name not in ("INDEX.md", "MASTER_SOURCES_CATALOG.md")
+                if f.name not in (INDEX_FILENAME, CATALOG_FILENAME)
             ]
             valid = sum(
                 1
@@ -725,7 +726,7 @@ def run_automated_test() -> None:
                 and "domain:" in t
                 and "## 2. Video Index" in t
             )
-            catalog = (built.vault_directory / "MASTER_SOURCES_CATALOG.md").read_text(encoding="utf-8")
+            catalog = (built.vault_directory / CATALOG_FILENAME).read_text(encoding="utf-8")
             rows = sum(1 for line in catalog.splitlines() if line.startswith("| ") and "`" in line)
             ok = (
                 bool(files)
