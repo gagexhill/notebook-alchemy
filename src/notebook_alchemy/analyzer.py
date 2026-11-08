@@ -30,6 +30,7 @@ MAX_DOMAIN_SAMPLE = 300
 ASSIGN_BATCH_SIZE = 150
 MIN_DOMAINS, MAX_DOMAINS = 3, 15
 MISC_DOMAIN = "Miscellaneous"
+NO_KEY_NOTE = "No Gemini API key set; used keyword matching."
 
 
 def estimate_video_tokens(duration_seconds: int) -> int:
@@ -486,7 +487,7 @@ class NotebookAnalyzer:
                 reason = exc.message if isinstance(exc, GeminiError) else f"unusable answer ({exc})"
                 self.notes.append(f"Gemini clustering unavailable: {reason} Used keyword matching.")
         elif not self.force_offline:
-            self.notes.append("No Gemini API key set; used keyword matching.")
+            self.notes.append(NO_KEY_NOTE)
         return self._cluster_with_keywords(titles)
 
     @staticmethod
@@ -551,7 +552,7 @@ class NotebookAnalyzer:
                 if start <= t_idx < start + len(batch) and 0 <= d_idx < len(domains):
                     assigned[t_idx] = d_idx
             if progress:
-                progress("Assigning titles to domains", done, len(batches))
+                progress("Sorting videos into topics", done, len(batches))
 
         clusters: dict[str, list[int]] = {name: [] for name in domains}
         misc: list[int] = []
@@ -630,7 +631,7 @@ class NotebookAnalyzer:
                 names.append(name)
         if len(names) < 2:
             raise ValueError(f"only {len(names)} usable subtopics")
-        assigned = self._assign_by_number(titles, names, f"Splitting {domain}", progress)
+        assigned = self._assign_by_number(titles, names, f"Dividing {domain}", progress)
         groups: dict[str, list[int]] = {name: [] for name in names}
         other: list[int] = []
         for i in range(len(titles)):
@@ -658,8 +659,7 @@ class NotebookAnalyzer:
             result = self._gemini_client().generate(
                 prompt, json_mode=True, max_output_tokens=16384, temperature=0.0, timeout=60.0
             )
-            if label.startswith("Splitting"):
-                self.split_requests += 1
+            self.split_requests += 1  # only subtopic splitting assigns by number
             mapping = json.loads(result.text).get("assignments")
             if not isinstance(mapping, dict):
                 raise TypeError("no 'assignments' object")
