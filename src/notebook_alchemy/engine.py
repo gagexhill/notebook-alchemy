@@ -241,7 +241,7 @@ class AlchemyEngine:
             warnings.extend(compendium.warnings)
             compendiums.append(compendium)
             if progress:
-                progress("Building compendiums", done, len(volumes))
+                progress("Writing documents", done, len(volumes))
 
         warnings.extend(self._transcript_summary(compendiums))
 
@@ -269,13 +269,13 @@ class AlchemyEngine:
         blocked = self.transcripts.blocked_total
         if blocked:
             lines.append(
-                f"YouTube blocked caption requests for {blocked} videos in this run. Run the same command "
-                "later: captions already fetched are cached, so it continues where it stopped."
+                f"YouTube didn't share captions for {blocked} videos this time. Run the same command "
+                "later to fill them in; captions already downloaded are kept."
             )
         if title_only:
             lines.append(
-                f"{len(title_only)} of {len(compendiums)} volumes had no transcripts, so they are offline "
-                "indexes (titles and links, no summary) and used no Gemini request."
+                f"{len(title_only)} of {len(compendiums)} documents list titles and links only, because "
+                "their videos had no captions."
             )
         return lines
 
@@ -294,8 +294,9 @@ class AlchemyEngine:
             seen.add(name.lower())
         if clashes:
             raise VaultError(
-                f"Two vault files would share a name: {', '.join(sorted(clashes))}.",
-                hint="Rename the colliding domain and run again; nothing was written.",
+                f"Two documents would share a file name: {', '.join(sorted(clashes))}.",
+                hint="Nothing was written. Report it with these names at "
+                "github.com/gagexhill/notebook-alchemy/issues.",
             )
         stage = self.vault.stage_dir(final)
         try:
@@ -328,7 +329,7 @@ class AlchemyEngine:
             self.vault.replace_dir(stage, final)
         except OSError as exc:
             shutil.rmtree(stage, ignore_errors=True)  # best-effort: the real error is raised below
-            raise VaultError(f"Could not write the vault: {exc}") from exc
+            raise VaultError(f"Could not write the documents folder: {exc}") from exc
         except BaseException:
             shutil.rmtree(stage, ignore_errors=True)  # best-effort cleanup before re-raising
             raise
@@ -379,14 +380,14 @@ class AlchemyEngine:
         files = sorted(source_dir.glob("*.md")) if source_dir.is_dir() else []
         if not files:
             raise VaultError(
-                f"No compendiums found in {source_dir}.",
+                f"No documents found in {source_dir}.",
                 hint="Run `notebook-alchemy run <source>` first, or pass --source-dir.",
             )
         for f in files:
             if "sample_data: true" in f.read_text(encoding="utf-8")[:800]:
                 raise AlchemyError(
-                    f"{source_dir} holds mock sample data; it will not be uploaded.",
-                    hint="Run `notebook-alchemy run <real source>` to build real compendiums.",
+                    f"{source_dir} holds sample data, which is never uploaded.",
+                    hint="Run `notebook-alchemy run <youtube-url>` to write documents from a real channel.",
                 )
 
         limits = self.client.plan_limits()
@@ -404,10 +405,10 @@ class AlchemyEngine:
         if limit is not None and final_count > limit:
             plan = limits.plan if limits else "unknown plan"
             raise SyncError(
-                f"'{notebook_title}' would hold {final_count} sources, and this account's NotebookLM plan "
-                f"({plan}) allows {limit} per notebook. Nothing was uploaded.",
+                f"'{notebook_title}' would hold {final_count} sources, but a NotebookLM {plan} notebook "
+                f"holds up to {limit}. Nothing was uploaded.",
                 failed=[],
-                hint="Raise --max-per-vol for fewer, larger compendiums, sync to a new notebook name with "
+                hint="Raise --max-per-vol for fewer, larger documents, sync to a new notebook name with "
                 "-n, or remove sources you no longer need from the notebook.",
             )
         freed_first = limit is not None and len(before) + len(files) > limit

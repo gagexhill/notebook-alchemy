@@ -1,4 +1,9 @@
-"""Terminal presentation: consistent steps, progress, errors, and safe text output."""
+"""Terminal presentation: consistent steps, progress, errors, and safe text output.
+
+The default output says what happened in everyday words; paths, token counts, models and other
+detail print only with -v, the way gcloud keeps them behind --verbosity=info. Warnings and errors
+go to stderr with a "Warning:" or "Error:" prefix, and a next step is written as a command to run.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,6 @@ from typing import Any, TypeVar
 import click
 from rich.console import Console
 from rich.markup import escape
-from rich.panel import Panel
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -36,6 +40,7 @@ EXIT_UNEXPECTED = 70
 class UiState:
     quiet = False
     debug = False
+    verbose = 0
 
 
 def esc(value: object) -> str:
@@ -43,9 +48,14 @@ def esc(value: object) -> str:
     return escape(str(value))
 
 
-def configure(*, quiet: bool = False, no_color: bool = False, debug: bool = False) -> None:
+def name(value: object) -> str:
+    """A resource name in square brackets, as gcloud prints them: `[Kizzy Parks]`. Markup-safe."""
+    return esc(f"[{value}]")
+
+
+def configure(*, quiet: bool = False, no_color: bool = False, debug: bool = False, verbose: int = 0) -> None:
     global console, err_console
-    UiState.quiet, UiState.debug = quiet, debug
+    UiState.quiet, UiState.debug, UiState.verbose = quiet, debug, verbose
     if no_color:
         console = Console(highlight=False, no_color=True)
         err_console = Console(stderr=True, highlight=False, no_color=True)
@@ -56,34 +66,44 @@ def info(message: str) -> None:
         console.print(message)
 
 
+def detail(message: str) -> None:
+    """Shown only with -v: paths, counts, models and other things most people never need."""
+    if UiState.verbose and not UiState.quiet:
+        console.print(f"[dim]{message}[/dim]")
+
+
 def step(number: int, total: int, label: str) -> None:
-    """A numbered step heading, e.g. `[2/4] Building compendiums`."""
+    """A numbered step heading, e.g. `Step 2 of 3: Writing documents`."""
     if not UiState.quiet:
-        console.print(f"\n[bold cyan][{number}/{total}][/bold cyan] [bold]{esc(label)}[/bold]")
+        console.print(f"\n[bold]Step {number} of {total}:[/bold] {esc(label)}")
 
 
 def success(message: str) -> None:
-    info(f"[green]✓[/green] {message}")
+    """A result. Printed even with -q, which keeps errors and final results."""
+    console.print(f"[green]✓[/green] {message}")
 
 
-def warn(message: str) -> None:
-    info(f"[yellow]![/yellow] {message}")
+def warn(message: str, *, always: bool = False) -> None:
+    """A warning on stderr; `always` for ones -q must not hide (sample data, a missing account)."""
+    if always or not UiState.quiet:
+        err_console.print(f"[yellow]Warning:[/yellow] {message}")
 
 
-def banner(title: str, body: str, *, style: str = "yellow") -> None:
-    console.print(Panel(body, title=title, border_style=style, padding=(0, 2)))
+def next_command(purpose: str, command: str) -> None:
+    """A next step written as a command to run, the way gcloud phrases them."""
+    info(f"\nTo {purpose}, run:\n  [bold]$ {esc(command)}[/bold]")
 
 
 def print_error(exc: AlchemyError) -> None:
     """What failed, why, and the next action."""
-    lines = [f"[bold red]{esc(exc.message)}[/bold red]"]
+    lines = [f"[bold red]Error:[/bold red] {esc(exc.message)}"]
     if isinstance(exc, SyncError):
-        lines += [f"  [red]-[/red] {esc(item)}" for item in exc.failed[:10]]
+        lines += [f"  - {esc(item)}" for item in exc.failed[:10]]
         if len(exc.failed) > 10:
             lines.append(f"  ... and {len(exc.failed) - 10} more")
     if exc.hint:
-        lines.append(f"\n[bold]Next:[/bold] {esc(exc.hint)}")
-    err_console.print(Panel("\n".join(lines), title="Error", border_style="red", padding=(0, 2)))
+        lines.append(f"[bold]Next:[/bold] {esc(exc.hint)}")
+    err_console.print("\n".join(lines))
 
 
 def handle_errors(func: F) -> F:
@@ -100,8 +120,8 @@ def handle_errors(func: F) -> F:
             sys.exit(exc.exit_code)
         except KeyboardInterrupt:
             err_console.print(
-                "\n[yellow]Interrupted. Local files were not left half-written; an upload may have "
-                "added some sources, and the next sync replaces them.[/yellow]"
+                "\n[yellow]Stopped.[/yellow] Files on disk are complete. If an upload was running, run "
+                "the same command again to finish it."
             )
             sys.exit(EXIT_INTERRUPTED)
         except (
@@ -116,14 +136,9 @@ def handle_errors(func: F) -> F:
             if UiState.debug:
                 err_console.print(esc(traceback.format_exc()))
             err_console.print(
-                Panel(
-                    f"[bold red]Unexpected error: {esc(type(exc).__name__)}: {esc(exc)}[/bold red]\n\n"
-                    "[bold]Next:[/bold] Re-run with [bold]--debug[/bold] for the traceback, and "
-                    "include it in a bug report.",
-                    title="Error",
-                    border_style="red",
-                    padding=(0, 2),
-                )
+                f"[bold red]Error:[/bold red] Something unexpected went wrong ({esc(type(exc).__name__)}: "
+                f"{esc(exc)}).\n[bold]Next:[/bold] Run the command again with --debug and include its "
+                "output in a bug report."
             )
             sys.exit(EXIT_UNEXPECTED)
 
@@ -164,9 +179,9 @@ class Reporter:
                 self._tasks[stage] = self._progress.add_task(esc(stage), total=max(total, 1))
             self._progress.update(self._tasks[stage], completed=done, total=max(total, 1))
             return
-        if done >= total and stage not in self._seen:
+        if done >= total and stage not in self._seen:  # not a terminal: one line per finished stage
             self._seen.add(stage)
-            console.print(f"  {esc(stage)}: {done}/{total}")
+            detail(f"  {esc(stage)}: {done}/{total}")
 
 
 def human_bytes(n: int) -> str:
