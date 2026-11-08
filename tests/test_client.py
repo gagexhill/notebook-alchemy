@@ -12,6 +12,7 @@ import pytest
 from notebook_alchemy.client import (
     AccountIdentity,
     NotebookLMClient,
+    PlanLimits,
     SourceDocument,
     consent_file,
     normalize_title,
@@ -363,3 +364,12 @@ def test_a_hand_edited_consent_record_asks_again_instead_of_crashing() -> None:
     consent_file().parent.mkdir(parents=True, exist_ok=True)
     consent_file().write_text(json.dumps({"salt": "s", "profiles": {"work": "\u00e9"}}), encoding="utf-8")
     assert not upload_confirmed(AccountIdentity("work", "a@example.test"))
+
+
+def test_plan_limits_name_the_plan_and_are_never_guessed(tmp_path: Path) -> None:
+    pro = PlanLimits(300, 500, 2)
+    client = NotebookLMClient(AlchemyConfig(), limits_reader=lambda c: pro)
+    assert client.plan_limits() == pro and pro.plan == "Pro"
+    assert PlanLimits(50, 100, 1).plan == "Standard" and PlanLimits(None, None, 9).plan == "unknown plan"
+    assert _client(tmp_path, FakeProcess()).plan_limits() is None  # a test runner never reads live
+    assert NotebookLMClient(AlchemyConfig()).plan_limits() is None  # no session: unknown, not a guess

@@ -24,6 +24,12 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   `QuotaFailure` / `RetryInfo` details; every `CouldNotRetrieveTranscript` reason (including ones a
   later library adds) is classified; `PoTokenRequired` counts as blocked and stops the run's remaining
   caption requests.
+- **The upload respects the account's own source limit.** notebooklm-py's `settings.get_account_limits()`
+  (the CLI has no command for it) reports the plan's per-notebook source limit; live, a Pro account
+  reads 300. `run` stops before building when the planned sources exceed it; `sync` refuses before
+  uploading when the notebook would end over it, and frees the replaced copies first when only the
+  add-then-delete peak would be over. An unreadable limit is reported as unknown and the run proceeds.
+  (#43)
 - **Large domains become named subtopics, not numbered volumes.** A live upload showed eleven
   "Government Contracting Fundamentals Vol N" sources that told a reader nothing. A domain larger than
   `--max-per-vol` is now split into subtopics named from its own titles (Gemini: discovered, then every

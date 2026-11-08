@@ -142,6 +142,7 @@ src/notebook_alchemy/
 - **Replace, not duplicate** — a re-run replaces same-titled sources and removes the ones it uploaded last time that are gone, so repeated runs do not pile up in the notebook. Sources you added yourself are never touched.
 - **Survives a busy model** — if the default Gemini model is overloaded, retired, or out of daily quota, the run moves to the fallback model and says so.
 - **Every title assigned** — clustering covers the whole channel, not a sample, and reports what it could not place.
+- **Knows your plan's limit** — `run` and `sync` read the upload account's NotebookLM plan (for example Pro: 300 sources per notebook) and stop before building or uploading what cannot fit; when the notebook is tight, the copies being replaced are removed before the new ones go in. A limit that cannot be read is shown as unknown, never guessed.
 - **Sources named by subject** — a large domain becomes named subtopics, and source titles keep the domain's own spelling ("SAM.gov", not "SAMgov").
 - **Honest offline mode** — without a key you get an index and a catalog, labelled as such. A volume whose videos have no reachable captions (YouTube sometimes blocks caption requests for a while) is written as an index too, not a summary invented from titles, and uses no Gemini request.
 - **Safe writes** — output is namespaced per source, built in staging, and swapped in whole, so a failed run leaves the previous build intact.

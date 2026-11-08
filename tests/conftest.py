@@ -60,6 +60,10 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(subprocess, "run", _no_process)
     monkeypatch.setattr(subprocess, "Popen", _no_process)
     monkeypatch.setattr(socket.socket, "connect", _no_network)
+    # The plan limit is a live NotebookLM read; it is unknown unless a test injects one.
+    monkeypatch.setattr(
+        "notebook_alchemy.client.NotebookLMClient._read_plan_limits_live", lambda self: None, raising=True
+    )
     # .env loading writes to os.environ directly; put the environment back so nothing leaks onward.
     snapshot = dict(os.environ)
     yield SimpleNamespace(home=home, work=work)
