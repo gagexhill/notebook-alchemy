@@ -770,7 +770,10 @@ def _sign_in(
         cmd += ["--browser", browser, "--browser-timeout", str(timeout)]
         if fresh:
             cmd.append("--fresh")
-        ui.info("A browser window will open. Sign in with the Google account you want to upload to.")
+        ui.info(
+            "Signing in. If Google needs you to sign in again, a browser window opens: use the Google "
+            "account you want to upload to."
+        )
         waiting = "Waiting for you to finish signing in..."
     proc = _run_login(cmd, waiting)
     output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
@@ -1054,7 +1057,10 @@ def guided(ctx: click.Context) -> None:
     if signed_in:
         ui.success(f"Signed in as {_who(client.upload_account())}.")
     else:
-        ui.info("  A browser window opens. Sign in with the Google account your notebooks should go to.")
+        ui.info(
+            "  If Google needs you to sign in, a browser window opens: use the Google account your "
+            "notebooks should go to."
+        )
         if not _ask("Do you want to sign in now", default=True):
             raise AlchemyError(
                 "Nothing was done: the notebook is made in your NotebookLM account, so it needs a sign-in.",
@@ -1483,10 +1489,12 @@ def run_automated_test() -> None:
                 "none left in the books" if not boiler else "found in the books",
             )
             topics = [b for b in report.books if b.title != OVERVIEW_TITLE]
+            sections = sum(len(t.sections) for t in report.library.topics)
             record(
                 "Topic books are written",
-                len(topics) >= 2,
-                f"{len(topics)} topic books plus {OVERVIEW_TITLE}",
+                len(topics) >= 1 and sections >= 2,
+                f"{_plural(len(topics), 'topic book')} with {_plural(sections, 'section')}, "
+                f"plus {OVERVIEW_TITLE}",
             )
             clean = all(not b.content.startswith("---") for b in report.books)
             record("Books are plain Markdown", clean, "no YAML header" if clean else "YAML header found")
