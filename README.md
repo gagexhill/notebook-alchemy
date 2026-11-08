@@ -6,7 +6,7 @@
 
 <div align="center">
 
-<img src="docs/brand/icon.svg" width="96" height="96" alt="Notebook Alchemy icon: three nested blue arches with a gold alchemy bottle under the innermost one">
+<img src="docs/brand/icon.svg" width="96" height="96" alt="Notebook Alchemy icon: three nested blue arches with a gold alchemy bottle and a small plus under the innermost one">
 
 ![Notebook Alchemy](https://img.shields.io/badge/Notebook%20Alchemy-0.2.0-5B3FD0?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
