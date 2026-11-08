@@ -6,6 +6,8 @@
 
 <div align="center">
 
+<img src="docs/brand/icon.svg" width="96" height="96" alt="Notebook Alchemy icon: three nested blue arches with a gold alchemy bottle under the innermost one">
+
 ![Notebook Alchemy](https://img.shields.io/badge/Notebook%20Alchemy-0.2.0-5B3FD0?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Click](https://img.shields.io/badge/Click-8.1%2B-4EAA25?style=for-the-badge)
@@ -14,7 +16,7 @@
 ![Gemini](https://img.shields.io/badge/Gemini-3.8%20Flash-4285F4?style=for-the-badge&logo=googlegemini&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
-**Maintainer:** [gagexhill](https://github.com/gagexhill) — open source, MIT licensed
+**Maintainer:** [gagexhill](https://github.com/gagexhill) — open source, MIT licensed, unofficial and not affiliated with Google
 **Runtime:** A Python command-line tool on your machine; the Gemini API and Google NotebookLM only when you opt in
 **Status:** Alpha — [audit remediation #16](https://github.com/gagexhill/notebook-alchemy/issues/16) owns current progress
 
@@ -346,8 +348,9 @@ notebook-alchemy/
 ├── prompts/                # AI Studio blueprint that mirrors the synthesis request
 ├── .github/                # Issue and PR templates, Dependabot, validate workflow
 ├── .githooks/              # pre-push secret scan (gitleaks)
-├── scripts/                # Regenerate the README recordings and the social preview
+├── scripts/                # Regenerate the README recordings, the social preview and the icons
 ├── docs/images/            # README recordings and the social preview image
+├── docs/brand/             # icon.svg, the generated favicons and app icons, and the concept sheet
 ├── AGENTS.md               # Rules every change keeps (CLAUDE.md points here)
 ├── DEVLOG.md               # Past design decisions and why
 ├── OPERATIONS.md           # Maintainer runbook

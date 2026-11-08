@@ -1,0 +1,158 @@
+<title>Notebook Alchemy Icon Concepts</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a specimen sheet. One band per concept: notes on the left, the icon at every
+   delivery size on a light and a dark ground, then 512 px split across both grounds. */
+:root {
+  --bg: #f6f5fb;
+  --surface: #ffffff;
+  --ink: #1b1a24;
+  --mute: #5e5b70;
+  --line: #e2dff0;
+  --accent: #2F7FFF;
+  --gold: #FFB627;
+  --ground-light: #ffffff;
+  --ground-dark: #202124;
+  --label-light: #6b6880;
+  --label-dark: #a9a7b8;
+  --sans: "Instrument Sans", "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
+  --mono: "IBM Plex Mono", Consolas, "Cascadia Mono", ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121117; --surface: #1a1922; --ink: #ecebf3; --mute: #a3a0b5; --line: #2c2a38;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121117; --surface: #1a1922; --ink: #ecebf3; --mute: #a3a0b5; --line: #2c2a38;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 64px;
+}
+.wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 40px; }
+header { display: grid; gap: 14px; max-width: 70ch; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--mute); }
+h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.1; margin: 0; letter-spacing: -.015em; text-wrap: balance; }
+h2 { font-size: 22px; margin: 0; letter-spacing: -.01em; text-wrap: balance; }
+p { margin: 0; }
+.lede { color: var(--mute); font-size: 16px; }
+.swatches { display: flex; flex-wrap: wrap; gap: 10px; }
+.sw { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12px; color: var(--mute);
+  border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px 4px 4px; background: var(--surface); }
+.sw i { width: 20px; height: 20px; border-radius: 50%; display: block; }
+.tabbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 8px 0; background: #dfe1e5; border-radius: 10px 10px 0 0; max-width: 100%; }
+.tab { display: flex; align-items: center; gap: 8px; background: #ffffff; color: #202124; border-radius: 8px 8px 0 0;
+  padding: 7px 14px; font-size: 12.5px; min-width: 0; }
+.tab.idle { background: transparent; color: #5f6368; }
+.tab img { width: 16px; height: 16px; flex: none; }
+.tab span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.context { display: grid; gap: 8px; }
+.context .cap { font-size: 13px; color: var(--mute); }
+section.concept { display: grid; grid-template-columns: minmax(0, 280px) minmax(0, 1fr); gap: 24px 32px;
+  padding-block: 32px; border-top: 1px solid var(--line); }
+.notes { display: grid; gap: 10px; align-content: start; }
+.letter { font-family: var(--mono); font-size: 13px; color: var(--accent); font-weight: 500; }
+.notes p { color: var(--mute); font-size: 14.5px; }
+.notes dl { margin: 6px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13.5px; }
+.notes dt { font-family: var(--mono); font-size: 12px; color: var(--mute); padding-top: 2px; }
+.notes dd { margin: 0; }
+.specimens { display: grid; gap: 14px; min-width: 0; }
+.grounds { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.ground { border-radius: 14px; padding: 20px; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px 22px; }
+.ground.light { background: var(--ground-light); border: 1px solid var(--line); }
+.ground.dark { background: var(--ground-dark); border: 1px solid var(--ground-dark); }
+figure { margin: 0; display: grid; justify-items: center; gap: 6px; }
+figure img { display: block; }
+figcaption { font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; }
+.light figcaption { color: var(--label-light); }
+.dark figcaption { color: var(--label-dark); }
+.big { position: relative; width: 512px; max-width: 100%; aspect-ratio: 1; border-radius: 18px; overflow: hidden;
+  background: linear-gradient(90deg, var(--ground-light) 50%, var(--ground-dark) 50%); border: 1px solid var(--line); }
+.big img { position: absolute; inset: 0; width: 100%; height: 100%; }
+.big .tag { position: absolute; bottom: 10px; font-family: var(--mono); font-size: 11px; }
+.big .tag.l { left: 12px; color: var(--label-light); }
+.big .tag.r { right: 12px; color: var(--label-dark); }
+footer { color: var(--mute); font-size: 13.5px; border-top: 1px solid var(--line); padding-top: 20px; max-width: 75ch; }
+@media (max-width: 860px) {
+  section.concept { grid-template-columns: minmax(0, 1fr); }
+  .grounds { grid-template-columns: minmax(0, 1fr); }
+}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Notebook Alchemy &middot; brand exploration, round four</div>
+    <h1>NotebookLM's arches, with an alchemy bottle</h1>
+    <p class="lede">The arches nest the same way as the NotebookLM mark, anchored on the left, and a small gold bottle stands in the space under the innermost arch. The first one is the version the icon package is built from; the two variants show the same idea with the decomposition drawn more explicitly. Every specimen is one SVG file on a 192-unit grid, drawn from scratch rather than traced.</p>
+    <div class="swatches" aria-label="Palette">
+      <span class="sw"><i style="background:#2F7FFF"></i>Blue #2F7FFF</span>
+      <span class="sw"><i style="background:#58A6FF"></i>Light blue #58A6FF</span>
+      <span class="sw"><i style="background:#A7A4FF"></i>Lilac #A7A4FF</span>
+      <span class="sw"><i style="background:#FFD45C"></i>Gold #FFD45C</span>
+      <span class="sw"><i style="background:#FF9A3C"></i>Amber #FF9A3C</span>
+    </div>
+  </header>
+
+  <div class="context">
+    <div class="tabbar" role="img" aria-label="Browser tabs showing each version at 16 px"><div class="tab"><img src="../icon.svg" alt=""><span>Notebook Alchemy</span></div><div class="tab idle"><img src="bottle-arches-dissolving.svg" alt=""><span>Dissolving, with a bottle</span></div><div class="tab idle"><img src="bottle-arches-decomposed.svg" alt=""><span>Decomposed, with a bottle</span></div></div>
+    <p class="cap">At 16 px in a browser tab, where the favicon is seen most.</p>
+  </div>
+
+  <section class="concept" aria-labelledby="h-0">
+    <div class="notes">
+      <div class="letter">Chosen</div>
+      <h2 id="h-0">Arches with a bottle</h2>
+      <p>Three nested arches facing the same way as NotebookLM's, layers of sources sorted into themes, with a small gold alchemy bottle standing under the innermost arch.</p>
+      <dl><dt>Decomposition</dt><dd>The separate layers of the arches.</dd><dt>Alchemy</dt><dd>The gold bottle.</dd><dt>16 px</dt><dd>Blue arches with a gold point inside.</dd></dl>
+    </div>
+    <div class="specimens">
+      <div class="grounds">
+        <div class="ground light"><figure><img src="../icon.svg" width="16" height="16" alt=""><figcaption>16</figcaption></figure><figure><img src="../icon.svg" width="32" height="32" alt=""><figcaption>32</figcaption></figure><figure><img src="../icon.svg" width="48" height="48" alt=""><figcaption>48</figcaption></figure><figure><img src="../icon.svg" width="180" height="180" alt="Arches with a bottle on a light ground"><figcaption>180</figcaption></figure></div>
+        <div class="ground dark"><figure><img src="../icon.svg" width="16" height="16" alt=""><figcaption>16</figcaption></figure><figure><img src="../icon.svg" width="32" height="32" alt=""><figcaption>32</figcaption></figure><figure><img src="../icon.svg" width="48" height="48" alt=""><figcaption>48</figcaption></figure><figure><img src="../icon.svg" width="180" height="180" alt="Arches with a bottle on a dark ground"><figcaption>180</figcaption></figure></div>
+      </div>
+      <div class="big"><img src="../icon.svg" alt="Arches with a bottle at 512 px on light and dark"><span class="tag l">512 light</span><span class="tag r">512 dark</span></div>
+    </div>
+  </section>
+
+  <section class="concept" aria-labelledby="h-1">
+    <div class="notes">
+      <div class="letter">Variant</div>
+      <h2 id="h-1">Dissolving, with a bottle</h2>
+      <p>The same, with the outer arch breaking into particles on its free side: a channel decomposed into pieces of information.</p>
+      <dl><dt>Decomposition</dt><dd>The outer arch breaking into particles.</dd><dt>Alchemy</dt><dd>The gold bottle.</dd></dl>
+    </div>
+    <div class="specimens">
+      <div class="grounds">
+        <div class="ground light"><figure><img src="bottle-arches-dissolving.svg" width="16" height="16" alt=""><figcaption>16</figcaption></figure><figure><img src="bottle-arches-dissolving.svg" width="32" height="32" alt=""><figcaption>32</figcaption></figure><figure><img src="bottle-arches-dissolving.svg" width="48" height="48" alt=""><figcaption>48</figcaption></figure><figure><img src="bottle-arches-dissolving.svg" width="180" height="180" alt="Dissolving, with a bottle on a light ground"><figcaption>180</figcaption></figure></div>
+        <div class="ground dark"><figure><img src="bottle-arches-dissolving.svg" width="16" height="16" alt=""><figcaption>16</figcaption></figure><figure><img src="bottle-arches-dissolving.svg" width="32" height="32" alt=""><figcaption>32</figcaption></figure><figure><img src="bottle-arches-dissolving.svg" width="48" height="48" alt=""><figcaption>48</figcaption></figure><figure><img src="bottle-arches-dissolving.svg" width="180" height="180" alt="Dissolving, with a bottle on a dark ground"><figcaption>180</figcaption></figure></div>
+      </div>
+      <div class="big"><img src="bottle-arches-dissolving.svg" alt="Dissolving, with a bottle at 512 px on light and dark"><span class="tag l">512 light</span><span class="tag r">512 dark</span></div>
+    </div>
+  </section>
+
+  <section class="concept" aria-labelledby="h-2">
+    <div class="notes">
+      <div class="letter">Variant</div>
+      <h2 id="h-2">Decomposed, with a bottle</h2>
+      <p>The same, with the outer arches cut into one segment per theme.</p>
+      <dl><dt>Decomposition</dt><dd>Arches cut into theme segments.</dd><dt>Alchemy</dt><dd>The gold bottle.</dd></dl>
+    </div>
+    <div class="specimens">
+      <div class="grounds">
+        <div class="ground light"><figure><img src="bottle-arches-decomposed.svg" width="16" height="16" alt=""><figcaption>16</figcaption></figure><figure><img src="bottle-arches-decomposed.svg" width="32" height="32" alt=""><figcaption>32</figcaption></figure><figure><img src="bottle-arches-decomposed.svg" width="48" height="48" alt=""><figcaption>48</figcaption></figure><figure><img src="bottle-arches-decomposed.svg" width="180" height="180" alt="Decomposed, with a bottle on a light ground"><figcaption>180</figcaption></figure></div>
+        <div class="ground dark"><figure><img src="bottle-arches-decomposed.svg" width="16" height="16" alt=""><figcaption>16</figcaption></figure><figure><img src="bottle-arches-decomposed.svg" width="32" height="32" alt=""><figcaption>32</figcaption></figure><figure><img src="bottle-arches-decomposed.svg" width="48" height="48" alt=""><figcaption>48</figcaption></figure><figure><img src="bottle-arches-decomposed.svg" width="180" height="180" alt="Decomposed, with a bottle on a dark ground"><figcaption>180</figcaption></figure></div>
+      </div>
+      <div class="big"><img src="bottle-arches-decomposed.svg" alt="Decomposed, with a bottle at 512 px on light and dark"><span class="tag l">512 light</span><span class="tag r">512 dark</span></div>
+    </div>
+  </section>
+
+  <footer>Notebook Alchemy is an unofficial open-source project and is not affiliated with Google. These marks deliberately share the NotebookLM mark's visual family; the gold bottle is what sets them apart, and the README should keep saying plainly that the tool is unofficial. Source SVGs live in <code>docs/brand/concepts/</code>.</footer>
+</div>
