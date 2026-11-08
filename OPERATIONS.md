@@ -73,6 +73,26 @@ both. `docs/brand/concepts/index.html` keeps the variants that were considered.
 neutral folder with a neutral notebook name, and check the SVG for local paths and account names before
 committing it. The social preview is uploaded under Settings, General, Social preview.
 
+## Installers
+
+`install/install.ps1` and `install/install.sh` are what the README's one-line install downloads from
+`main`, so a merge to `main` changes them for everyone. At the top of each script, one variable names
+the package source (the `main` source archive; it becomes `notebook-alchemy` once the package is on
+PyPI) and one names the folder the shortcut icon is downloaded from (`docs/brand/icons` on `main`).
+
+They are not covered by `pytest`. After changing one, check it with shellcheck and run it against
+scratch folders so your own install is untouched:
+
+```bash
+uvx --from shellcheck-py shellcheck -s sh -S style install/install.sh
+```
+
+Set `UV_INSTALL_DIR`, `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_CACHE_DIR`,
+`PLAYWRIGHT_BROWSERS_PATH`, `ALCHEMY_INSTALL_WORK_DIR` and `ALCHEMY_INSTALL_SHORTCUT_DIR` to scratch
+folders, plus `UV_NO_MODIFY_PATH=1` so your PATH is not changed, and on Windows `LOCALAPPDATA` for the
+icon. `ALCHEMY_INSTALL_SOURCE` and `ALCHEMY_INSTALL_ICON_BASE` point a run at a branch. Run it twice:
+the second run must update in place. Real Linux and macOS runs are tracked in a GitHub issue.
+
 ## Release
 
 Tracked in a GitHub issue. A release names its source commit, built version, package digest, published
