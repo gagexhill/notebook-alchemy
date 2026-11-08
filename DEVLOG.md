@@ -2,6 +2,26 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## One-line install (2026-11-08)
+
+- **One command, no prerequisites.** `install/install.ps1` (`irm | iex`) and `install/install.sh`
+  (`curl | sh`) install uv with Astral's installer if it is missing, install the tool with
+  `uv tool install` on a Python 3.12 that uv downloads if needed, install Playwright's Chromium, add a
+  shortcut and run `notebook-alchemy test`. The aim is the ease of a one-click browser extension for
+  people who have never used Python.
+- **The package source is the `main` source archive, not `git+https`,** so git is not a prerequisite
+  either. It becomes the PyPI name once the package is published.
+- **`--with-executables-from notebooklm-py` is required.** uv links only the package's own commands, and
+  without `notebooklm` on PATH sign-in and uploads fail. **`--reinstall-package`** makes a rerun pick up
+  new code even when the version number has not changed, so running the command again is the update.
+- **The shortcut opens in `~/Notebook Alchemy`,** because `.env` and output are read from the working
+  folder. It starts `notebook-alchemy` with no command, which is the guided first run, and keeps the
+  terminal open afterwards. Its icon is downloaded from `docs/brand/icons`; a failed download never
+  stops the install.
+- **Nothing outside the home folder.** The shell script refuses to run as root, a PATH change that fails
+  or that `UV_NO_MODIFY_PATH` forbids is a warning rather than a stop, and nothing asks for or stores an
+  account or key.
+
 ## Icon (2026-11-08)
 
 - **The icon belongs to NotebookLM's family on purpose.** Three nested blue arches share the left edge
