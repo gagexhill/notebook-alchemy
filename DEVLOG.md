@@ -5,7 +5,7 @@ Completed material decisions, newest first. Current work is in GitHub issues.
 ## Icon (2026-11-08)
 
 - **The icon belongs to NotebookLM's family on purpose.** Three nested blue arches share the left edge
-  and face the same way as the NotebookLM mark, and a small gold alchemy bottle with a plus overlapping its lower
+  and face the same way as the NotebookLM mark, and a small gold alchemy bottle with a blue plus badge on its lower
   right stands under the innermost one. The Owner chose this after rejecting a flat purple set, a Google-Workspace-style
   emerald and amber set, and a mirrored set of arches. The geometry is drawn from scratch on a 192-unit
   grid, not traced. The gold bottle is the main thing that tells it apart from Google's mark, so the
