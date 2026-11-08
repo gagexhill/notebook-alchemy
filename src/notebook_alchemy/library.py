@@ -34,7 +34,6 @@ ASSIGN_BATCH = 300
 HEADLINE_SAMPLE = 600
 NEWS_DROP_MONTHS = 12  # news and events older than this are left out
 LABEL_AFTER_MONTHS = 18  # rules and figures older than this are kept, marked "as of"
-RESORT_GROWTH = 0.2  # new passages, as a share of those already sorted, that rebuild the topics
 TIME_SENSITIVE = ("rule", "figure", "news")
 
 
@@ -370,12 +369,120 @@ def apply_consolidation(text: str, passages: list[Passage]) -> tuple[str, list[P
 # --- building the library -------------------------------------------------------------------------
 
 
-class LibraryBuilder:
-    """Sorts passages into topics and sections and consolidates each section, with Gemini.
+# --- growing the map --------------------------------------------------------------------------------
 
-    Every answer is cached in `cache` by what the request saw: the topics are rebuilt only when
-    none exist, `resort` is asked for, or new passages grow the library by more than RESORT_GROWTH;
-    only unplaced passages are placed; only sections whose passages changed are consolidated again.
+SEP = "\x1f"  # between a topic and a section name in a stored placement
+EXTEND_AT_LEAST = 5  # unplaced passages that make the map grow...
+EXTEND_SHARE = 0.05  # ...or this share of all passages, whichever is larger
+SUBSECTION_AT = 200  # passages in one section before it is divided into subsections
+OTHER_SUBSECTION = "Other points"
+
+
+def _map_to_json(topics: list[Topic]) -> list[dict[str, Any]]:
+    return [
+        {"name": t.name, "sections": [{"name": s.name, "about": s.about} for s in t.sections]} for t in topics
+    ]
+
+
+def _map_from_json(data: list[dict[str, Any]]) -> list[Topic]:
+    return [
+        Topic(
+            str(t["name"]),
+            [Section(str(s["name"]), about=str(s.get("about", ""))) for s in t.get("sections", [])],
+        )
+        for t in data
+    ]
+
+
+def extend_prompt(channel: str, topics: list[Topic], headlines: list[str]) -> str:
+    current = "\n".join(f"- {t.name}: " + "; ".join(s.name for s in t.sections) for t in topics)
+    return (
+        f"The study library for the YouTube channel '{channel}' has these topics and sections:\n{current}\n\n"
+        "The points below fit none of them. Add only what they need: new sections inside an existing "
+        "topic (use its exact name), or a new topic with its sections. Do not rename, remove or repeat "
+        "anything that exists. Each new section has a one-line description.\n"
+        'Return only JSON: {"topics": [{"name": "...", "sections": [{"name": "...", "about": "..."}]}]}\n\n'
+        "Points:\n" + "\n".join(f"- {h[:120]}" for h in _sample(headlines, HEADLINE_SAMPLE))
+    )
+
+
+def parse_extension(text: str) -> list[Topic]:
+    data = json.loads(text)
+    out: list[Topic] = []
+    for raw in data.get("topics") or [] if isinstance(data, dict) else []:
+        name = " ".join(str(raw.get("name", "")).split())[:80] if isinstance(raw, dict) else ""
+        sections = [
+            Section(
+                " ".join(str(s.get("name", "")).split())[:80],
+                about=" ".join(str(s.get("about", "")).split())[:200],
+            )
+            for s in raw.get("sections") or []
+            if isinstance(s, dict) and str(s.get("name", "")).strip()
+        ]
+        if name and name.lower() != MISC.lower() and sections:
+            out.append(Topic(name, sections))
+    if not out:
+        raise ValueError("no new sections")
+    return out
+
+
+def merge_map(topics: list[Topic], additions: list[Topic]) -> list[Topic]:
+    """The existing map with new sections and topics added; nothing existing is renamed or lost."""
+    merged = [Topic(t.name, [Section(s.name, about=s.about) for s in t.sections]) for t in topics]
+    by_topic = {t.name.lower(): t for t in merged}
+    for add in additions:
+        target = by_topic.get(add.name.lower())
+        if target is None:
+            target = Topic(add.name, [])
+            merged.append(target)
+            by_topic[add.name.lower()] = target
+        have = {s.name.lower() for s in target.sections}
+        for s in add.sections:
+            if s.name.lower() not in have:
+                target.sections.append(s)
+                have.add(s.name.lower())
+    return [t for t in merged if t.sections]
+
+
+def subsection_prompt(topic: str, section: Section) -> str:
+    sample = _sample([p.headline for p in section.passages], HEADLINE_SAMPLE)
+    return (
+        f"The section '{section.name}' of the topic '{topic}' ({section.about}) has grown to "
+        f"{len(section.passages)} points. Divide it into 3 to 10 subsections that together cover them; "
+        "names are 2 to 6 words, specific, and do not repeat the section's name.\n"
+        'Return only JSON: {"subsections": ["...", ...]}\n\n'
+        "Points (a sample):\n" + "\n".join(f"- {h[:120]}" for h in sample)
+    )
+
+
+def parse_subsections(text: str) -> list[str]:
+    data = json.loads(text)
+    names: list[str] = []
+    for item in data.get("subsections") or [] if isinstance(data, dict) else []:
+        name = " ".join(str(item).split())[:80]
+        if (
+            name
+            and name.lower() not in {n.lower() for n in names}
+            and name.lower() != OTHER_SUBSECTION.lower()
+        ):
+            names.append(name)
+    if len(names) < 2:
+        raise ValueError(f"only {len(names)} usable subsections")
+    return names
+
+
+class LibraryBuilder:
+    """Sorts passages into topics and sections and consolidates each section, with an AI answerer.
+
+    The library grows without reshuffling. Every answer is cached in `cache`:
+    - **The topic map** is made once. When new passages fit nowhere, it is *extended*: new sections
+      or topics are added for those passages only, and every existing one stays. Only `resort`
+      rebuilds it.
+    - **Each passage's place** is remembered by section name, so it survives a change to the map;
+      only new passages are placed.
+    - **A section past SUBSECTION_AT passages** is divided once into named subsections, and new
+      passages are placed into those.
+    - **Only sections whose passages changed** are consolidated again.
     """
 
     def __init__(self, gemini: Any, cache: RequestCache, today: str, channel: str) -> None:
@@ -399,21 +506,33 @@ class LibraryBuilder:
         progress: Any = None,
     ) -> Library:
         kept, removed_old = apply_date_rules(passages, self.today)
-        title, topics, version = self._taxonomy(kept, titles, resort)
-        sections = [(t, s) for t in topics for s in t.sections]
-        placement = self._place(kept, sections, version, progress)
+        if resort:
+            self.cache.put(self._map_key, None)
+            self.cache.put(self._place_key, {})
+        title, topics = self._topic_map(kept, titles)
+        placement = self._place(kept, topics, progress)
+        unplaced = [p for p in kept if not placement.get(p.id)]
+        if len(unplaced) > max(EXTEND_AT_LEAST, len(kept) * EXTEND_SHARE) and self._new_unplaced(unplaced):
+            grown = self._extend(topics, unplaced)
+            if grown is not topics:
+                topics = grown
+                waiting = {p.id for p in unplaced}
+                self.cache.put(self._place_key, {k: v for k, v in placement.items() if k not in waiting})
+                placement = self._place(kept, topics, progress)
+                still = [p for p in kept if not placement.get(p.id)]
+                self.cache.put(
+                    self._map_key, {**self.cache.get(self._map_key), "extended_for": self._digest(still)}
+                )
+        by_name = {f"{t.name}{SEP}{s.name}": s for t in topics for s in t.sections}
         misc = Section(MISC, about="Points that fit no other section")
-        unplaced = 0
         for p in kept:
-            index = placement.get(p.id)
-            if index is None or index < 0:
-                misc.passages.append(p)
-                unplaced += 1
-            else:
-                sections[index][1].passages.append(p)
+            section = by_name.get(placement.get(p.id, ""))
+            (section.passages if section is not None else misc.passages).append(p)
         if misc.passages:
             topics.append(Topic(MISC, [misc]))
-        library = Library(title, topics, removed_outdated=removed_old, unplaced=unplaced)
+        for topic in topics:
+            topic.sections = [part for s in topic.sections for part in self._divide(topic, s)]
+        library = Library(title, topics, removed_outdated=removed_old, unplaced=len(misc.passages))
         work = [(t, s) for t in topics for s in t.sections if s.passages]
         for done, (topic, section) in enumerate(work, 1):
             self._consolidate(topic, section, library)
@@ -425,57 +544,150 @@ class LibraryBuilder:
         self.cache.save()
         return library
 
-    # -- topics --
+    # -- the topic map --
 
-    def _taxonomy(
-        self, passages: list[Passage], titles: list[str], resort: bool
-    ) -> tuple[str, list[Topic], str]:
-        stored = self.cache.get(f"taxonomy:{self.channel}")
-        grown = stored and len(passages) > stored.get("sorted", 0) * (1 + RESORT_GROWTH)
-        if stored and not resort and not grown:
-            text = stored["answer"]
-        else:
+    @property
+    def _map_key(self) -> str:
+        return f"map:{self.channel}"
+
+    @property
+    def _place_key(self) -> str:
+        return f"placed:{self.channel}"
+
+    def _topic_map(self, passages: list[Passage], titles: list[str]) -> tuple[str, list[Topic]]:
+        stored = self.cache.get(self._map_key)
+        if stored is None:
             text = self._ask(taxonomy_prompt(self.channel, titles, [p.headline for p in passages]), 8192)
-            parse_taxonomy(text)  # raises on an unusable answer before it is cached
-            self.cache.put(f"taxonomy:{self.channel}", {"answer": text, "sorted": len(passages)})
-        name, topics = parse_taxonomy(text)
-        version = RequestCache.key("taxonomy", text)
-        return name or self.channel, topics, version
+            name, topics = parse_taxonomy(text)  # raises on an unusable answer before it is cached
+            stored = {"title": name or self.channel, "topics": _map_to_json(topics)}
+            self.cache.put(self._map_key, stored)
+        return str(stored.get("title") or self.channel), _map_from_json(stored["topics"])
 
-    def _place(
-        self, passages: list[Passage], sections: list[tuple[Topic, Section]], version: str, progress: Any
-    ) -> dict[str, int]:
-        cache_key = f"placement:{version}"
-        placed: dict[str, int] = dict(self.cache.get(cache_key) or {})
+    @staticmethod
+    def _digest(unplaced: list[Passage]) -> str:
+        return hashlib.sha256("\n".join(sorted(p.id for p in unplaced)).encode()).hexdigest()[:16]
+
+    def _new_unplaced(self, unplaced: list[Passage]) -> bool:
+        """Whether these unplaced passages differ from the set the map was last extended for.
+
+        The map is extended once per set, so passages that still fit nowhere afterwards do not
+        cost another request on every run.
+        """
+        return (self.cache.get(self._map_key) or {}).get("extended_for") != self._digest(unplaced)
+
+    def _extend(self, topics: list[Topic], unplaced: list[Passage]) -> list[Topic]:
+        """Add sections (or topics) for passages that fit nowhere; every existing one stays."""
+        try:
+            text = self._ask(extend_prompt(self.channel, topics, [p.headline for p in unplaced]), 8192)
+            additions = parse_extension(text)
+        except GeminiError as exc:
+            if exc.quota:
+                raise
+            self.notices.append(
+                f"New topics could not be added ({exc.detail}); those passages wait in {MISC}."
+            )
+            return topics
+        except (ValueError, TypeError) as exc:
+            self.notices.append(f"New topics could not be added ({exc}); those passages wait in {MISC}.")
+            return topics
+        merged = merge_map(topics, additions)
+        if sum(len(t.sections) for t in merged) == sum(len(t.sections) for t in topics):
+            self.notices.append(f"No new topics fit the unplaced passages; they wait in {MISC}.")
+            return topics
+        stored = self.cache.get(self._map_key) or {"title": self.channel}
+        self.cache.put(
+            self._map_key,
+            {**stored, "topics": _map_to_json(merged)},
+        )
+        return merged
+
+    def _place(self, passages: list[Passage], topics: list[Topic], progress: Any) -> dict[str, str]:
+        """Each passage's section, as "topic<SEP>section", "" when the model placed it nowhere.
+
+        Remembered by name, so a passage keeps its place when the map is extended.
+        """
+        sections = [(t, s) for t in topics for s in t.sections]
+        names = [f"{t.name}{SEP}{s.name}" for t, s in sections]
+        placed: dict[str, str] = {
+            k: v for k, v in (self.cache.get(self._place_key) or {}).items() if v in names or v == ""
+        }
         todo = [p for p in passages if p.id not in placed]
         listing = "\n".join(f"{i}: {t.name} / {s.name} — {s.about}" for i, (t, s) in enumerate(sections))
         batches = [todo[i : i + ASSIGN_BATCH] for i in range(0, len(todo), ASSIGN_BATCH)]
         for done, batch in enumerate(batches, 1):
             numbered = list(enumerate(batch))
-            try:
-                mapping = parse_assignments(
-                    self._ask(assign_prompt(listing, numbered)), {n for n, _ in numbered}, len(sections)
-                )
-            except GeminiError as exc:
-                if exc.quota:
-                    raise
-                self.notices.append(
-                    f"{len(batch)} passages could not be placed ({exc.detail}); they are retried next run."
-                )
-                continue
-            except (ValueError, TypeError) as exc:
-                self.notices.append(
-                    f"{len(batch)} passages could not be placed ({exc}); they are retried next run."
-                )
+            mapping = self._assign(listing, numbered, len(sections), batch)
+            if mapping is None:
                 continue
             for n, p in numbered:
-                # Asked once: a passage the model did not place stays in Miscellaneous (-1) and is
-                # not asked about again, so a rerun costs nothing for it.
-                placed[p.id] = mapping.get(n, -1)
-            self.cache.put(cache_key, placed)
+                # Asked once: a passage the model placed nowhere is remembered as "" and is not asked
+                # about again (it may be placed when the map is extended).
+                placed[p.id] = names[mapping[n]] if n in mapping else ""
+            self.cache.put(self._place_key, placed)
             if progress:
                 progress("Sorting passages into sections", done, len(batches))
         return placed
+
+    def _assign(
+        self, listing: str, numbered: list[tuple[int, Passage]], count: int, batch: list[Passage]
+    ) -> dict[int, int] | None:
+        try:
+            return parse_assignments(
+                self._ask(assign_prompt(listing, numbered)), {n for n, _ in numbered}, count
+            )
+        except GeminiError as exc:
+            if exc.quota:
+                raise
+            self.notices.append(
+                f"{len(batch)} passages could not be placed ({exc.detail}); they are retried next run."
+            )
+        except (ValueError, TypeError) as exc:
+            self.notices.append(
+                f"{len(batch)} passages could not be placed ({exc}); they are retried next run."
+            )
+        return None
+
+    # -- subsections --
+
+    def _divide(self, topic: Topic, section: Section) -> list[Section]:
+        """A section past SUBSECTION_AT passages, as named subsections ("Section: Subsection").
+
+        The subsection names are asked for once and kept; later passages are placed into them.
+        """
+        if len(section.passages) <= SUBSECTION_AT:
+            return [section]
+        key = f"sub:{self.channel}{SEP}{topic.name}{SEP}{section.name}"
+        stored = self.cache.get(key) or {}
+        names: list[str] = list(stored.get("names") or [])
+        if not names:
+            try:
+                names = parse_subsections(self._ask(subsection_prompt(topic.name, section)))
+            except GeminiError as exc:
+                if exc.quota:
+                    raise
+                self.notices.append(f"'{section.name}' was not divided ({exc.detail}).")
+                return [section]
+            except (ValueError, TypeError) as exc:
+                self.notices.append(f"'{section.name}' was not divided ({exc}).")
+                return [section]
+        placed: dict[str, int] = dict(stored.get("placed") or {})
+        todo = [p for p in section.passages if p.id not in placed]
+        listing = "\n".join(f"{i}: {name}" for i, name in enumerate(names))
+        for start in range(0, len(todo), ASSIGN_BATCH):
+            batch = todo[start : start + ASSIGN_BATCH]
+            numbered = list(enumerate(batch))
+            mapping = self._assign(listing, numbered, len(names), batch)
+            if mapping is None:
+                continue
+            for n, p in numbered:
+                placed[p.id] = mapping.get(n, -1)
+        self.cache.put(key, {"names": names, "placed": placed})
+        parts = [Section(f"{section.name}: {name}", about=section.about) for name in names]
+        other = Section(f"{section.name}: {OTHER_SUBSECTION}", about=section.about)
+        for p in section.passages:
+            i = placed.get(p.id, -1)
+            (parts[i] if 0 <= i < len(parts) else other).passages.append(p)
+        return [s for s in [*parts, other] if s.passages]
 
     # -- sections --
 
