@@ -603,9 +603,53 @@ def test_login_asks_before_replacing_another_account(
     assert declined.exit_code == 1 and "Nothing was changed" in declined.output and len(calls) == 1
     assert calls[0].get("stdin") is subprocess.DEVNULL  # notebooklm's own question cannot wait unseen
     calls.clear()
-    accepted = runner.invoke(cli, ["login", "--browser-cookies", "edge"], input="y\n")
+    accepted = runner.invoke(cli, ["login", "--browser-cookies", "edge", "--no-keep-signed-in"], input="y\n")
     assert accepted.exit_code == 0, accepted.output
     assert [c.get("input") for c in calls] == [None, "y\n"] and "signed in as" in accepted.output
+
+
+def _signed_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 1))
+
+
+def test_login_offers_to_keep_the_sign_in_fresh(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _signed_in(monkeypatch)
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    scheduler = isolated_environment.scheduler
+    declined = runner.invoke(cli, ["login", "--browser-cookies", "edge"], input="n\n")
+    assert declined.exit_code == 0, declined.output
+    assert "Do you want to keep this sign-in fresh (Y/n)?" in declined.output and not scheduler.tasks
+    accepted = runner.invoke(cli, ["login", "--browser-cookies", "edge"], input="\n")  # Enter means yes
+    assert accepted.exit_code == 0, accepted.output
+    assert "refreshed in the background" in accepted.output
+    [(name, command)] = scheduler.tasks.items()
+    assert name == "Notebook Alchemy keep signed in (default)"
+    assert "-m notebook_alchemy.keepalive --profile default --home" in command
+    again = runner.invoke(cli, ["login", "--browser-cookies", "edge"])  # already on: nothing asked
+    assert again.exit_code == 0 and "keep this sign-in fresh" not in again.output
+
+
+def test_keep_signed_in_on_and_off(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    monkeypatch.setattr(NotebookLMClient, "is_authenticated", lambda self: True)
+    scheduler = isolated_environment.scheduler
+    on = runner.invoke(cli, ["keep-signed-in", "-p", "personal"])
+    assert on.exit_code == 0, on.output
+    assert list(scheduler.tasks) == ["Notebook Alchemy keep signed in (personal)"]
+    off = runner.invoke(cli, ["keep-signed-in", "-p", "personal", "--off"])
+    assert off.exit_code == 0 and "is off" in off.output and not scheduler.tasks
+    again = runner.invoke(cli, ["keep-signed-in", "-p", "personal", "--off"])
+    assert "already off" in again.output
+
+
+def test_keep_signed_in_needs_a_sign_in_first(runner: CliRunner, isolated_environment) -> None:
+    result = runner.invoke(cli, ["keep-signed-in"])
+    assert result.exit_code == 1 and "notebook-alchemy login" in result.output
+    assert not isolated_environment.scheduler.tasks
 
 
 # --- the book pipeline: fakes ------------------------------------------------------------------------

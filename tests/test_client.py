@@ -373,3 +373,20 @@ def test_plan_limits_name_the_plan_and_are_never_guessed(tmp_path: Path) -> None
     assert PlanLimits(50, 100, 1).plan == "Standard" and PlanLimits(None, None, 9).plan == "unknown plan"
     assert _client(tmp_path, FakeProcess()).plan_limits() is None  # a test runner never reads live
     assert NotebookLMClient(AlchemyConfig()).plan_limits() is None  # no session: unknown, not a guess
+
+
+def test_notebooklm_may_renew_stale_cookies_from_its_own_sign_in_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, str]] = []
+
+    def runner(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(dict(kwargs["env"]))  # type: ignore[arg-type]
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"notebooks": []}), "")
+
+    client = _client(tmp_path, runner)  # type: ignore[arg-type]
+    client.list_notebooks()
+    assert seen[-1]["NOTEBOOKLM_HEADLESS_REAUTH"] == "1"
+    monkeypatch.setenv("NOTEBOOKLM_HEADLESS_REAUTH", "0")  # the user's own choice is kept
+    client.list_notebooks()
+    assert seen[-1]["NOTEBOOKLM_HEADLESS_REAUTH"] == "0"

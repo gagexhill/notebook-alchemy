@@ -7,6 +7,7 @@ go to stderr with a "Warning:" or "Error:" prefix, and a next step is written as
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 import traceback
 from collections.abc import Callable
@@ -191,3 +192,19 @@ def human_bytes(n: int) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{n} B"
+
+
+def ago(iso: str, now: dt.datetime | None = None) -> str:
+    """An ISO time as "5 minutes ago", "3 hours ago" or "2 days ago"; the text itself if unreadable."""
+    try:
+        then = dt.datetime.fromisoformat(iso)
+    except ValueError:
+        return iso or "at an unknown time"
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=dt.UTC)
+    seconds = max(0, int(((now or dt.datetime.now(dt.UTC)) - then).total_seconds()))
+    for size, unit in ((86_400, "day"), (3_600, "hour"), (60, "minute")):
+        if seconds >= size:
+            n = seconds // size
+            return f"{n} {unit}{'s' if n != 1 else ''} ago"
+    return "just now"

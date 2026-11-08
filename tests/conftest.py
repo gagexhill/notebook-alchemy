@@ -59,6 +59,10 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         raise AssertionError("test tried to open a real network connection")
 
     monkeypatch.setattr(subprocess, "run", _no_process)
+    # The background sign-in refresh talks to the system scheduler; tests get a fake Task Scheduler.
+    scheduler = FakeScheduler()
+    monkeypatch.setattr("notebook_alchemy.keepalive.PLATFORM", "win32")
+    monkeypatch.setattr("notebook_alchemy.keepalive._default_runner", lambda: scheduler)
     monkeypatch.setattr(subprocess, "Popen", _no_process)
     monkeypatch.setattr(socket.socket, "connect", _no_network)
     # Real runs space caption requests seconds apart; tests do not wait.
@@ -69,9 +73,42 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     # .env loading writes to os.environ directly; put the environment back so nothing leaks onward.
     snapshot = dict(os.environ)
-    yield SimpleNamespace(home=home, work=work)
+    yield SimpleNamespace(home=home, work=work, scheduler=scheduler)
     os.environ.clear()
     os.environ.update(snapshot)
+
+
+class FakeScheduler:
+    """Stand-in for `schtasks`, `systemctl --user` and `crontab`: remembers what was registered."""
+
+    def __init__(self, *, fail: str = "") -> None:
+        self.tasks: dict[str, str] = {}  # schtasks name -> command
+        self.crontab = ""
+        self.calls: list[list[str]] = []
+        self.fail = fail  # a command word ("/Create", "enable", ...) that exits 1
+
+    def __call__(self, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        self.calls.append(list(cmd))
+        done = subprocess.CompletedProcess(cmd, 0, "", "")
+        if self.fail and self.fail in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", f"{self.fail} refused")
+        if cmd[0] == "schtasks":
+            name = cmd[cmd.index("/TN") + 1]
+            if "/Create" in cmd:  # the task definition, read now: the file is removed after the call
+                self.tasks[name] = Path(cmd[cmd.index("/XML") + 1]).read_text(encoding="utf-16")
+            elif "/Delete" in cmd:
+                self.tasks.pop(name, None)
+            elif name not in self.tasks:
+                return subprocess.CompletedProcess(
+                    cmd, 1, "", "ERROR: The system cannot find the file specified."
+                )
+        elif cmd[:2] == ["crontab", "-l"]:
+            if not self.crontab:
+                return subprocess.CompletedProcess(cmd, 1, "", "no crontab for user")
+            return subprocess.CompletedProcess(cmd, 0, self.crontab, "")
+        elif cmd[:2] == ["crontab", "-"]:
+            self.crontab = str(kwargs.get("input") or "")
+        return done
 
 
 class FakeProcess:

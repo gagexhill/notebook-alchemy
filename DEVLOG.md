@@ -9,6 +9,10 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   - Now: passages that fit nowhere extend the map once (new sections or topics; nothing existing is renamed); each passage's section is stored by name; a section past 200 passages is divided once into named subsections. Only `--resort` rebuilds.
   - Only books whose text changed are uploaded (a content hash in the upload record), and a long topic's sections stay in their part, so one growing section does not re-upload every part.
   - NotebookLM's own append only adds text at the end of a source, so a passage that belongs mid-book needs the whole book replaced; changed-only upload keeps that to the books that changed.
+- **Staying signed in.**
+  - Live run 1 failed because both NotebookLM sign-ins had expired overnight: Google's `__Secure-1PSIDTS` cookie must be rotated, and notebooklm-py's guidance is to run `notebooklm auth refresh` every 15–20 minutes from the OS scheduler.
+  - `login` offers, and `keep-signed-in` sets up, that refresh every 20 minutes per profile; `status` shows when it last ran and whether it worked. Runs also set `NOTEBOOKLM_HEADLESS_REAUTH=1`, so stale cookies are renewed from notebooklm's own sign-in browser profile while it is still signed in.
+  - On Windows the task is registered from a task definition, not `schtasks /SC MINUTE`: the default refuses to start on battery, and in a live check on a laptop the task sat "Queued" and never ran. With the definition it ran on battery and recorded its result.
 - **`export-state` / `import-state`** move the working files to another computer as a zip. Import checks every member (known folders, safe names, JSON objects, size) before writing any, and keeps this computer's files unless `--replace`.
 
 - **The sources are the speakers' own words, not summaries.**
