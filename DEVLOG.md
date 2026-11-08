@@ -2,6 +2,30 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## Topic books from every word (0.3.0, 2026-11-08)
+
+- **The sources are the speakers' own words, not summaries.**
+  - What went wrong: in a live run on a 754-video channel, 22 of 28 sources were title lists (YouTube blocked captions and the run stopped asking) and 6 were short briefs, one written from a single transcript.
+  - Why it mattered: NotebookLM answers from the text it is given, so that gave it almost nothing.
+  - Now: every video's words are read, repeated passages are kept once (newest copy), and Gemini only labels, files and orders passages. Its punctuation is used only when `same_words` confirms the words are unchanged.
+- **Gemini returns labels by chunk number, not text.**
+  - Each answer is a few percent of the transcript.
+  - Every paid answer is cached by what it saw: transcript + prompt version + model for labels; passages and taxonomy for placement; section contents + month for consolidation.
+  - A rerun with no new videos makes no request.
+  - Labels never come from the fallback model; a used-up daily quota stops the step and the next run resumes.
+- **Batch mode first, standard calls when Google refuses it.** Google answers FAILED_PRECONDITION for a key whose project has no billing (seen live); the run then uses standard calls and says so. The batch success path is tested with fakes only, because the test key has no billing; the request shape follows aistudio.google.com/docs/batch-api.
+- **Words when YouTube refuses.**
+  - From this network YouTube refused both the captions API and yt-dlp's subtitle download (HTTP 429).
+  - yt-dlp cannot read Chrome or Edge cookies on Windows (copy lock, DPAPI).
+  - NotebookLM fetches a video's transcript on Google's side, so blocked videos go through a working notebook, are read back, and are removed. A first live test read 4 of 10, and a matching bug that left sources behind was fixed.
+  - Requests are spaced 3–8 s apart, a block pauses only the refused route, and blocks are never cached.
+- **Dates.** Channel listings carry approximate dates (yt-dlp `approximate_date`), shown as a year; yt-dlp subtitles give exact ones. Old news (12 months) is left out; old rules and figures (18 months) are kept and marked "As of". Undated passages are never judged.
+- **Nothing kept locally.**
+  - Removed: the vault, `sync`, `append`, `--no-sync`, `--max-per-vol`, `--preview-only`, and existing-notebook input; removed commands and flags print what replaced them.
+  - A channel → notebook-id record keeps a rerun on the same notebook, even when the AI's title changes.
+  - `--save DIR` writes a copy; `clean --vaults` removes 0.2 output for one release.
+- **Removed modules.** `analyzer.py`, `synthesizer.py` and `vault.py` are gone; the title-word grouping moved to `offline.py` for the no-key path.
+
 ## Plain output, modelled on gcloud (2026-11-07)
 
 - **What people read uses everyday words.** Terminal output, help text and the generated documents say

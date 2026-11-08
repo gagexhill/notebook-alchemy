@@ -197,3 +197,25 @@ def test_a_topic_longer_than_one_source_is_split_into_parts() -> None:
     books = render_topic(topic, "C", {}, set())
     assert [b.title for b in books][:2] == ["Huge", "Huge (Part 2)"]
     assert all(b.words <= SOURCE_WORD_LIMIT + 2000 for b in books)  # the heading and intro aside
+
+
+def test_punctuation_is_copied_onto_the_speakers_words_and_nothing_else_changes() -> None:
+    raw = "it comes to partnership this is important so for example with this company we partnered"
+    model = (
+        "When it comes to partnership, this is important. So, for example, with this company, we partnered."
+    )
+    labels = VideoLabels("v", "k", "m", [Segment(1, 1, True, "Partners", text=model)])
+    text = build_passages("v", "T", "", [Chunk("v", 1, raw)], labels)[0].text
+    assert (
+        text
+        == "it comes to partnership, this is important. So, for example, with this company, we partnered."
+    )
+    assert [w.strip(",.").lower() for w in text.split()] == raw.split()  # every word, in order, none added
+
+
+def test_a_word_the_model_dropped_stays() -> None:
+    raw = "the cage code takes ten business days to arrive after you register"
+    dropped = "The CAGE code takes ten days to arrive after you register."  # "business" left out
+    labels = VideoLabels("v", "k", "m", [Segment(1, 1, True, "C", text=dropped)])
+    text = build_passages("v", "T", "", [Chunk("v", 1, raw)], labels)[0].text
+    assert "business" in text and text.startswith("The CAGE code") and text.endswith("register.")

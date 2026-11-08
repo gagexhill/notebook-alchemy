@@ -14,8 +14,8 @@ body:
       description: "Which architectural subsystem does this proposal relate to?"
       options:
         - "YouTube scanning and transcripts"
-        - "Grouping videos into domains"
-        - "Writing compendiums (Gemini)"
+        - "Cleanup, labelling and sorting (Gemini)"
+        - "The topic books"
         - "NotebookLM upload and accounts"
         - "Command-line experience"
         - "Something else"

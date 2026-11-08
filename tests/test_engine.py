@@ -404,3 +404,41 @@ def test_the_estimate_counts_cached_words_and_spends_nothing(tmp_path: Path) -> 
     )
     assert est.videos_known == 1 and est.words_known == 1000
     assert est.words_estimated == 1000 + int(600 * 2.5) and est.cost_usd > 0
+
+
+def test_a_used_up_quota_while_sorting_says_how_far_it_got_and_keeps_the_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_alchemy.channel import (
+        ChannelScanner,
+        ChannelScanResult,
+        ChannelVideo,
+        TranscriptManager,
+        TranscriptResult,
+    )
+    from notebook_alchemy.errors import AlchemyError, GeminiError
+
+    videos = [ChannelVideo("vid00000001", "One", "u", 600, "2026-03-01")]
+    monkeypatch.setattr(
+        ChannelScanner, "scan", lambda self, url, limit=None, **kw: ChannelScanResult("Chan", videos)
+    )
+    monkeypatch.setattr(
+        TranscriptManager,
+        "fetch_many",
+        lambda self, items, progress=None: {
+            v: TranscriptResult(v, "Registering takes ten days.", "youtube") for v, _ in items
+        },
+    )
+
+    class QuotaWhenSorting(PipelineGemini):
+        def generate(self, prompt: str, **kw):
+            if "study library" in prompt:
+                raise GeminiError("quota", status=429, detail="daily request quota exhausted", quota=True)
+            return super().generate(prompt, **kw)
+
+    engine = AlchemyEngine(_config(tmp_path))
+    engine.gemini = QuotaWhenSorting()  # type: ignore[assignment]
+    with pytest.raises(AlchemyError, match="1 of 1 videos are labelled and saved") as err:
+        engine.build("@chan")
+    assert "carries on from here" in (err.value.hint or "")
+    assert list((tmp_path / "knowledge").glob("*.json"))  # the label survived for the next run

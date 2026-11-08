@@ -35,9 +35,11 @@ WINDOW_WORDS = 70_000  # a very long video is labelled in windows of about this 
 # When the model also returns punctuated text, its answer is about as long as the window.
 PUNCTUATE_WINDOW_WORDS = 5_000
 PUNCTUATE_MIN_MATCH = 0.98  # share of words that must come back unchanged, else the raw text is used
+PUNCTUATE_ALIGN_MIN = 0.8  # below this the model's text is not the same passage, and is not used
 NOTE_MAX_WORDS = 25
 HEADLINE_MAX_WORDS = 14
 LABEL_MAX_OUTPUT_TOKENS = 16384
+LABEL_TIMEOUT = 300.0  # seconds; an answer that carries punctuated words is long
 
 SYSTEM = (
     "You label transcripts for a study library. You never rewrite or summarise the speaker's words; "
@@ -242,12 +244,34 @@ def _norm_words(text: str) -> list[str]:
     return [w for w in _NORM_RE.sub(" ", text.lower()).split() if w]
 
 
+def _norm(word: str) -> str:
+    return _NORM_RE.sub("", word.lower())
+
+
 def same_words(original: str, punctuated: str) -> bool:
     """True when the punctuated text keeps the original's words (punctuation and case aside)."""
     a, b = _norm_words(original), _norm_words(punctuated)
     if not a or not b:
         return False
     return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= PUNCTUATE_MIN_MATCH
+
+
+def apply_punctuation(original: str, punctuated: str) -> str:
+    """The original words, every one and in order, with the punctuation and capitals the model gave
+    them wherever the two line up. Words the model added are never used; words it dropped keep their
+    original form. When too little lines up to be the same passage, the original is returned."""
+    raw = original.split()
+    pun = punctuated.split()
+    a, b = [_norm(w) for w in raw], [_norm(w) for w in pun]
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    if not raw or matcher.ratio() < PUNCTUATE_ALIGN_MIN:
+        return original
+    out = list(raw)
+    for tag, i1, i2, j1, _j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1):
+                out[i1 + k] = pun[j1 + k]  # same word, with the model's punctuation and capitals
+    return " ".join(out)
 
 
 def windows(chunks: list[Chunk], limit: int = WINDOW_WORDS) -> list[list[Chunk]]:
@@ -429,6 +453,7 @@ class Labeler:
             json_mode=True,
             max_output_tokens=LABEL_MAX_OUTPUT_TOKENS,
             allow_fallback=False,
+            timeout=LABEL_TIMEOUT,
         )
         return result.text
 
