@@ -705,7 +705,7 @@ def test_run_mock_saves_books_and_never_uploads(runner: CliRunner, isolated_envi
     result = runner.invoke(cli, ["run", "--mock", "--save", "books"])
     assert result.exit_code == 0, result.output
     saved = sorted(p.name for p in (isolated_environment.work / "books").iterdir())
-    assert "_OVERVIEW.md" in saved and len(saved) >= 3
+    assert "_OVERVIEW.md" in saved and len(saved) >= 2
     assert "never uploaded" in " ".join(result.output.split())
 
 

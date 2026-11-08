@@ -142,9 +142,17 @@ def render_overview(
     """What the notebook holds, how it was made, what is missing and what was left out."""
     lines = [
         f"# {library.notebook_title}: Overview\n",
-        f"This notebook was built from the YouTube channel {channel} by Notebook Alchemy. Every video's "
-        "words were read, repeated passages were kept once, and each point was filed under a topic and "
-        "section. The topic books hold the speakers' own words; each passage names its video.\n",
+        (
+            f"This notebook was built from the YouTube channel {channel} by Notebook Alchemy. Every "
+            "video's words were read, repeated passages were kept once, and each point was filed under "
+            "a topic and section. The topic books hold the speakers' own words; each passage names its "
+            "video.\n"
+            if library.sorted_by_ai
+            else f"This notebook was built from the YouTube channel {channel} by Notebook Alchemy, "
+            "without AI. Every video's words were read and repeated passages were kept once; each "
+            "video's words are one passage, in a section named after the words its title shares with "
+            "others. The books hold the speakers' own words; each passage names its video.\n"
+        ),
         "## Topics\n",
         "| Topic | Sections | Passages | Words |",
         "| :-- | :-: | :-: | :-: |",
@@ -155,7 +163,9 @@ def render_overview(
     lines.append("")
     for t in library.topics:
         lines.append(f"### {t.name}\n")
-        lines += [f"- {s.name}" + (f": {s.about}" if s.about else "") for s in t.sections]
+        lines += [
+            f"- {s.name}" + (f": {s.about}" if s.about and library.sorted_by_ai else "") for s in t.sections
+        ]
         lines.append("")
     known = sorted(d for v, d in dates.items() if d and v in read)
     lines.append("## Coverage\n")

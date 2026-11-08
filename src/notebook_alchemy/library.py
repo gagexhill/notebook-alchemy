@@ -82,6 +82,7 @@ class Library:
     removed_outdated: list[Passage] = field(default_factory=list)
     removed_duplicates: int = 0
     unplaced: int = 0  # passages the model did not place (kept under Miscellaneous)
+    sorted_by_ai: bool = True  # False on the no-key path: grouped by title words only
 
 
 # --- passages -------------------------------------------------------------------------------------
