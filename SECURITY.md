@@ -13,7 +13,7 @@
   `x-goog-api-key` request header, and removed from any error text before it is shown or logged.
 - The NotebookLM session is owned by the `notebooklm` CLI, which keeps it under
   `~/.notebooklm/profiles/<profile>/`. This tool reads the file's location, never its contents.
-- Compendium content reaches `notebooklm` as a temporary file, not on the command line.
+- Document content reaches `notebooklm` as a temporary file, not on the command line.
 - `.gitignore` blocks `.env`, session and token files, and the local `vault/`. A pre-push hook scans
   pushed commits with gitleaks, and GitHub secret scanning with push protection is enabled.
 

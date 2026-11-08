@@ -2,6 +2,25 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## Plain output, modelled on gcloud (2026-11-07)
+
+- **What people read uses everyday words.** Terminal output, help text and the generated documents say
+  topic, document, part and documents folder; summaries and video lists replace "Gemini synthesis" and
+  "offline index". The code keeps domain, compendium, volume and vault, and the README says which is
+  which. Why: the tool is meant for people who are not technical, and the old words described how it
+  works rather than what it gives them.
+- **Detail is behind `-v`, as gcloud keeps it behind `--verbosity=info`.** By default a run prints one
+  line per result; paths, token counts, models, grouping method and per-document caption notes print
+  with `-v`, which now also works after the command (`status -v`). `notebooklm`'s own sign-in progress
+  (profile, cookies, file paths) is captured, not passed through; it explains a failure instead.
+- **gcloud's message shapes.** Resource names in `[brackets]`, `Warning:` and `Error:` prefixes on
+  stderr in place of boxed panels, next steps written as `To ..., run: $ command`, and confirmations as
+  `Do you want to continue (y/N)?`. Google's developer style guide supplied "sign in" over "log in"
+  and no "please"; its error-message page no longer exists, so the error shape follows gcloud's own
+  output, read locally.
+- **Older documents still work with `append`.** The related-topics heading was renamed; `append` finds
+  either heading.
+
 ## Privacy, cleanup and future-proofing (2026-11-07)
 
 - **The repository and the tool keep nothing that identifies a person.** The license, package metadata

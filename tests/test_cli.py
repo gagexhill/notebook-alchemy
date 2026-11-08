@@ -37,6 +37,7 @@ def reset_ui() -> None:
     ui.console = Console(highlight=False)
     ui.err_console = Console(stderr=True, highlight=False)
     ui.UiState.quiet = ui.UiState.debug = False
+    ui.UiState.verbose = 0
 
 
 @pytest.fixture
@@ -119,8 +120,9 @@ def test_no_source_hint_mentions_mock(runner: CliRunner) -> None:
 def test_dry_run_mock_is_labelled_sample(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["dry-run", "--mock", "--offline"])
     assert result.exit_code == 0
-    assert "Sample data" in result.output and "Estimated total" in result.output
-    assert "Next:" not in result.output  # nothing to run next on sample data
+    flat = " ".join(result.output.split())
+    assert "sample data" in flat and "about $" in flat
+    assert "To write the documents" not in result.output  # nothing to run next on sample data
 
 
 def test_dry_run_scan_failure_names_cause_and_next_step(
@@ -151,7 +153,7 @@ def test_bracketed_titles_print_exactly_and_do_not_crash(runner: CliRunner, fake
 def test_run_mock_builds_in_the_vault_and_never_uploads(runner: CliRunner, isolated_environment) -> None:
     result = runner.invoke(cli, ["run", "--mock", "--offline"])
     assert result.exit_code == 0, result.output
-    assert "never uploaded" in result.output and "Build complete" in result.output
+    assert "never uploaded" in result.output and "Wrote 18 documents" in result.output
     assert (
         isolated_environment.work / "vault" / "sample_catalog_mock_data" / "compendiums" / "_INDEX.md"
     ).exists()
@@ -190,7 +192,7 @@ def test_run_with_sync_uploads_and_reports(
     result = runner.invoke(cli, ["run", "@my", "--offline", "-N", "My Notebook", "--yes"])
     assert result.exit_code == 0, result.output
     assert seen["title"] == "My Notebook" and Path(str(seen["dir"])).name == "compendiums"
-    assert "Upload complete" in result.output and "Created notebook" in result.output
+    assert "Created notebook [My Notebook]." in result.output and "notebooklm.google.com" in result.output
 
 
 def test_sync_failure_exits_non_zero_and_lists_files(
@@ -223,7 +225,7 @@ def test_unexpected_errors_are_contained(runner: CliRunner, monkeypatch: pytest.
 
     monkeypatch.setattr(ChannelScanner, "scan", boom)
     plain = runner.invoke(cli, ["dry-run", "@x"])
-    assert plain.exit_code == 70 and "Unexpected error: RuntimeError: kaboom" in plain.output
+    assert plain.exit_code == 70 and "RuntimeError: kaboom" in plain.output and "--debug" in plain.output
     assert "Traceback" not in plain.output
     debug = runner.invoke(cli, ["--debug", "dry-run", "@x"])
     assert "Traceback" in debug.output
@@ -233,7 +235,7 @@ def test_quiet_hides_progress_chatter(runner: CliRunner, fake_channel) -> None:
     fake_channel("a", "b")
     loud = runner.invoke(cli, ["run", "@my", "--no-sync", "--offline"]).output
     quiet = runner.invoke(cli, ["-q", "run", "@my", "--no-sync", "--offline"]).output
-    assert "[1/2]" in loud and "[1/2]" not in quiet
+    assert "Step 1 of 2" in loud and "Step 1 of 2" not in quiet
 
 
 # --- status / login -------------------------------------------------------------------------------
@@ -244,7 +246,7 @@ def test_status_is_offline_and_actionable(runner: CliRunner, monkeypatch: pytest
     result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0
     assert "pip install notebooklm-py" in result.output and "notebook-alchemy login" in result.output
-    assert "GEMINI_API_KEY" in result.output
+    assert "notebook-alchemy setup" in result.output and "AI summaries are off" in result.output
 
 
 def test_login_check_states(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -500,7 +502,7 @@ def test_profile_option_and_env_select_the_profile_for_every_notebooklm_call(
     result = runner.invoke(cli, ["sync", "-n", "chan", "--profile", "work", "--yes"])
     assert result.exit_code == 0, result.output
     assert fake.calls and all(c[1:3] == ["--profile", "work"] for c in fake.calls)
-    assert "Upload account: owner@example.test" in result.output and "profile work" in result.output
+    assert "Uploads go to [owner@example.test] (profile work)" in result.output
 
     fake.calls.clear()
     monkeypatch.setenv("ALCHEMY_NOTEBOOKLM_PROFILE", "work")
@@ -525,22 +527,31 @@ def test_unknown_upload_account_is_shown_as_unknown(
     uploads = _record_uploads(monkeypatch)
     result = runner.invoke(cli, ["sync", "-n", "chan", "--yes"])
     assert result.exit_code == 0, result.output
-    shown = result.output.split("Upload account:")[1].split("\n")[0]
-    assert shown.strip().startswith("unknown") and "did not record" in shown
-    assert "@" not in shown  # nothing guessed
-    assert "login --account" in result.output and uploads == ["chan"]
+    shown = result.output.split("Uploads go to")[1].split("\n")[0]
+    assert "profile [default]" in shown and "@" not in shown  # said plainly, never guessed
+    flat = " ".join(result.output.split())
+    assert "did not record" in flat and "--account <email>" in flat
+    assert uploads == ["chan"]
 
 
 def test_status_shows_account_and_key_state_but_never_the_key(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
 ) -> None:
+    profile_dir = isolated_environment.home / ".notebooklm" / "profiles" / "personal"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "storage_state.json").write_text("{}", encoding="utf-8")
     key = "AIzaSyTEST_ONLY_not_a_real_key_000"
     monkeypatch.setenv("GEMINI_API_KEY", key)
     monkeypatch.setattr(NotebookLMClient, "cli_version", lambda self: "0.8.6")
     result = runner.invoke(cli, ["status", "--profile", "personal"])
     assert result.exit_code == 0, result.output
-    assert "owner@example.test" in result.output and "personal" in result.output
-    assert "subscription plan" in result.output and key not in result.output and key[:10] not in result.output
+    assert "[owner@example.test] (profile personal)" in result.output
+    assert "AI summaries are on" in result.output
+    assert "subscription plan" not in result.output  # billing detail is shown with -v
+    detailed = runner.invoke(cli, ["status", "--profile", "personal", "-v"])
+    assert detailed.exit_code == 0 and "subscription plan" in detailed.output
+    for out in (result.output, detailed.output):
+        assert key not in out and key[:10] not in out
 
 
 def test_first_upload_without_a_terminal_needs_yes(
@@ -567,21 +578,22 @@ def test_first_upload_asks_once_per_account(
     assert declined.exit_code == 1 and "Nothing was uploaded" in declined.output and uploads == []
     assert "owner@example.test" in declined.output
 
+    assert "Do you want to continue (y/N)?" in declined.output
     accepted = runner.invoke(cli, ["sync", "-n", "chan"], input="y\n")
     assert accepted.exit_code == 0, accepted.output
     assert uploads == ["chan"]
     again = runner.invoke(cli, ["sync", "-n", "chan"])  # no input needed the second time
-    assert again.exit_code == 0 and "Upload to this account?" not in again.output
+    assert again.exit_code == 0 and "Do you want to continue" not in again.output
 
     monkeypatch.setattr(
         NotebookLMClient, "upload_account", lambda self: AccountIdentity(self.profile, "new@example.test")
     )
     changed = runner.invoke(cli, ["sync", "-n", "chan"], input="n\n")
-    assert changed.exit_code == 1 and "Upload to this account?" in changed.output
+    assert changed.exit_code == 1 and "Do you want to continue" in changed.output
     assert uploads == ["chan", "chan"]
 
 
-def test_run_asks_before_building_and_shows_key_state(
+def test_run_asks_before_building_and_shows_the_account(
     runner: CliRunner, fake_channel, monkeypatch: pytest.MonkeyPatch, isolated_environment
 ) -> None:
     fake_channel("Build a REST API", "CSS grid tricks")
@@ -589,8 +601,7 @@ def test_run_asks_before_building_and_shows_key_state(
     uploads = _record_uploads(monkeypatch)
     result = runner.invoke(cli, ["run", "@my", "--offline", "-N", "X"])
     assert result.exit_code == 1 and "first upload" in result.output
-    assert "Upload account: owner@example.test" in result.output
-    assert "Gemini API key: not set" in result.output
+    assert "Uploads go to [owner@example.test]." in result.output
     assert uploads == [] and not (isolated_environment.work / "vault").exists()
 
 
@@ -676,7 +687,7 @@ def test_setup_writes_env_without_echoing_the_key_and_reruns(
     # key, profile, sign-in choice, vault
     result = runner.invoke(cli, ["setup"], input=f"{key}\npersonal\nkeep\n{vault}\n")
     assert result.exit_code == 0, result.output
-    assert key not in result.output and "Setup complete" in result.output
+    assert key not in result.output and "Setup is complete" in result.output
     text = env.read_text(encoding="utf-8")
     assert text.startswith("# keep me\nALCHEMY_LOG_LEVEL=INFO\n")
     assert f"GEMINI_API_KEY={key}" in text and "ALCHEMY_NOTEBOOKLM_PROFILE=personal" in text
@@ -686,7 +697,7 @@ def test_setup_writes_env_without_echoing_the_key_and_reruns(
         os.environ.pop(name, None)  # loaded into this process by the first run
     rerun = runner.invoke(cli, ["setup"], input="\n\nkeep\n\n")  # Enter keeps everything
     assert rerun.exit_code == 0, rerun.output
-    assert "Currently: set" in rerun.output and key not in rerun.output
+    assert "A Gemini API key is saved" in rerun.output and key not in rerun.output
     assert env.read_text(encoding="utf-8") == text
 
 
@@ -727,7 +738,7 @@ def test_an_unknown_account_is_asked_about_every_time(
     first = runner.invoke(cli, ["sync", "-n", "chan"], input="y\n")
     assert first.exit_code == 0, first.output
     second = runner.invoke(cli, ["sync", "-n", "chan"], input="n\n")
-    assert second.exit_code == 1 and "Upload to this account?" in second.output
+    assert second.exit_code == 1 and "Do you want to continue" in second.output
     assert uploads == ["chan"]
 
 
@@ -739,7 +750,7 @@ def test_signed_in_email_is_printed_literally(runner: CliRunner, monkeypatch: py
     monkeypatch.setattr(subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "", ""))
     result = runner.invoke(cli, ["login", "--browser-cookies", "edge", "--account", odd])
     assert result.exit_code == 0, result.output
-    assert f"Upload account: {odd}" in result.output
+    assert f"You are now signed in as [{odd}]." in result.output
 
 
 def test_login_refuses_an_account_the_browser_does_not_hold_before_signing_in(
@@ -804,7 +815,7 @@ def test_run_stops_if_the_account_changes_during_the_build(
         NotebookLMClient, "upload_account", lambda self: AccountIdentity(self.profile, next(seen))
     )
     result = runner.invoke(cli, ["run", "@my", "--offline", "-N", "My Notebook", "--yes"])
-    assert result.exit_code == 1 and "changed during the build" in result.output
+    assert result.exit_code == 1 and "changed while the documents were being written" in result.output
     assert "other@example.test" in result.output and uploads == []
 
 
@@ -822,10 +833,10 @@ def test_login_writes_the_session_file_every_other_call_reads(
 
     monkeypatch.setattr(subprocess, "run", ok)
     monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 2))
-    result = runner.invoke(cli, ["login", "--browser-cookies", "edge"])
+    result = runner.invoke(cli, ["login", "--browser-cookies", "edge", "-v"])
     assert result.exit_code == 0, result.output
     assert calls[0][:3] == ["notebooklm", "--storage", str(storage)] and "login" in calls[0]
-    assert "session file" in result.output
+    assert "session file" in result.output  # shown with -v
 
 
 def test_tabs_option_rejects_unknown_tabs(runner: CliRunner) -> None:
@@ -855,4 +866,82 @@ def test_run_says_when_the_plan_is_unknown(
     uploads = _record_uploads(monkeypatch)
     result = runner.invoke(cli, ["run", "@my", "--offline", "-N", "Mine", "--yes"])
     assert result.exit_code == 0, result.output
-    assert "NotebookLM plan: unknown" in " ".join(result.output.split()) and uploads == ["Mine"]
+    assert "Uploads go to [owner@example.test]." in result.output and uploads == ["Mine"]
+    detailed = runner.invoke(cli, ["run", "@my", "--offline", "-N", "Mine", "--yes", "-v"])
+    assert "NotebookLM plan: unknown" in " ".join(detailed.output.split())  # never guessed
+
+
+# --- quiet mode, caption notes and account replacement -----------------------------------------------
+
+
+def test_quiet_still_prints_the_result_and_the_sample_label(runner: CliRunner, isolated_environment) -> None:
+    result = runner.invoke(cli, ["-q", "run", "--mock", "--offline"])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "Wrote 18 documents" in flat and "sample data" in flat and "Step 1" not in flat
+
+
+def test_quiet_first_upload_question_still_names_the_account(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _built_vault(isolated_environment)
+    _record_uploads(monkeypatch)
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, ["-q", "sync", "-n", "chan"], input="n\n")
+    assert "Notebooks will be created in [owner@example.test]." in result.output
+
+
+def test_dry_run_without_a_key_says_so(runner: CliRunner, fake_channel) -> None:
+    fake_channel("Build a REST API", "CSS grid tricks")
+    result = runner.invoke(cli, ["dry-run", "@my"])
+    assert result.exit_code == 0 and "No Gemini API key is set" in " ".join(result.output.split())
+
+
+def test_partly_captioned_and_shortened_summaries_are_reported_without_v(
+    runner: CliRunner, fake_channel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_alchemy.engine import DistillationReport
+
+    fake_channel("Build a REST API", "CSS grid tricks")
+    real = AlchemyEngine.run_distillation
+
+    def with_notes(self, **kw):
+        report = real(self, **kw)
+        report.warnings += [
+            "A (Part 1): 2 of 9 videos had no transcript (title only).",
+            "B (Part 1): 3 transcripts were shortened to 9,000 characters.",
+        ]
+        return report
+
+    assert DistillationReport  # the type the engine returns
+    monkeypatch.setattr(AlchemyEngine, "run_distillation", with_notes)
+    flat = " ".join(runner.invoke(cli, ["run", "@my", "--no-sync", "--offline"]).output.split())
+    assert "1 summary left out videos that had no captions" in flat
+    assert "Long captions were shortened to fit in 1 summary" in flat
+    assert "2 of 9 videos" not in flat  # the per-document line is detail
+
+
+def test_login_asks_before_replacing_another_account(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def notebooklm(cmd, **k):
+        calls.append(k)
+        if k.get("input") == "y\n":
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        question = (
+            "profile 'default' already has auth for old@example.test. Overwrite it with owner@example.test?"
+        )
+        return subprocess.CompletedProcess(cmd, 1, question + "\nAborted!", "")
+
+    monkeypatch.setattr(subprocess, "run", notebooklm)
+    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 1))
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    declined = runner.invoke(cli, ["login", "--browser-cookies", "edge"], input="n\n")
+    assert declined.exit_code == 1 and "Nothing was changed" in declined.output and len(calls) == 1
+    assert calls[0].get("stdin") is subprocess.DEVNULL  # notebooklm's own question cannot wait unseen
+    calls.clear()
+    accepted = runner.invoke(cli, ["login", "--browser-cookies", "edge"], input="y\n")
+    assert accepted.exit_code == 0, accepted.output
+    assert [c.get("input") for c in calls] == [None, "y\n"] and "signed in as" in accepted.output
