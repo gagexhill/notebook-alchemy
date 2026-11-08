@@ -34,7 +34,6 @@ LOW_KEEP_SHARE = 0.2  # below this share of kept chunks a video is labelled once
 WINDOW_WORDS = 70_000  # a very long video is labelled in windows of about this many words
 # When the model also returns punctuated text, its answer is about as long as the window.
 PUNCTUATE_WINDOW_WORDS = 5_000
-PUNCTUATE_MIN_MATCH = 0.98  # share of words that must come back unchanged, else the raw text is used
 PUNCTUATE_ALIGN_MIN = 0.8  # below this the model's text is not the same passage, and is not used
 NOTE_MAX_WORDS = 25
 HEADLINE_MAX_WORDS = 14
@@ -247,20 +246,8 @@ def parse_labels(text: str, numbers: set[int]) -> tuple[list[Segment], int]:
 _NORM_RE = re.compile(r"[^\w$%']+")
 
 
-def _norm_words(text: str) -> list[str]:
-    return [w for w in _NORM_RE.sub(" ", text.lower()).split() if w]
-
-
 def _norm(word: str) -> str:
     return _NORM_RE.sub("", word.lower())
-
-
-def same_words(original: str, punctuated: str) -> bool:
-    """True when the punctuated text keeps the original's words (punctuation and case aside)."""
-    a, b = _norm_words(original), _norm_words(punctuated)
-    if not a or not b:
-        return False
-    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= PUNCTUATE_MIN_MATCH
 
 
 def apply_punctuation(original: str, punctuated: str) -> str:

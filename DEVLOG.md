@@ -4,10 +4,17 @@ Completed material decisions, newest first. Current work is in GitHub issues.
 
 ## Topic books from every word (0.3.0, 2026-11-08)
 
+- **Books grow without reshuffling.**
+  - Before: new subjects fell into Miscellaneous until 20% growth rebuilt the topic map, which moved passages and re-uploaded every book.
+  - Now: passages that fit nowhere extend the map once (new sections or topics; nothing existing is renamed); each passage's section is stored by name; a section past 200 passages is divided once into named subsections. Only `--resort` rebuilds.
+  - Only books whose text changed are uploaded (a content hash in the upload record), and a long topic's sections stay in their part, so one growing section does not re-upload every part.
+  - NotebookLM's own append only adds text at the end of a source, so a passage that belongs mid-book needs the whole book replaced; changed-only upload keeps that to the books that changed.
+- **`export-state` / `import-state`** move the working files to another computer as a zip. Import checks every member (known folders, safe names, JSON objects, size) before writing any, and keeps this computer's files unless `--replace`.
+
 - **The sources are the speakers' own words, not summaries.**
   - What went wrong: in a live run on a 754-video channel, 22 of 28 sources were title lists (YouTube blocked captions and the run stopped asking) and 6 were short briefs, one written from a single transcript.
   - Why it mattered: NotebookLM answers from the text it is given, so that gave it almost nothing.
-  - Now: every video's words are read, repeated passages are kept once (newest copy), and Gemini only labels, files and orders passages. Its punctuation is used only when `same_words` confirms the words are unchanged.
+  - Now: every video's words are read, repeated passages are kept once (newest copy), and Gemini only labels, files and orders passages. Its punctuation is copied onto the original words (`apply_punctuation`): every word stays, in order, and a word the model added is never used.
 - **Gemini returns labels by chunk number, not text.**
   - Each answer is a few percent of the transcript.
   - Every paid answer is cached by what it saw: transcript + prompt version + model for labels; passages and taxonomy for placement; section contents + month for consolidation.
