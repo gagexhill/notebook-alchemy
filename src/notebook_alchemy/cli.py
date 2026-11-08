@@ -42,6 +42,7 @@ from .config import (
 )
 from .engine import AlchemyEngine, BuildReport
 from .errors import AlchemyError, ConfigError, NotebookLMError, SessionError
+from .keepalive import INTERVAL_MINUTES, KeepAlive, KeepAliveState
 from .state import export_state, import_state
 from .ui import esc, handle_errors
 from .writer import OVERVIEW_TITLE
@@ -612,6 +613,13 @@ def status(profile: str | None) -> None:
             line(True, f"Uploads go to {ui.name(identity.email)}{where}.")
         else:
             line(False, f"Signed in to NotebookLM{where}, but the Google account was not recorded.")
+        try:
+            line(*_keepalive_line(_keepalive(engine).state()))
+        except AlchemyError as exc:
+            line(
+                False,
+                f"Could not read whether the sign-in is refreshed in the background: {esc(exc.message)}",
+            )
     if has_key:
         line(True, "AI sorting is on (a Gemini API key is set).")
     else:
@@ -814,6 +822,12 @@ def _sign_in(
 @click.option("--fresh", is_flag=True, help="Open the sign-in window without earlier browser data.")
 @click.option("--check", is_flag=True, help="Check the saved sign-in without signing in again.")
 @click.option(
+    "--keep-signed-in/--no-keep-signed-in",
+    "keep",
+    default=None,
+    help="Refresh the sign-in in the background so it does not expire between runs (asked if not given).",
+)
+@click.option(
     "--timeout",
     type=click.IntRange(min=30),
     default=300,
@@ -829,6 +843,7 @@ def login(
     account: str | None,
     fresh: bool,
     check: bool,
+    keep: bool | None,
     timeout: int,
     profile: str | None,
 ) -> None:
@@ -851,6 +866,77 @@ def login(
         timeout=timeout,
         fresh=fresh,
     )
+    _offer_keep_signed_in(_engine(profile), keep)
+
+
+def _keepalive(engine: AlchemyEngine) -> KeepAlive:
+    return KeepAlive(engine.client.profile, engine.home)
+
+
+def _offer_keep_signed_in(engine: AlchemyEngine, keep: bool | None) -> None:
+    """After a sign-in: switch the background refresh on, unless the user says no."""
+    keeper = _keepalive(engine)
+    if keep is None:
+        if keeper.state().on:
+            return  # already on for this profile; nothing to ask
+        if not _interactive():
+            ui.next_command("keep this sign-in from expiring between runs", "notebook-alchemy keep-signed-in")
+            return
+        ui.console.print(
+            "Google ends an idle sign-in within hours. Notebook Alchemy can refresh it every "
+            f"{INTERVAL_MINUTES} minutes in the background, so later runs work without signing in again."
+        )
+        keep = _ask("Do you want to keep this sign-in fresh", default=True)
+    if keep:
+        kind = keeper.enable()
+        ui.success("The sign-in is refreshed in the background.")
+        ui.detail(f"  {kind} runs `notebooklm auth refresh` every {INTERVAL_MINUTES} minutes.")
+    elif keeper.disable():
+        ui.success("The background refresh is off.")
+
+
+def _keepalive_line(state: KeepAliveState) -> tuple[bool, str]:
+    if not state.on:
+        return False, "The sign-in is not refreshed in the background, so it can expire between runs."
+    if state.last_ok is None:
+        return True, "The sign-in is refreshed in the background (no refresh has run yet)."
+    when = ui.ago(state.last_at)
+    if state.last_ok:
+        return True, f"The sign-in is refreshed in the background (last refresh {when}, it worked)."
+    return False, (
+        f"The background refresh is on, but the last one ({when}) failed: {esc(state.last_detail)} "
+        "Sign in again with `notebook-alchemy login`."
+    )
+
+
+@cli.command(
+    name="keep-signed-in",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy keep-signed-in              refresh the sign-in every 20 minutes\n"
+        "  notebook-alchemy keep-signed-in --off        stop refreshing it\n"
+        "  notebook-alchemy keep-signed-in -p personal  for the profile named personal\n"
+    ),
+)
+@click.option("--off", is_flag=True, help="Stop refreshing the sign-in in the background.")
+@profile_option
+@verbose_option
+@handle_errors
+def keep_signed_in(off: bool, profile: str | None) -> None:
+    """Refresh the NotebookLM sign-in in the background so it does not expire between runs."""
+    engine = _engine(profile)
+    if off:
+        if _keepalive(engine).disable():
+            ui.success("The background refresh is off.")
+        else:
+            ui.success("The background refresh was already off.")
+        return
+    if not engine.client.is_authenticated():
+        raise SessionError(
+            "Not signed in to NotebookLM yet, so there is no sign-in to keep.",
+            hint="Run `notebook-alchemy login` first.",
+        )
+    _offer_keep_signed_in(engine, True)
 
 
 @cli.command(
@@ -1149,7 +1235,7 @@ def clean_pipeline(
         records_dir = engine.sync_records_dir()
         for f in sorted(records_dir.glob("*.json")) if records_dir.is_dir() else []:
             (targets.append(("record", f)) if _is_sync_record(f) else skipped.append(str(f)))
-        for f in (consent_file(), engine.notebooks_path()):
+        for f in (consent_file(), engine.notebooks_path(), engine.home / "keepalive.json"):
             if f.is_file():
                 targets.append(("record", f))
     if do_vaults:

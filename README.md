@@ -104,6 +104,7 @@ link       yt-dlp   captions,  filler,   Gemini,   topics,  order, dupes,    pla
 | Without AI | `notebook-alchemy run <url> --offline` | YouTube, NotebookLM | One notebook | You want every word, sorted by title, at no API cost |
 | Try it | `notebook-alchemy run --mock --save books` | Nothing | `books/` | You want to see the output before pointing it at a channel |
 | Self-test | `notebook-alchemy test` | Nothing | A temporary folder | You want to check that everything installed correctly |
+| Stay signed in | `notebook-alchemy keep-signed-in` (`--off` to stop) | NotebookLM, every 20 minutes | A scheduled task for your user | You run it now and then and do not want to sign in again each time |
 | Move computers | `notebook-alchemy export-state FILE`, then `import-state FILE` | Nothing | A zip, then `~/.notebook-alchemy/` | You want to carry on from another computer without paying again |
 | Set up | `notebook-alchemy setup` | `notebooklm` login, only if you sign in | `.env` | You want to set the Gemini key or the upload account; run it again to change either |
 
@@ -143,6 +144,7 @@ src/notebook_alchemy/
 ├── writer.py       # The topic books and the overview
 ├── offline.py      # The no-key path: every video's words, sorted by title words
 ├── state.py        # export-state / import-state: the working files, moved as a checked zip
+├── keepalive.py    # keep-signed-in: the scheduled `notebooklm auth refresh`, per profile
 ├── gemini.py       # Gemini client: header auth, retries, batch mode, scrubbed errors, price table
 ├── client.py       # NotebookLM through the `notebooklm` command, with checked results
 ├── config.py       # Environment and .env settings
@@ -277,6 +279,8 @@ notebook-alchemy login --browser-cookies chrome --account you@example.com --prof
 
 `notebook-alchemy login` on its own opens a sign-in window instead; it needs a browser for Playwright, installed once with `python -m playwright install chromium`.
 
+Google ends a sign-in that sits idle for a few hours. After signing in, `login` offers to refresh it in the background every 20 minutes (a Task Scheduler task on Windows, a launchd agent on macOS, a systemd user timer or cron on Linux), so the next run still works. `notebook-alchemy keep-signed-in --off` removes it, and `status` shows when it last ran and whether it worked.
+
 Then preview and build:
 
 ```bash
@@ -312,6 +316,7 @@ Everything stays on your machine. `notebook-alchemy clean --all` removes the wor
 | `~/.notebook-alchemy/knowledge/`, `library/` | Gemini's labels, topics, placements and section orders, so reruns cost nothing | `clean --labels` |
 | `~/.notebook-alchemy/sync/`, `notebooks.json`, `upload_accounts.json`, `batch.json` | What the last upload added, which notebook each channel uses, a salted hash of the account you confirmed uploads to (not the email), and a running batch job | `clean --records` |
 | `~/.notebooklm/profiles/<profile>/` | The Google sign-in, kept by the `notebooklm` command | `notebooklm auth logout` |
+| Your system scheduler, and `~/.notebook-alchemy/keepalive.json` | The 20-minute sign-in refresh (only if you turned it on) and when it last ran | `keep-signed-in --off`; `clean --records` |
 | Your NotebookLM account | The notebook itself, and the "Notebook Alchemy workspace" notebook used to read blocked videos (left empty after each run) | Delete them in NotebookLM |
 
 `notebook-alchemy export-state FILE` copies the cache, `knowledge/`, `library/`, `sync/` and `notebooks.json` into one zip; `import-state FILE` on another computer carries on from there. Sign-ins, the key and the upload confirmation are not included.
