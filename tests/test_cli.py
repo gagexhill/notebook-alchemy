@@ -696,6 +696,24 @@ def test_run_uploads_and_reports(
     assert "Created notebook [My Notebook]." in result.output and "notebooklm.google.com" in result.output
 
 
+def test_a_rerun_with_nothing_changed_says_the_notebook_is_up_to_date(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("Build a REST API")
+    monkeypatch.setattr(
+        AlchemyEngine,
+        "publish",
+        lambda self, title, books, channel_key=None, progress=None: SyncResult(
+            "nb-1", False, 0, 0, unchanged=len(books)
+        ),
+    )
+    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 1))
+    result = runner.invoke(cli, [*RUN, "-N", "My Notebook", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Notebook [My Notebook] is already up to date." in result.output
+    assert "Updated notebook" not in result.output
+
+
 def test_an_upload_failure_exits_non_zero_and_lists_each_book(
     runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
 ) -> None:

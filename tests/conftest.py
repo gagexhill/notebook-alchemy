@@ -116,9 +116,11 @@ class FakeNotebookLM:
         ]
         return nb_id
 
+    def notebook_id(self, notebook_title: str) -> str:
+        return next(n["id"] for n in self.notebooks if n["title"] == notebook_title)
+
     def titles(self, notebook_title: str) -> list[str]:
-        nb_id = next(n["id"] for n in self.notebooks if n["title"] == notebook_title)
-        return sorted(s["title"] for s in self.sources[nb_id])
+        return sorted(s["title"] for s in self.sources[self.notebook_id(notebook_title)])
 
     def _new_id(self, prefix: str) -> str:
         self._n += 1

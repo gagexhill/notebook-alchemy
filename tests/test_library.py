@@ -323,6 +323,47 @@ def test_a_topic_longer_than_one_source_is_split_into_parts() -> None:
     assert all(b.words <= SOURCE_WORD_LIMIT + 2000 for b in books)  # the heading and intro aside
 
 
+def _sized(name: str, words: int) -> Section:
+    return Section(
+        name,
+        passages=[_passage(f"{name.lower()}{i}:1", text="word " * 50_000) for i in range(words // 50_000)],
+    )
+
+
+def test_a_section_stays_in_its_part_and_a_new_section_goes_to_the_last_part() -> None:
+    parts: dict[str, int] = {}
+    first = render_topic(
+        Topic("T", [_sized("A", 200_000), _sized("B", 200_000), _sized("C", 100_000)]), "C", {}, set(), parts
+    )
+    assert parts == {"A": 1, "B": 1, "C": 2} and len(first) == 2
+    # D sits between A and B in the topic's order, but a new section never pushes into an earlier part.
+    again = render_topic(
+        Topic("T", [_sized("A", 200_000), _sized("D", 50_000), _sized("B", 200_000), _sized("C", 100_000)]),
+        "C",
+        {},
+        set(),
+        parts,
+    )
+    assert again[0].content == first[0].content  # Part 1 is unchanged, so it is not uploaded again
+    assert parts == {"A": 1, "B": 1, "D": 2, "C": 2}
+    assert again[1].content.index("## D") < again[1].content.index("## C")  # topic order within a part
+
+
+def test_a_part_that_grows_past_the_limit_moves_only_its_last_section_on() -> None:
+    parts = {"A": 1, "B": 1, "C": 2}
+    books = render_topic(
+        Topic("T", [_sized("A", 300_000), _sized("B", 200_000), _sized("C", 100_000)]), "C", {}, set(), parts
+    )
+    assert parts == {"A": 1, "B": 2, "C": 2} and [b.title for b in books] == ["T", "T (Part 2)"]
+    assert all(b.words <= SOURCE_WORD_LIMIT + 2000 for b in books)
+
+
+def test_parts_are_numbered_without_gaps_when_one_empties() -> None:
+    parts = {"A": 1, "B": 2, "C": 3}
+    books = render_topic(Topic("T", [_sized("A", 100_000), _sized("C", 100_000)]), "C", {}, set(), parts)
+    assert [b.title for b in books] == ["T", "T (Part 2)"] and parts == {"A": 1, "C": 2}
+
+
 def test_punctuation_is_copied_onto_the_speakers_words_and_nothing_else_changes() -> None:
     raw = "it comes to partnership this is important so for example with this company we partnered"
     model = (
