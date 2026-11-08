@@ -302,7 +302,7 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
     type=click.IntRange(min=1),
     default=DEFAULT_MAX_PER_VOLUME,
     show_default=True,
-    help="Most videos per compendium volume.",
+    help="Most videos per compendium; a larger domain is split into named subtopics.",
 )
 @click.option("--write/--preview-only", default=True, help="Write the vault (default) or preview only.")
 @click.option("--sync/--no-sync", default=True, help="Upload to NotebookLM (default) or build locally.")
@@ -351,7 +351,7 @@ def run_pipeline(
     ui.step(1, total_steps, "Discover and group videos")
     with ui.Reporter() as reporter:
         report = engine.analyzer_for(offline).generate_dry_run(
-            target, use_mock=mock, limit=limit, tabs=tabs, progress=reporter
+            target, use_mock=mock, limit=limit, tabs=tabs, max_per_section=max_per_vol, progress=reporter
         )
     if report.is_mock:
         ui.banner("Sample data", MOCK_NOTE)

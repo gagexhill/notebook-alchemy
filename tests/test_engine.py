@@ -45,7 +45,8 @@ def _real_dir(tmp_path: Path, names: tuple[str, ...] = ("Alpha_Topics", "Beta_To
     d.mkdir(parents=True)
     for n in names:
         (d / f"{n}.md").write_text(
-            f'---\ndomain: "{n}"\nvolume: 1\nsource_count: 1\n---\n# {n}\n', encoding="utf-8"
+            f'---\ndomain: "{n.replace("_", " ")}"\nvolume: 1\nsource_count: 1\n---\n# {n}\n',
+            encoding="utf-8",
         )
     return d
 
@@ -404,7 +405,8 @@ def _write_set(tmp_path: Path, names: tuple[str, ...]) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     for n in names:
         (directory / f"{n}.md").write_text(
-            f'---\ndomain: "{n}"\nvolume: 1\nsource_count: 1\n---\n# {n}\n', encoding="utf-8"
+            f'---\ndomain: "{n.replace("_", " ")}"\nvolume: 1\nsource_count: 1\n---\n# {n}\n',
+            encoding="utf-8",
         )
     return directory
 
@@ -460,3 +462,26 @@ def test_missing_transcripts_are_summarised_once_for_the_whole_run(engine: Alche
     assert "40 videos" in lines[0] and "2 of 3 volumes" in lines[1]
     engine.transcripts.blocked_total = 0
     assert engine._transcript_summary(comps[2:]) == []
+
+
+def test_source_titles_come_from_the_domain_name_not_the_file_name(tmp_path: Path) -> None:
+    d = tmp_path / "c"
+    d.mkdir()
+    (d / "SAMgov_Registration.md").write_text(
+        '---\ndomain: "SAM.gov Registration"\nvolume: 1\n---\n', encoding="utf-8"
+    )
+    (d / "Big_Vol_2.md").write_text('---\ndomain: "Big: Pricing"\nvolume: 2\n---\n', encoding="utf-8")
+    (d / "_INDEX.md").write_text("# index", encoding="utf-8")
+    assert AlchemyEngine._source_title_for(d / "SAMgov_Registration.md") == "SAM.gov Registration"
+    assert AlchemyEngine._source_title_for(d / "Big_Vol_2.md") == "Big: Pricing (Part 2)"
+    assert AlchemyEngine._source_title_for(d / "_INDEX.md") == "_INDEX"
+
+
+def test_the_upload_keeps_characters_a_file_name_cannot(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    d = _real_dir(tmp_path, ("Alpha_Topics",))
+    (d / "SAMgov_Registration.md").write_text(
+        '---\ndomain: "SAM.gov Registration"\nvolume: 1\nsource_count: 1\n---\n', encoding="utf-8"
+    )
+    _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", d)
+    assert "SAM.gov Registration" in fake.titles("Chan")

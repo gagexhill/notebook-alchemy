@@ -24,6 +24,12 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   `QuotaFailure` / `RetryInfo` details; every `CouldNotRetrieveTranscript` reason (including ones a
   later library adds) is classified; `PoTokenRequired` counts as blocked and stops the run's remaining
   caption requests.
+- **Large domains become named subtopics, not numbered volumes.** A live upload showed eleven
+  "Government Contracting Fundamentals Vol N" sources that told a reader nothing. A domain larger than
+  `--max-per-vol` is now split into subtopics named from its own titles (Gemini: discovered, then every
+  title assigned by number; offline: grouped by distinctive title words), and NotebookLM titles come
+  from the compendium's domain name, so "SAM.gov" keeps its dot. Cost: one request to name a domain's
+  subtopics plus one per 150 of its titles, shown in the dry-run request count.
 - **Channels include live streams.** A channel URL reads the Videos and Live tabs (`--tabs`; Shorts on
   request). Live streams are long and captioned; Shorts are usually under a minute. A live test showed
   why: a channel YouTube lists at 1.1K items had 508 videos, 246 streams and 440 Shorts, and the

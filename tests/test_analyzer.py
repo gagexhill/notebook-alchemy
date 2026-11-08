@@ -25,8 +25,9 @@ class FakeGemini:
 
     model = "fake"
 
-    def __init__(self, domains=None, assign=None, fail_at: int | None = None) -> None:
+    def __init__(self, domains=None, assign=None, fail_at: int | None = None, subtopics=None) -> None:
         self.domains = domains or ["Alpha Topics", "Beta Topics", "Gamma Topics"]
+        self.subtopics = subtopics or ["First Angle", "Second Angle", "Third Angle"]
         self.assign = assign or (lambda idx, k: idx % k)
         self.fail_at = fail_at
         self.prompts: list[str] = []
@@ -42,12 +43,16 @@ class FakeGemini:
             raise GeminiError("boom")
         if "Name " in prompt and "subject domains" in prompt:
             return GeminiResult(json.dumps({"domains": self.domains}), "STOP")
+        if "subtopics within it" in prompt:
+            return GeminiResult(json.dumps({"subtopics": self.subtopics}), "STOP")
+        listed = prompt.split("Titles:\n")[0]
+        categories = sum(1 for line in listed.splitlines() if line.split(":", 1)[0].isdigit())
         numbers = [
             int(line.split(":", 1)[0])
             for line in prompt.split("Titles:\n")[1].splitlines()
             if ":" in line and line.split(":", 1)[0].isdigit()
         ]
-        mapping = {str(n): self.assign(n, len(self.domains)) for n in numbers}
+        mapping = {str(n): self.assign(n, categories or len(self.domains)) for n in numbers}
         return GeminiResult(json.dumps({"assignments": mapping}), "STOP")
 
 
@@ -246,3 +251,61 @@ def test_notebook_sources_keep_only_youtube_videos_under_their_youtube_id() -> N
     videos, others = NotebookAnalyzer._summaries_from_sources(sources)
     assert [v.source_id for v in videos] == ["abcdefghijk", "bcdefghijkl"]
     assert [o["id"] for o in others] == ["uuid-3", "uuid-4"]
+
+
+# --- named subtopics instead of numbered volumes --------------------------------------------------
+
+
+def _big_domain_titles(n: int = 120) -> list[str]:
+    return [f"Talk {i} about {('pricing', 'hiring', 'taxes')[i % 3]} for founders" for i in range(n)]
+
+
+def test_a_large_domain_is_split_into_named_subtopics_by_gemini() -> None:
+    fake = FakeGemini(domains=["Alpha Topics", "Beta Topics"], assign=lambda idx, k: 0)  # all in Alpha
+    analyzer = _analyzer(gemini=fake)
+    analyzer.max_per_section = 50
+    titles = _big_domain_titles(120)
+    analyzer.cluster_method = "gemini"
+    groups = analyzer._split_large_domains(titles, {"Alpha Topics": list(range(120))}, None)
+    assert set(groups) <= {f"Alpha Topics: {s}" for s in fake.subtopics}
+    assert sorted(i for ids in groups.values() for i in ids) == list(range(120))  # every title once
+    assert analyzer.split_requests == 2  # one to name subtopics, one assignment batch
+    assert not any("Vol" in name for name in groups)
+
+
+def test_a_small_domain_is_not_split() -> None:
+    analyzer = _analyzer(gemini=FakeGemini())
+    analyzer.cluster_method = "gemini"
+    assert analyzer._split_large_domains(["a", "b"], {"Alpha": [0, 1]}, None) == {"Alpha": [0, 1]}
+    assert analyzer.split_requests == 0
+
+
+def test_a_failed_gemini_split_falls_back_to_title_words_and_says_so() -> None:
+    analyzer = _analyzer(gemini=FakeGemini(fail_at=1))
+    analyzer.max_per_section = 50
+    analyzer.cluster_method = "gemini"
+    groups = analyzer._split_large_domains(_big_domain_titles(), {"Alpha": list(range(120))}, None)
+    assert len(groups) > 1 and all(name.startswith("Alpha: ") for name in groups)
+    assert any("Could not split 'Alpha'" in note for note in analyzer.notes)
+
+
+def test_word_groups_are_named_by_what_sets_them_apart() -> None:
+    groups = NotebookAnalyzer._subtopics_by_words("Founder Advice", _big_domain_titles(120), 50)
+    names = " ".join(groups)
+    assert "Pricing" in names and "Hiring" in names and "Taxes" in names
+    assert "Founder" not in names and "Advice" not in names  # the domain's own words name nothing
+    assert all(len(ids) <= 50 for ids in groups.values())
+    assert sorted(i for ids in groups.values() for i in ids) == list(range(120))
+
+
+def test_the_dry_run_report_holds_named_subtopics_not_numbered_volumes() -> None:
+    analyzer = _analyzer(key="", offline=True)
+    report = analyzer.generate_dry_run("x", use_mock=True, max_per_section=20)
+    assert any(": " in name for name in report.domain_videos)  # large domains were split
+    assert all(len(v) <= 20 or ": " in d for d, v in report.domain_videos.items())
+
+
+def test_a_domain_s_own_words_never_name_its_subtopics() -> None:
+    titles = _big_domain_titles(120)
+    groups = NotebookAnalyzer._subtopics_by_words("Pricing Insights", titles, 50)
+    assert not any("Pricing" in name for name in groups)

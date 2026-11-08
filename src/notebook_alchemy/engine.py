@@ -200,7 +200,11 @@ class AlchemyEngine:
             )
         self.analyzer.force_offline = force_offline
         report = dry_run or self.analyzer.generate_dry_run(
-            notebook_query, use_mock=use_mock, limit=limit, progress=progress
+            notebook_query,
+            use_mock=use_mock,
+            limit=limit,
+            max_per_section=max_videos_per_volume,
+            progress=progress,
         )
         if not report.youtube_videos:
             raise AlchemyError(
@@ -393,7 +397,7 @@ class AlchemyEngine:
         # few at a time. Results are gathered in file order, so the outcome does not depend on
         # which call finishes first; titles are corrected only after every wait has finished.
         def add(md_file: Path) -> tuple[str, str | None, str | None]:
-            title = source_title(md_file.stem)
+            title = self._source_title_for(md_file)
             content = md_file.read_text(encoding="utf-8")
             try:
                 source_id = self.client.add_source_document(
@@ -485,6 +489,19 @@ class AlchemyEngine:
         return SyncResult(nb_id, created, len(new_ids), replaced, pruned)
 
     # -- append --
+
+    @classmethod
+    def _source_title_for(cls, path: Path) -> str:
+        """The NotebookLM title: the compendium's own domain name, with its part number after the first.
+
+        Taken from the file's frontmatter, because a file name loses characters ("SAM.gov" becomes
+        "SAMgov"). The index and catalog, which have no domain, use their file names.
+        """
+        found = cls._read_domain(path)
+        if not found:
+            return source_title(path.stem)
+        domain, volume = found
+        return domain if volume <= 1 else f"{domain} (Part {volume})"
 
     @staticmethod
     def _read_domain(path: Path) -> tuple[str, int] | None:
