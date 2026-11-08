@@ -388,3 +388,30 @@ def test_a_failed_request_adds_no_usage() -> None:
     with pytest.raises(GeminiError):
         client.generate("a")
     assert client.usage() == []
+
+
+def test_watch_sends_the_video_in_the_body_with_the_key_in_the_header() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=_ok("so the first thing you do is register"))
+
+    client = _client(handler, model="gemini-3.8-flash", fallback_model="gemini-2.5-flash")
+    url = "https://www.youtube.com/watch?v=abcdefghijk"
+    result = client.watch(url, "Write down what is said.")
+    assert result.text == "so the first thing you do is register"
+    request = seen[0]
+    body = json.loads(request.content)
+    assert body["contents"][0]["parts"][0] == {"fileData": {"fileUri": url}}
+    assert body["contents"][0]["parts"][1] == {"text": "Write down what is said."}
+    assert "abcdefghijk" not in str(request.url) and "key=" not in str(request.url)
+    assert request.headers["x-goog-api-key"] == KEY and "gemini-3.8-flash" in str(request.url)
+    assert client.usage()[0][0] == "gemini-3.8-flash"
+
+
+def test_watch_cost_is_about_fifteen_cents_for_half_an_hour() -> None:
+    from notebook_alchemy.gemini import watch_cost
+
+    cost = watch_cost(30 * 60, "gemini-3.8-flash", datetime.date(2026, 11, 8))
+    assert 0.10 < cost < 0.20

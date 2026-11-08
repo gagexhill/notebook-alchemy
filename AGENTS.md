@@ -42,7 +42,9 @@ to propose a change; this file covers what a change must keep true.
   upload, and not kept. A local copy is made only with `run --save DIR`. Working files (captions,
   labels, sorting answers, upload records) live under `~/.notebook-alchemy/` and `clean` removes them.
 - The books hold the speakers' own words. Gemini labels, sorts and orders passages; it never writes the
-  passages. Punctuation it adds is copied onto the original words by `knowledge.apply_punctuation`,
+  passages. The one exception is opt-in `run --watch N`: for a video no route could read, Gemini writes
+  down what is said from the video itself; those words are cached like captions and every such video is
+  named in the overview. Punctuation it adds is copied onto the original words by `knowledge.apply_punctuation`,
   which keeps every original word in order and never takes a word the model added. A kept chunk the
   model leaves unlabelled is kept, never dropped.
 - Every paid Gemini answer is cached by what the request saw (transcript, prompt version and model;

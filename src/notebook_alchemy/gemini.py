@@ -35,6 +35,11 @@ PRICING_USD_PER_M: dict[str, tuple[tuple[datetime.date, float, float], ...]] = {
 }
 # An unlisted model is estimated at the default model's rate, so the estimate errs high.
 FALLBACK_PRICING_MODEL = "gemini-3.8-flash"
+# Reading a YouTube video directly (`watch`): about 100 tokens per second of video, frames at one
+# per second plus audio (aistudio.google.com/docs/video-understanding, read 2026-11-08). Public videos
+# only; the free tier reads up to 8 hours of YouTube video a day.
+WATCH_TOKENS_PER_SECOND = 100
+WATCH_MAX_OUTPUT_TOKENS = 32768
 BATCH_PRICE_FACTOR = 0.5  # batch mode bills half the standard rate (aistudio.google.com/docs/batch-api)
 BATCH_SUFFIX = " (batch)"
 THINKING_NOTE = "Thinking tokens bill as output and are not in the output estimate."
@@ -46,6 +51,14 @@ def _rates_on(model: str, day: datetime.date) -> tuple[float, float]:
     current = [e for e in entries if e[0] <= day] or [entries[0]]
     _start, low, high = current[-1]
     return low, high
+
+
+def watch_cost(seconds: int, model: str, day: datetime.date | None = None) -> float:
+    """Roughly what reading `seconds` of video with `watch` costs in USD (input; the words written
+    back are a few thousand tokens more)."""
+    price_in, price_out, _note = price_for(model, day)
+    words_out = seconds * 2.5  # people speak about 150 words a minute
+    return (seconds * WATCH_TOKENS_PER_SECOND * price_in + words_out * 1.4 * price_out) / 1e6
 
 
 def price_for(model: str, day: datetime.date | None = None) -> tuple[float, float, str | None]:
@@ -214,6 +227,25 @@ class GeminiClient:
             self._record_usage(result)
             return result
         raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
+
+    def watch(self, video_url: str, prompt: str, *, timeout: float | None = None) -> GeminiResult:
+        """One answer about a public YouTube video, which Gemini reads itself (sound and pictures).
+
+        Only the configured model answers (its output is cached as the video's words), and the URL
+        goes in the request body, never in the request's own URL.
+        """
+        body = self._body(
+            self.model,
+            prompt,
+            system=None,
+            json_mode=False,
+            max_output_tokens=WATCH_MAX_OUTPUT_TOKENS,
+            temperature=0.0,
+        )
+        body["contents"][0]["parts"].insert(0, {"fileData": {"fileUri": video_url}})
+        result = self._call(self.model, body, self._retries, timeout or max(self._timeout, 600))
+        self._record_usage(result)
+        return result
 
     def _record_usage(self, result: GeminiResult, *, batch: bool = False) -> None:
         with self._usage_lock:

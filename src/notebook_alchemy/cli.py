@@ -355,6 +355,13 @@ def cli(ctx: click.Context, quiet: bool, verbose: int, no_color: bool, debug: bo
 )
 @click.option("--resort", is_flag=True, help="Rebuild the topics and sections from scratch.")
 @click.option(
+    "--watch",
+    type=click.IntRange(min=1),
+    default=None,
+    metavar="N",
+    help="Let Gemini watch up to N videos no caption route could read (paid; about $0.15 per 30 minutes).",
+)
+@click.option(
     "--cookies",
     "cookies_browser",
     type=click.Choice(COOKIE_BROWSERS),
@@ -425,12 +432,15 @@ def run_pipeline(
     mock: bool,
     now: bool,
     resort: bool,
+    watch: int | None,
     cookies_browser: str | None,
     yes: bool,
     profile: str | None,
 ) -> None:
     """Build topic books from a YouTube channel, playlist or video, and upload them to NotebookLM."""
     target = _source_or_mock(source, mock)
+    if watch and (offline or mock):
+        raise click.UsageError("--watch uses Gemini, so it cannot be combined with --offline or --mock.")
     config = _config(profile)
     if cookies_browser:
         config.cookies_browser = cookies_browser
@@ -467,6 +477,7 @@ def run_pipeline(
             offline=offline,
             resort=resort,
             use_batch=not now,
+            watch=watch or 0,
             progress=reporter,
         )
     _show_build(report, engine)
@@ -511,6 +522,9 @@ def run_pipeline(
 def _show_build(report: BuildReport, engine: AlchemyEngine) -> None:
     videos = len(report.videos)
     ui.info(f"  {esc(report.channel)}: read {len(report.read)} of {_plural(videos, 'video')}")
+    if report.by_source.get("gemini-video"):
+        watched = _plural(report.by_source["gemini-video"], "video")
+        ui.info(f"  Gemini watched {watched} no caption route could read")
     for route, count in sorted(report.by_source.items()):
         ui.detail(f"  {route}: {count}")
     if report.used_ai:

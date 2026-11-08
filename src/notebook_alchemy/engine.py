@@ -55,6 +55,16 @@ SORTING_SHARE = 0.15  # sorting and consolidation, as a share of the labelling c
 
 # `notebooklm` processes run at once during an upload. Kept small to stay clear of rate limits.
 SYNC_WORKERS = 3
+# --watch: Gemini watches a video no route could read and writes down what is said.
+WATCH_MAX_MINUTES = 90
+NO_SPEECH = "NO_SPEECH"
+WATCHED = "gemini-video"  # the cache's method for words Gemini wrote down from the video
+WATCH_PROMPT = (
+    "Write down everything that is said in this video, word for word, in the order it is said. "
+    "Plain text only: no timestamps, no speaker names, no description of what is shown, no summary, "
+    "and nothing added. Keep the speakers' own words, including how they phrase things. "
+    f"If nobody speaks, answer only {NO_SPEECH}."
+)
 # In the library cache: topic -> section -> the part of the topic book it is in.
 PARTS_KEY = "parts"
 
@@ -274,6 +284,7 @@ class AlchemyEngine:
         offline: bool = False,
         resort: bool = False,
         use_batch: bool = True,
+        watch: int = 0,
         progress: ProgressFn | None = None,
     ) -> BuildReport:
         channel, videos = self.scan(source, limit=limit, tabs=tabs, mock=mock)
@@ -281,6 +292,7 @@ class AlchemyEngine:
         notices: list[str] = []
 
         # 2. words
+        watched: set[str] = set()  # words Gemini wrote down by watching the video, named in the overview
         if mock:
             texts = {v.id: sample_transcript({"title": v.title}) for v in videos}
             exact: set[str] = set()
@@ -292,6 +304,7 @@ class AlchemyEngine:
             )
             texts = {vid: r.text for vid, r in results.items() if r.text}
             exact = {vid for vid, r in results.items() if r.published}
+            watched = {vid for vid, r in results.items() if r.text and r.method == WATCHED}
             for v in videos:  # an exact date from yt-dlp replaces the listing's approximate one
                 if results.get(v.id) and results[v.id].published:
                     v.published = results[v.id].published
@@ -302,6 +315,10 @@ class AlchemyEngine:
                     f"YouTube wouldn't share words for {self.transcripts.blocked_total} videos this time. "
                     "Run the same command later to fill them in; words already read are kept."
                 )
+        if watch and not mock:
+            before = set(texts)
+            notices += self._watch_unread(videos, texts, by_source, watch)
+            watched |= set(texts) - before
         read = set(texts)
 
         # 3. clean and dedupe
@@ -367,7 +384,9 @@ class AlchemyEngine:
         # move between "Part 1" and "Part 2" (and both get re-uploaded) whenever another one grows.
         layout = None if mock else RequestCache(self.library_cache_path(channel))
         parts = dict(layout.get(PARTS_KEY) or {}) if layout else {}
-        books = render_library(library, channel, titles, read - set(waiting), exact, dated, parts)
+        books = render_library(
+            library, channel, titles, read - set(waiting), exact, dated, parts, watched=watched & read
+        )
         if layout:
             layout.put(PARTS_KEY, parts)
         return BuildReport(
@@ -383,6 +402,52 @@ class AlchemyEngine:
             is_mock=mock,
             used_ai=use_ai,
         )
+
+    def _watch_unread(
+        self, videos: list[ChannelVideo], texts: dict[str, str], by_source: dict[str, int], limit: int
+    ) -> list[str]:
+        """Gemini watches up to `limit` videos no route could read, and writes down what is said.
+
+        The words are cached like captions (method "gemini-video"), so a video is never paid for
+        twice. Longer than WATCH_MAX_MINUTES, or of unknown length, a video is left for the overview's
+        unread list: its cost cannot be bounded first.
+        """
+        if self.gemini is None:
+            raise AlchemyError(
+                "--watch needs a Gemini API key: Gemini watches the videos.",
+                hint="Add a key with `notebook-alchemy setup`, or run without --watch.",
+            )
+        unread = [v for v in videos if v.id not in texts]
+        fits = [v for v in unread if 0 < v.duration_seconds <= WATCH_MAX_MINUTES * 60][:limit]
+        notices: list[str] = []
+        too_long = sum(1 for v in unread if not 0 < v.duration_seconds <= WATCH_MAX_MINUTES * 60)
+        if too_long:
+            notices.append(
+                f"{too_long} unread videos were not watched: longer than {WATCH_MAX_MINUTES} minutes or "
+                "of unknown length."
+            )
+        watched = 0
+        for v in fits:
+            try:
+                answer = self.gemini.watch(f"https://www.youtube.com/watch?v={v.id}", WATCH_PROMPT)
+            except GeminiError as exc:
+                if exc.quota:
+                    notices.append(
+                        "Gemini's daily quota ran out while watching videos; the rest wait for the next run."
+                    )
+                    break
+                notices.append(f'Gemini could not watch "{v.title}": {exc.detail}')
+                continue
+            text = answer.text.strip()
+            if not text or text.upper().startswith(NO_SPEECH):
+                notices.append(f'Gemini heard no speech in "{v.title}".')
+                continue
+            self.transcripts._write_cache(v.id, v.title, text, method=WATCHED)
+            texts[v.id] = text
+            watched += 1
+        if watched:
+            by_source[WATCHED] = by_source.get(WATCHED, 0) + watched
+        return notices
 
     @staticmethod
     def save_books(books: list[Book], folder: Path) -> list[Path]:

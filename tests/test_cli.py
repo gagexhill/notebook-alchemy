@@ -1124,3 +1124,8 @@ def test_the_guided_run_builds_and_uploads_for_real(
     )  # y: the upload account; Enter: the notebook name
     assert result.exit_code == 0, result.output
     assert len(uploads) == 1 and "Created notebook" in result.output
+
+
+def test_watch_cannot_be_combined_with_offline(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["run", "@my", "--offline", "--watch", "3"])
+    assert result.exit_code == 2 and "--watch uses Gemini" in result.output

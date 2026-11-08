@@ -532,3 +532,92 @@ def test_the_working_notebook_only_ever_loses_videos_and_titles_must_be_unique(t
     assert texts["bcdefghijkl"] == "words spoken in https://www.youtube.com/watch?v=bcdefghijkl"
     assert [s["title"] for s in fake.sources[ws]] == ["My notes"]
     assert engine.notebook_for("__workspace__") == ws
+
+
+# --- --watch: Gemini watches videos no route could read ---------------------------------------------
+
+
+class WatchingGemini:
+    model = "gemini-test"
+
+    def __init__(self, answers: dict[str, object]) -> None:
+        self.answers = answers  # video id -> text, or a GeminiError to raise
+        self.watched: list[str] = []
+
+    def watch(self, url: str, prompt: str, **kw):
+        from notebook_alchemy.gemini import GeminiResult
+
+        vid = url.rsplit("=", 1)[1]
+        self.watched.append(vid)
+        answer = self.answers.get(vid, "words")
+        if isinstance(answer, Exception):
+            raise answer
+        return GeminiResult(str(answer), "STOP")
+
+
+def _watch_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, durations: list[int]):
+    from notebook_alchemy.channel import ChannelScanner, ChannelScanResult, ChannelVideo, TranscriptManager
+
+    videos = [
+        ChannelVideo(f"vid0000000{i}", f"Video {i}", "u", d, "2026-03-01") for i, d in enumerate(durations)
+    ]
+    monkeypatch.setattr(
+        ChannelScanner, "scan", lambda self, url, limit=None, **kw: ChannelScanResult("Chan", videos)
+    )
+    monkeypatch.setattr(TranscriptManager, "fetch_many", lambda self, items, progress=None: {})  # all blocked
+    engine = AlchemyEngine(_config(tmp_path))
+    return engine, videos
+
+
+def test_watch_reads_unread_videos_once_and_caches_the_words(tmp_path: Path, monkeypatch) -> None:
+    engine, _videos = _watch_setup(tmp_path, monkeypatch, [600, 600, 600])
+    gemini = WatchingGemini({"vid00000000": "first we register in sam dot gov and wait ten days"})
+    engine.gemini = gemini  # type: ignore[assignment]
+    report = engine.build("@chan", offline=True, watch=2)
+    assert gemini.watched == ["vid00000000", "vid00000001"]  # the cap
+    assert report.read == {"vid00000000", "vid00000001"} and report.by_source["gemini-video"] == 2
+    cached = json.loads((tmp_path / "cache" / "vid00000000.json").read_text(encoding="utf-8"))
+    assert cached["method"] == "gemini-video" and "sam dot gov" in cached["full_text"]
+    overview = report.books[0].content
+    assert "Words written down by Gemini from the video itself (2)" in overview and "  - Video 0" in overview
+    # A later run reads those words from the cache, still names them, and pays for nothing.
+    from notebook_alchemy.channel import TranscriptManager
+
+    def from_cache(self, items, progress=None):
+        return {vid: r for vid, _t in items if (r := self._read_cache(vid))}
+
+    monkeypatch.setattr(TranscriptManager, "fetch_many", from_cache)
+    again = engine.build("@chan", offline=True)
+    assert gemini.watched == ["vid00000000", "vid00000001"]  # nothing watched again
+    assert "Words written down by Gemini from the video itself (2)" in again.books[0].content
+
+
+def test_watch_skips_videos_it_cannot_bound_and_stops_on_quota(tmp_path: Path, monkeypatch) -> None:
+    from notebook_alchemy.errors import GeminiError
+
+    engine, _ = _watch_setup(tmp_path, monkeypatch, [0, 4 * 3600, 600, 600, 600, 600])
+    quota = GeminiError("quota", status=429, quota=True)
+    gemini = WatchingGemini(
+        {
+            "vid00000002": GeminiError("not public", status=403),
+            "vid00000003": "NO_SPEECH",
+            "vid00000004": quota,
+        }
+    )
+    engine.gemini = gemini  # type: ignore[assignment]
+    report = engine.build("@chan", offline=True, watch=10)
+    # unknown and 4-hour videos skipped; after the quota runs out, vid00000005 is not tried
+    assert gemini.watched == ["vid00000002", "vid00000003", "vid00000004"]
+    notes = " ".join(report.notices)
+    assert "2 unread videos were not watched" in notes and "not public" in notes
+    assert "no speech" in notes and "quota ran out" in notes and not report.read
+    assert not (tmp_path / "cache" / "vid00000003.json").exists()  # silence is not cached as words
+
+
+def test_watch_needs_a_gemini_key(tmp_path: Path, monkeypatch) -> None:
+    engine, _ = _watch_setup(tmp_path, monkeypatch, [600])
+    engine.gemini = None
+    from notebook_alchemy.errors import AlchemyError
+
+    with pytest.raises(AlchemyError, match="--watch needs a Gemini API key"):
+        engine.build("@chan", offline=True, watch=1)

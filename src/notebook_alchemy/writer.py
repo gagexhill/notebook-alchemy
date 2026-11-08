@@ -137,6 +137,7 @@ def render_overview(
     titles: dict[str, str],
     exact: set[str],
     dates: dict[str, str],
+    watched: set[str] | None = None,
 ) -> Book:
     """What the notebook holds, how it was made, what is missing and what was left out."""
     lines = [
@@ -163,6 +164,13 @@ def render_overview(
         + (f", published {date_label(known[0], False)} to {date_label(known[-1], False)}" if known else "")
     )
     lines.append(f"- Repeated passages kept once: {library.removed_duplicates:,}")
+    if watched:
+        lines.append(
+            f"- Words written down by Gemini from the video itself ({len(watched)}), because no captions "
+            "could be read. They are what Gemini heard, so names and figures are worth checking against "
+            "the video:"
+        )
+        lines += [f"  - {videos.get(v, v)}" for v in sorted(watched, key=lambda v: videos.get(v, v))]
     missing = [v for v in videos if v not in read]
     if missing:
         lines.append(
@@ -196,13 +204,15 @@ def render_library(
     exact: set[str],
     dates: dict[str, str],
     parts: dict[str, dict[str, int]] | None = None,
+    *,
+    watched: set[str] | None = None,
 ) -> list[Book]:
     """Every source for the notebook: the overview first, then each topic book (and its parts).
 
     `parts` (topic -> section -> part number) is updated in place; see `render_topic`.
     """
     parts = {} if parts is None else parts
-    books = [render_overview(library, channel, videos, read, videos, exact, dates)]
+    books = [render_overview(library, channel, videos, read, videos, exact, dates, watched)]
     for topic in library.topics:
         books += render_topic(topic, channel, videos, exact, parts.setdefault(topic.name, {}))
     for gone in set(parts) - {t.name for t in library.topics}:
