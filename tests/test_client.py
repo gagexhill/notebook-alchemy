@@ -28,7 +28,7 @@ NOTEBOOKS = json.dumps([{"id": "nb-1", "title": "Alpha"}, {"id": "nb-2", "title"
 
 
 def _client(tmp_path: Path, process: FakeProcess | None = None, **cfg) -> NotebookLMClient:
-    config = AlchemyConfig(vault_path=tmp_path / "v", **cfg)
+    config = AlchemyConfig(cache_dir=tmp_path / "c", **cfg)
     return NotebookLMClient(config, runner=process)
 
 

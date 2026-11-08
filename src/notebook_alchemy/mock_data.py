@@ -139,7 +139,7 @@ _THEME_TEMPLATES = [
     ),
 ]
 
-SAMPLE_SIZE = 288
+SAMPLE_SIZE = 36
 
 
 def _fill_sample(videos: list[dict[str, str]]) -> None:
@@ -154,7 +154,7 @@ def _fill_sample(videos: list[dict[str, str]]) -> None:
             videos.append(
                 {
                     "id": f"mock_{idx:03d}",
-                    "title": f"{template} (Vol. {variant})",
+                    "title": f"{template} (Part {variant})",
                     "url": f"https://www.youtube.com/watch?v=mock_{idx:03d}",
                 }
             )
@@ -167,3 +167,19 @@ _fill_sample(SAMPLE_VIDEOS)
 def get_mock_sources() -> list[dict[str, str]]:
     """Return every synthetic sample source."""
     return list(SAMPLE_VIDEOS)
+
+
+def sample_transcript(video: dict[str, str]) -> str:
+    """Synthetic spoken text for a sample video: a stock intro and a call to action every channel
+    repeats (so cleanup has something to remove), then a few sentences about the title. Not real
+    speech; marked as sample data wherever it appears."""
+    topic = video["title"].lstrip("💻📕✈️🤔😲🚀🚨 ").strip()
+    return (
+        "Hey everyone, welcome back to the channel. "
+        f"Today we are talking about {topic}. "
+        f"This is sample text, not a real transcript, written so the tool can be tried. "
+        f"The first step for {topic} is to write down what the client actually needs and what it costs them. "
+        "The second step is to agree on one measurable result before any work starts. "
+        f"A common mistake with {topic} is skipping that agreement, which leads to scope creep. "
+        "Make sure to subscribe and hit the bell."
+    )

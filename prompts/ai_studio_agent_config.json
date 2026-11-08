@@ -1,9 +1,10 @@
 {
-  "name": "Notebook Alchemy domain synthesizer",
-  "description": "Synthesizes numbered video transcripts into one domain compendium for Google NotebookLM. Mirrors the request notebook-alchemy sends.",
+  "name": "Notebook Alchemy labeller",
+  "description": "Labels one video's numbered transcript chunks (keep or drop, headline, kind, note) without rewriting them. Mirrors the request notebook-alchemy sends.",
   "model": "gemini-3.8-flash",
   "generationConfig": {
-    "maxOutputTokens": 32768,
+    "responseMimeType": "application/json",
+    "maxOutputTokens": 16384,
     "thinkingConfig": {
       "thinkingLevel": "low"
     }
@@ -11,7 +12,7 @@
   "systemInstruction": {
     "parts": [
       {
-        "text": "You are a Principal Knowledge Architect. Synthesize raw video transcripts into a dense, authoritative domain compendium for Google NotebookLM. No filler, no preamble, no sponsor reads. Attribute every claim to its source video by number, like [3]."
+        "text": "You label transcripts for a study library. You never rewrite or summarise the speaker's words; you only decide which numbered chunks are worth keeping, group them into points, and describe each point. Answer with JSON only."
       }
     ]
   }
