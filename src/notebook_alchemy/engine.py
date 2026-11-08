@@ -180,17 +180,25 @@ class AlchemyEngine:
         """
         if not items or not self.client.is_authenticated():
             return {}
+        titles = dict(items)
+        wanted = list(titles)
         try:
             nb_id, _created = self.client.create_notebook(WORKSPACE_TITLE)
-            for leftover in self.client.list_sources(nb_id):  # from an interrupted run
-                if leftover.get("id"):
-                    self.client.delete_source(nb_id, str(leftover["id"]))
+            existing = self.client.list_sources(nb_id)
         except AlchemyError as exc:
             logger.warning("NotebookLM could not be used to read transcripts: %s", exc.message)
             return {}
-        texts: dict[str, str] = {}
-        titles = dict(items)
-        for batch in self._chunks(list(titles), WORKSPACE_BATCH):
+        # Sources left by an interrupted run: read the ones still wanted, remove the rest.
+        leftovers: list[tuple[str, str]] = []
+        for source in existing:
+            vid = self._video_of(source, wanted, titles)
+            if vid and source.get("id"):
+                leftovers.append((str(source["id"]), vid))
+            elif source.get("id"):
+                self._remove_workspace_source(nb_id, str(source["id"]), "an old source")
+        texts = self._read_workspace(nb_id, leftovers)
+        started = {vid for _sid, vid in leftovers}
+        for batch in self._chunks([v for v in wanted if v not in started], WORKSPACE_BATCH):
             try:
                 self.client.add_youtube_sources(
                     nb_id, [f"https://www.youtube.com/watch?v={v}" for v in batch]
@@ -203,35 +211,44 @@ class AlchemyEngine:
             except AlchemyError as exc:
                 logger.warning("NotebookLM did not take %d videos: %s", len(batch), exc.message)
                 continue
-
-            def read(pair: tuple[str, str], nb: str = nb_id) -> tuple[str, str]:
-                source_id, vid = pair
-                text = ""
-                try:
-                    self.client.wait_for_source(nb, source_id, timeout=WORKSPACE_WAIT)
-                    text = self.client.source_text(nb, source_id)
-                except AlchemyError as exc:
-                    logger.info("NotebookLM could not read %s: %s", vid, exc.message)
-                finally:
-                    try:
-                        self.client.delete_source(nb, source_id)
-                    except AlchemyError as exc:  # left for the next run's cleanup, said in the log
-                        logger.warning("Could not remove %s from the working notebook: %s", vid, exc.message)
-                return vid, text
-
-            for vid, text in _run_pool(read, queued):
-                if text.strip():
-                    texts[vid] = text
+            texts.update(self._read_workspace(nb_id, queued))
         return texts
+
+    def _read_workspace(self, nb_id: str, pairs: list[tuple[str, str]]) -> dict[str, str]:
+        """Wait for each (source id, video id), read its text, and remove the source."""
+
+        def read(pair: tuple[str, str]) -> tuple[str, str]:
+            source_id, vid = pair
+            text = ""
+            try:
+                self.client.wait_for_source(nb_id, source_id, timeout=WORKSPACE_WAIT)
+                text = self.client.source_text(nb_id, source_id)
+            except AlchemyError as exc:  # no transcript NotebookLM can read: the video waits
+                logger.info("NotebookLM could not read %s: %s", vid, exc.message)
+            finally:
+                self._remove_workspace_source(nb_id, source_id, vid)
+            return vid, text
+
+        return {vid: text for vid, text in _run_pool(read, pairs) if text.strip()}
+
+    def _remove_workspace_source(self, nb_id: str, source_id: str, what: str) -> None:
+        try:
+            self.client.delete_source(nb_id, source_id)
+        except AlchemyError as exc:  # the next run removes it; said in the log
+            logger.warning("Could not remove %s from the working notebook: %s", what, exc.message)
 
     @staticmethod
     def _video_of(source: dict[str, Any], batch: list[str], titles: dict[str, str]) -> str:
-        """Which queued video a working-notebook source is: by its URL, else by its title."""
-        vid = video_id_from_url(str(source.get("url") or ""))
-        if vid in batch:
-            return vid
+        """Which queued video a working-notebook source is: by its URL, else by its title.
+
+        While NotebookLM is still fetching a video, the source has no URL and its title is the link.
+        """
+        for field_name in ("url", "title"):
+            vid = video_id_from_url(str(source.get(field_name) or ""))
+            if vid in batch:
+                return vid
         title = normalize_title(str(source.get("title") or ""))
-        return next((v for v in batch if normalize_title(titles.get(v, "")) == title and title), "")
+        return next((v for v in batch if title and normalize_title(titles.get(v, "")) == title), "")
 
     def analyzer_for(self, offline: bool) -> NotebookAnalyzer:
         """The analyzer, set to use Gemini only when `offline` is false."""

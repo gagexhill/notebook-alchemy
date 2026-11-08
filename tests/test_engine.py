@@ -541,14 +541,27 @@ def test_notebooklm_reads_blocked_videos_in_a_working_notebook_and_cleans_up(tmp
     _session(tmp_path)
     engine = AlchemyEngine(_config(tmp_path))
     fake = FakeNotebookLM()
-    leftover_nb = fake.seed("Notebook Alchemy workspace", ["left from an interrupted run"])
+    workspace = fake.seed("Notebook Alchemy workspace", ["left from an interrupted run"])
+    # A source still being fetched has no URL yet: its title is the link.
+    fake.sources[workspace].append(
+        {
+            "id": "yt-pending",
+            "title": "https://www.youtube.com/watch?v=cdefghijklm",
+            "url": None,
+            "status": "ready",
+        }
+    )
     engine.client = NotebookLMClient(engine.config, runner=fake)
-    texts = engine.transcripts_via_notebooklm([("abcdefghijk", "One"), ("bcdefghijkl", "Two")])
-    assert texts == {
-        "abcdefghijk": "words spoken in https://www.youtube.com/watch?v=abcdefghijk",
-        "bcdefghijkl": "words spoken in https://www.youtube.com/watch?v=bcdefghijkl",
-    }
-    assert fake.sources[leftover_nb] == []  # every source it added, and the leftover, removed
+    texts = engine.transcripts_via_notebooklm(
+        [("abcdefghijk", "One"), ("bcdefghijkl", "Two"), ("cdefghijklm", "Three")]
+    )
+    assert set(texts) == {"abcdefghijk", "bcdefghijkl", "cdefghijklm"}
+    assert texts["abcdefghijk"] == "words spoken in https://www.youtube.com/watch?v=abcdefghijk"
+    adds = [c for c in fake.calls if "add-async" in c]
+    assert len(adds) == 1 and not any(
+        "cdefghijklm" in a for a in adds[0]
+    )  # the leftover was read, not re-added
+    assert fake.sources[workspace] == []  # every source it added, and the old one, removed
 
 
 def test_notebooklm_route_needs_a_sign_in(tmp_path: Path) -> None:
