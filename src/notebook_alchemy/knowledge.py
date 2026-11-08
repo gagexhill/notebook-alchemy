@@ -37,6 +37,7 @@ PUNCTUATE_WINDOW_WORDS = 5_000
 PUNCTUATE_MIN_MATCH = 0.98  # share of words that must come back unchanged, else the raw text is used
 NOTE_MAX_WORDS = 25
 HEADLINE_MAX_WORDS = 14
+LABEL_MAX_OUTPUT_TOKENS = 16384
 
 SYSTEM = (
     "You label transcripts for a study library. You never rewrite or summarise the speaker's words; "
@@ -271,7 +272,10 @@ def request_body(prompt: str) -> dict[str, Any]:
     return {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "systemInstruction": {"parts": [{"text": SYSTEM}]},
-        "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 16384},
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "maxOutputTokens": LABEL_MAX_OUTPUT_TOKENS,
+        },
     }
 
 
@@ -420,7 +424,11 @@ class Labeler:
 
     def _call(self, prompt: str) -> str:
         result = self.gemini.generate(
-            prompt, system=SYSTEM, json_mode=True, max_output_tokens=16384, allow_fallback=False
+            prompt,
+            system=SYSTEM,
+            json_mode=True,
+            max_output_tokens=LABEL_MAX_OUTPUT_TOKENS,
+            allow_fallback=False,
         )
         return result.text
 

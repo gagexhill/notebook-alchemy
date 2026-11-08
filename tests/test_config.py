@@ -21,7 +21,7 @@ from notebook_alchemy.errors import ConfigError
 def test_defaults() -> None:
     config = AlchemyConfig()
     assert config.env == "development"
-    assert config.vault_path.name == "vault"
+    assert config.cache_dir.name == "cache" and config.cookies_browser is None
     assert config.gemini_model == DEFAULT_GEMINI_MODEL
     assert config.max_concurrency == 4
     assert config.session_file is None

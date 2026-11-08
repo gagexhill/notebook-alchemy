@@ -28,7 +28,6 @@ WINDOWS_RESERVED_NAMES = frozenset(
     {"con", "prn", "aux", "nul"} | {f"{p}{n}" for p in ("com", "lpt") for n in range(1, 10)}
 )
 DEFAULT_MAX_CONCURRENCY = 4
-DEFAULT_MAX_PER_VOLUME = 50
 MAX_ALLOWED_CONCURRENCY = 16
 # Seconds between remote caption requests (a random gap in this range), so a long channel is not
 # refused by YouTube; and how long a refused route rests before it is tried again.
@@ -167,7 +166,6 @@ class AlchemyConfig:
     """Runtime configuration for the Alchemy engine."""
 
     env: str = "development"
-    vault_path: Path = field(default_factory=lambda: Path("./vault").resolve())
     session_file: Path | None = None
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".notebook-alchemy" / "cache")
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
@@ -201,7 +199,6 @@ class AlchemyConfig:
 
         return cls(
             env=os.getenv("ALCHEMY_ENV", "development"),
-            vault_path=_path("ALCHEMY_VAULT_PATH", Path("./vault").resolve()),  # type: ignore[arg-type]
             session_file=_path("ALCHEMY_SESSION_FILE", None),
             cache_dir=_path("ALCHEMY_CACHE_DIR", Path.home() / ".notebook-alchemy" / "cache"),  # type: ignore[arg-type]
             gemini_api_key=os.getenv("GEMINI_API_KEY", ""),

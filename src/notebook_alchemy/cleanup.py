@@ -36,6 +36,8 @@ CHUNK_MAX_WORDS = 90
 UNPUNCTUATED_BELOW = 1.0  # sentence marks per 100 words below which text is treated as unpunctuated
 SHINGLE = 8  # words per shingle for duplicate detection
 DUPLICATE_SHARE = 0.8  # share of a chunk's shingles already seen that makes it a duplicate
+REPEAT_RUN_WORDS = 12  # a run this long, already said in another kept chunk, is taken out
+_NORM_RE = re.compile(r"[^a-z0-9$%']+")
 
 
 @dataclass
@@ -119,21 +121,64 @@ def chunk_video(video_id: str, text: str) -> list[Chunk]:
     return [Chunk(video_id, n, piece, boilerplate=bp) for n, (piece, bp) in enumerate(_pieces(text), 1)]
 
 
+def _norm(word: str) -> str:
+    return _NORM_RE.sub("", word.lower())
+
+
+def _hash(words: list[str]) -> str:
+    return hashlib.blake2b(" ".join(words).encode(), digest_size=8).hexdigest()
+
+
 def _shingles(text: str) -> set[str]:
-    words = _WORD_RE.findall(text.lower())
+    words = [w for w in (_norm(w) for w in text.split()) if w]
     if len(words) < SHINGLE:
-        return {hashlib.blake2b(" ".join(words).encode(), digest_size=8).hexdigest()} if words else set()
-    return {
-        hashlib.blake2b(" ".join(words[i : i + SHINGLE]).encode(), digest_size=8).hexdigest()
-        for i in range(len(words) - SHINGLE + 1)
-    }
+        return {_hash(words)} if words else set()
+    return {_hash(words[i : i + SHINGLE]) for i in range(len(words) - SHINGLE + 1)}
+
+
+def _repeated_runs(text: str, owners: dict[str, Chunk], self_chunk: Chunk) -> tuple[str, list[Chunk]]:
+    """The text with runs of REPEAT_RUN_WORDS or more words already said elsewhere taken out, and the
+    chunks those runs were said in. The speaker's other words stay as they are."""
+    original = text.split()
+    kept_index = [i for i, w in enumerate(original) if _norm(w)]
+    norm = [_norm(original[i]) for i in kept_index]
+    covered = [False] * len(original)
+    sources: list[Chunk] = []
+    for i in range(len(norm) - SHINGLE + 1):
+        owner = owners.get(_hash(norm[i : i + SHINGLE]))
+        if owner is not None and owner is not self_chunk:
+            sources.append(owner)
+            for j in range(i, i + SHINGLE):
+                covered[kept_index[j]] = True
+    out: list[str] = []
+    run: list[str] = []
+    removed: list[Chunk] = []
+    for i, word in enumerate(original):
+        if covered[i]:
+            run.append(word)
+            continue
+        if run:
+            if len(run) < REPEAT_RUN_WORDS:
+                out += run  # a short shared phrase is not a repeated passage
+            else:
+                removed = sources
+            run = []
+        out.append(word)
+    if run:
+        if len(run) < REPEAT_RUN_WORDS:
+            out += run
+        else:
+            removed = sources
+    return " ".join(out), removed
 
 
 def mark_duplicates(videos: Iterable[tuple[str, list[Chunk]]]) -> int:
-    """Mark chunks that repeat an earlier-kept chunk, newest video first, and return how many.
+    """Keep each repeated passage once, newest video first, and return how many chunks were dropped.
 
-    `videos` is (published date, chunks), in any order; the newest copy of a repeated passage is
-    the one kept, so a dated fact keeps its latest date, and it lists the other videos that said it.
+    `videos` is (published date, chunks), in any order. A chunk that mostly repeats an earlier-kept
+    one is marked a duplicate; a run of REPEAT_RUN_WORDS or more repeated words inside a chunk is
+    taken out of it, and the rest of the chunk stays. The newest copy is the one kept, so a dated fact
+    keeps its latest date, and it lists the other videos that said it.
     """
     owners: dict[str, Chunk] = {}  # shingle -> the kept chunk that first had it
     duplicates = 0
@@ -149,10 +194,20 @@ def mark_duplicates(videos: Iterable[tuple[str, list[Chunk]]]) -> int:
                 counts = Counter(c.id for c in seen)
                 keeper = next(c for c in seen if c.id == counts.most_common(1)[0][0])
                 chunk.duplicate_of = keeper.id
-                if chunk.video_id != keeper.video_id and chunk.video_id not in keeper.also_in:
-                    keeper.also_in.append(chunk.video_id)
+                _cite(keeper, chunk.video_id)
                 duplicates += 1
                 continue
-            for s in shingles:
+            if seen:
+                text, sources = _repeated_runs(chunk.text, owners, chunk)
+                if sources:
+                    chunk.text = text
+                    for keeper in {c.id: c for c in sources}.values():
+                        _cite(keeper, chunk.video_id)
+            for s in _shingles(chunk.text):
                 owners.setdefault(s, chunk)
     return duplicates
+
+
+def _cite(keeper: Chunk, video_id: str) -> None:
+    if video_id != keeper.video_id and video_id not in keeper.also_in:
+        keeper.also_in.append(video_id)

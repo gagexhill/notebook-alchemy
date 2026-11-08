@@ -1,60 +1,79 @@
 # Google AI Studio blueprint
 
-Reproduce what `notebook-alchemy run` sends to Gemini, so you can test a synthesis by hand in
-[Google AI Studio](https://aistudio.google.com/) before spending API calls on a whole channel.
+Reproduce the request `notebook-alchemy run` sends to Gemini for each video, so you can try the
+labelling by hand in [Google AI Studio](https://aistudio.google.com/) before spending API calls on a
+whole channel.
 
 The settings and the system instruction below are mirrored in `ai_studio_agent_config.json`, and a test
-(`tests/test_prompts.py`) fails if either drifts from `src/notebook_alchemy/synthesizer.py` and
-`config.py`. The code is the source of truth.
+(`tests/test_prompts.py`) fails if either drifts from `src/notebook_alchemy/knowledge.py` and `config.py`.
+The code is the source of truth.
+
+## What the request does
+
+Gemini does not write the books. It reads one video's transcript, already cleaned and split into numbered
+chunks on your machine, and returns labels only: which runs of chunks to keep or drop, a short headline
+for each kept run, how long the information stays true (its kind), and an optional editor's note. The
+books are built from the speaker's own words with those labels, which is why a run costs a few percent
+of the transcript in output instead of rewriting it. For captions without punctuation the answer also
+carries the kept words with punctuation added; a local check rejects it if any word changed.
 
 ## Settings
 
 | Setting | Value | Why |
 | :-- | :-- | :-- |
-| Model | `gemini-3.8-flash` (the tool's default, `ALCHEMY_GEMINI_MODEL`) | Google's most capable Flash model, not scheduled for shutdown. `gemini-2.5-flash` shuts down on 2026-12-01 |
-| Thinking level | Low | Extraction from a transcript needs little reasoning, and thinking tokens bill at the output rate |
-| Temperature | Not set | AI Studio offers no temperature control for this model, so the tool sends none |
-| Max output tokens | 32768 | A compendium covers up to 50 videos |
-| Grounding and code execution | Off | The transcripts are the only source |
+| Model | `gemini-3.8-flash` (the tool's default, `ALCHEMY_GEMINI_MODEL`) | Labels are cached per model, so the tool never mixes in its fallback model for this step |
+| Output | JSON (`responseMimeType: application/json`) | The answer is parsed and validated, never shown as prose |
+| Thinking level | Low | Deciding what to keep needs little reasoning, and thinking tokens bill at the output rate |
+| Max output tokens | 16384 | Labels are short; punctuated windows are cut to about 5,000 words to fit |
+| Grounding and code execution | Off | The transcript is the only source |
 
-Cheaper choice: `gemini-3.5-flash-lite`, which is also the tool's fallback when the default is overloaded. Google's
-API reports `gemini-2.5-flash-lite` as no longer available to new users. Thinking tokens bill at the output rate and
-count against the output limit, so a real run costs somewhat more than the `dry-run` output estimate shows.
-
-Check current rates on the [pricing page](https://ai.google.dev/gemini-api/docs/pricing) before estimating
-a large run. `notebook-alchemy dry-run <url>` does the arithmetic from video lengths.
+Check current rates on the [pricing page](https://ai.google.dev/gemini-api/docs/pricing) before a large
+run; `notebook-alchemy dry-run <url>` estimates the cost from what is already read and from video lengths.
 
 ## System instruction
 
 ```text
-You are a Principal Knowledge Architect. Synthesize raw video transcripts into a dense, authoritative domain compendium for Google NotebookLM. No filler, no preamble, no sponsor reads. Attribute every claim to its source video by number, like [3].
+You label transcripts for a study library. You never rewrite or summarise the speaker's words; you only decide which numbered chunks are worth keeping, group them into points, and describe each point. Answer with JSON only.
 ```
 
 ## User prompt shape
 
-The tool sends one user message per compendium volume: the instructions, then each video as
-`### [n] Title` followed by its transcript. Paste a few transcripts in that shape to try it.
+One message per video (or per window of a very long one). Paste a real transcript's chunks in place of
+the placeholders to try it.
 
 ```text
-Synthesize the N numbered videos below, from '<source name>', into one Markdown compendium for the
-domain '<domain>' (volume 1).
+Video: <video title>
+Published: <published date>
+Today: <today>
 
-Rules:
-1. Do not write YAML frontmatter, a title line, or a source table; those are added for you.
-2. Use these sections: ## Executive Summary, ## Key Concepts and Mental Models,
-   ## Procedures and Frameworks, ## Common Pitfalls.
-3. Extract concrete steps, frameworks and examples the speakers actually give.
-   Cite the source video number after each claim, like [3].
-4. Remove filler, sponsor reads and intros. Do not invent facts that are not in a transcript.
+Keep (in the speaker's words):
+- step-by-step procedures and how-tos;
+- specific facts: names of programs, agencies, systems, forms and codes; requirements, eligibility and
+  thresholds; dollar amounts, deadlines and dates; websites and tools named;
+- definitions and explanations of concepts, and the reasoning behind advice;
+- frameworks, checklists and rules of thumb;
+- examples, case stories and their outcomes, with numbers;
+- mistakes, warnings and how to fix them;
+- answers to viewer questions.
+Drop:
+- greetings, intros, outros and "in this video I'll..." previews;
+- like, subscribe and bell requests; sponsor reads; promotion of the creator's own courses or coaching
+  (unless the offer itself is the subject);
+- filler, repetition of a point already made, small talk, jokes and off-topic tangents;
+- pointers to links that carry no content.
+When unsure whether something is useful, KEEP it.
 
-Sources:
+kind, for each kept point:
+- "lasting": a principle or explanation that stays true;
+- "rule": a procedure or requirement tied to a website, regulation, program or system as it was then;
+- "news": an event or announcement (a shutdown, an executive order, a policy just changed);
+- "figure": prices, grant amounts, deadlines, rates or other numbers that change.
 
-### [1] First video title
-<transcript text>
+Group chunks 1 to 2 into consecutive segments that cover every chunk exactly once, in order. A kept segment is one coherent point (usually 1 to 8 chunks). Use the speaker's language for headlines and notes.
+Return only JSON:
+{"segments": [{"from": <first chunk>, "to": <last chunk>, "keep": true|false, "headline": "<at most 14 words, kept segments only>", "kind": "lasting|rule|news|figure", "note": "<optional, at most 25 words: context the passage needs to stand alone>"}]}
 
-### [2] Second video title
-<transcript text>
+Chunks:
+[1] <first chunk of the transcript>
+[2] <second chunk>
 ```
-
-The tool adds the frontmatter, the title line and a deterministic `## Sources` table itself, so every video
-is listed even if the model's answer is cut short.

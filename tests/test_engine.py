@@ -1,4 +1,4 @@
-"""Engine: vault layout, atomic writes, sync and append."""
+"""Engine: uploads, the source limit, the NotebookLM transcript route and status."""
 
 from __future__ import annotations
 
@@ -9,24 +9,17 @@ from pathlib import Path
 
 import pytest
 
-from notebook_alchemy.analyzer import VideoSourceSummary
 from notebook_alchemy.client import NotebookLMClient, PlanLimits
 from notebook_alchemy.config import AlchemyConfig
 from notebook_alchemy.engine import AlchemyEngine
-from notebook_alchemy.errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
-from notebook_alchemy.synthesizer import DomainCompendium, Synthesizer
+from notebook_alchemy.errors import SessionError, SyncError
+from notebook_alchemy.writer import Book
 
 from .conftest import FakeNotebookLM, FakeProcess
 
-MOCK_DIR = "sample_catalog_mock_data"
-
 
 def _config(tmp_path: Path) -> AlchemyConfig:
-    return AlchemyConfig(
-        vault_path=tmp_path / "vault",
-        cache_dir=tmp_path / "cache",
-        gemini_api_key="",
-    )
+    return AlchemyConfig(cache_dir=tmp_path / "cache", gemini_api_key="")
 
 
 @pytest.fixture
@@ -40,155 +33,7 @@ def _session(tmp_path: Path) -> None:
     state.write_text("{}", encoding="utf-8")
 
 
-def _real_dir(tmp_path: Path, names: tuple[str, ...] = ("Alpha_Topics", "Beta_Topics")) -> Path:
-    d = tmp_path / "vault" / "chan" / "compendiums"
-    d.mkdir(parents=True)
-    for n in names:
-        (d / f"{n}.md").write_text(
-            f'---\ndomain: "{n.replace("_", " ")}"\nvolume: 1\nsource_count: 1\n---\n# {n}\n',
-            encoding="utf-8",
-        )
-    return d
-
-
 # --- distillation ---------------------------------------------------------------------------------
-
-
-def test_output_is_namespaced_per_source(engine: AlchemyEngine, tmp_path: Path) -> None:
-    other = tmp_path / "vault" / "another_channel" / "compendiums"
-    other.mkdir(parents=True)
-    (other / "keep.md").write_text("other channel", encoding="utf-8")
-
-    report = engine.run_distillation(use_mock=True, force_offline=True)
-    final = tmp_path / "vault" / MOCK_DIR / "compendiums"
-    assert report.vault_directory == final
-    assert (final / "_INDEX.md").exists() and (final / "_MASTER_SOURCES_CATALOG.md").exists()
-    assert not (final / "INDEX.md").exists()
-    assert not (tmp_path / "vault" / "compendiums").exists()
-    assert (other / "keep.md").read_text(encoding="utf-8") == "other channel"
-    assert report.is_mock
-
-
-def test_every_video_lands_in_exactly_one_volume(engine: AlchemyEngine) -> None:
-    report = engine.run_distillation(use_mock=True, force_offline=True, max_videos_per_volume=20)
-    ids = [i for c in report.compendiums for i in c.source_ids]
-    assert len(ids) == len(set(ids)) == 288
-    assert all(len(c.titles) <= 20 for c in report.compendiums)
-    assert len({c.relative_path for c in report.compendiums}) == len(report.compendiums)
-
-
-def test_catalog_records_each_videos_domain(engine: AlchemyEngine, tmp_path: Path) -> None:
-    engine.run_distillation(use_mock=True, force_offline=True)
-    catalog = (tmp_path / "vault" / MOCK_DIR / "compendiums" / "_MASTER_SOURCES_CATALOG.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Distilled Source" not in catalog
-    rows = [line for line in catalog.splitlines() if line.startswith("| ") and "`mock_" in line]
-    assert len(rows) == 288 and all(r.split("|")[4].strip() for r in rows)
-
-
-def test_failed_run_leaves_the_previous_vault_intact(
-    engine: AlchemyEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    engine.run_distillation(use_mock=True, force_offline=True)
-    final = tmp_path / "vault" / MOCK_DIR / "compendiums"
-    marker = final / "my_notes.md"
-    marker.write_text("user file", encoding="utf-8")
-
-    def boom(self: Synthesizer, *a: object, **k: object) -> str:
-        raise RuntimeError("disk full")
-
-    monkeypatch.setattr(Synthesizer, "generate_index", boom)
-    with pytest.raises(RuntimeError):
-        engine.run_distillation(use_mock=True, force_offline=True)
-    assert marker.read_text(encoding="utf-8") == "user file"  # old build untouched
-    assert not final.with_name("compendiums.tmp").exists()  # no staging debris
-
-
-def test_preview_only_writes_nothing(engine: AlchemyEngine, tmp_path: Path) -> None:
-    report = engine.run_distillation(use_mock=True, force_offline=True, write_to_vault=False)
-    assert report.vault_directory is None and not (tmp_path / "vault").exists()
-
-
-def test_max_per_vol_is_validated(engine: AlchemyEngine) -> None:
-    with pytest.raises(ConfigError):
-        engine.run_distillation(use_mock=True, max_videos_per_volume=0)
-
-
-def test_duplicate_titles_keep_distinct_ids(engine: AlchemyEngine) -> None:
-    videos = [VideoSourceSummary(f"id{i}", "Same Title", f"https://u/{i}", "ready") for i in range(4)]
-    report = engine.analyzer._build_report(
-        nb_id="nb_dup",
-        nb_title="Dup",
-        videos=videos,
-        others=[],
-        total_sources=4,
-        origin="youtube",
-        progress=None,
-    )
-    result = engine.run_distillation(dry_run=report, force_offline=True)
-    assert sorted(i for c in result.compendiums for i in c.source_ids) == [
-        "id0",
-        "id1",
-        "id2",
-        "id3",
-    ]
-
-
-def _report_with_domains(engine: AlchemyEngine, domains: dict[str, int]):  # type: ignore[no-untyped-def]
-    videos = [
-        VideoSourceSummary(f"{d[:3]}{i}", f"{d} talk {i}", f"https://u/{d}/{i}", "ready")
-        for d, n in domains.items()
-        for i in range(n)
-    ]
-    report = engine.analyzer._build_report(
-        nb_id="nb_names",
-        nb_title="Names",
-        videos=videos,
-        others=[],
-        total_sources=len(videos),
-        origin="youtube",
-        progress=None,
-    )
-    report.domain_videos = {d: [v for v in videos if v.url.startswith(f"https://u/{d}/")] for d in domains}
-    return report
-
-
-def test_domains_named_like_vault_files_get_their_own_files(engine: AlchemyEngine) -> None:
-    domains = {"_INDEX": 1, "Master Sources Catalog": 1, "A": 2, "A Vol 2": 1}
-    result = engine.run_distillation(
-        dry_run=_report_with_domains(engine, domains), force_offline=True, max_videos_per_volume=1
-    )
-    assert result.vault_directory is not None
-    files = sorted(p.name.lower() for p in result.vault_directory.glob("*.md"))
-    assert len(files) == len(set(files)) == 5 + 2  # five volume files, the index and the catalog
-    index = (result.vault_directory / "_INDEX.md").read_text(encoding="utf-8")
-    assert "# " in index and "Names" in index  # the index was not overwritten by a domain
-    catalog = (result.vault_directory / "_MASTER_SOURCES_CATALOG.md").read_text(encoding="utf-8")
-    assert catalog.count("https://u/") == 5
-
-
-def test_colliding_vault_file_names_are_refused_before_writing(
-    engine: AlchemyEngine, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("notebook_alchemy.engine.unique_slugs", lambda ds: {d: "_INDEX" for d in ds})
-    with pytest.raises(VaultError, match="share a file name"):
-        engine.run_distillation(dry_run=_report_with_domains(engine, {"X": 1}), force_offline=True)
-    assert not engine.vault.compendium_dir("Names").exists()
-
-
-def test_source_without_videos_is_an_error(engine: AlchemyEngine) -> None:
-    report = engine.analyzer._build_report(
-        nb_id="nb",
-        nb_title="Empty",
-        videos=[],
-        others=[],
-        total_sources=0,
-        origin="youtube",
-        progress=None,
-    )
-    with pytest.raises(AlchemyError, match="no video sources"):
-        engine.run_distillation(dry_run=report)
 
 
 def test_status_reports_facts_without_network(engine: AlchemyEngine, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,6 +43,11 @@ def test_status_reports_facts_without_network(engine: AlchemyEngine, monkeypatch
     assert facts["gemini_api_key"] == "unset"
     assert facts["session_file"].startswith("none")
     assert "key" not in json.dumps(facts).lower().replace("gemini_api_key", "")  # no secret values
+
+
+def _books(names: tuple[str, ...] = ("Alpha_Topics", "Beta_Topics")) -> list[Book]:
+    """In-memory books titled like the old vault files' domains ("Alpha_Topics" -> "Alpha Topics")."""
+    return [Book(n.replace("_", " "), f"# {n.replace('_', ' ')}\n\nwords") for n in names]
 
 
 # --- sync -----------------------------------------------------------------------------------------
@@ -221,7 +71,7 @@ def _fake_engine(tmp_path: Path, fake: FakeNotebookLM) -> AlchemyEngine:
 
 def test_sync_creates_the_notebook_and_uploads_every_file(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
-    result = _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    result = _fake_engine(tmp_path, fake).publish("Chan", _books())
     assert (result.created, result.uploaded, result.replaced) == (True, 2, 0)
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]
 
@@ -243,7 +93,7 @@ def test_uploads_and_waits_overlap_but_titles_are_fixed_only_after_all_waits(tmp
         return fake(cmd, **kw)
 
     names = tuple(f"Topic_{i}" for i in range(6))
-    result = _fake_engine(tmp_path, slow).sync_to_notebooklm("Chan", _real_dir(tmp_path, names))  # type: ignore[arg-type]
+    result = _fake_engine(tmp_path, slow).publish("Chan", _books(names))  # type: ignore[arg-type]
     assert result.uploaded == 6 and fake.titles("Chan") == sorted(n.replace("_", " ") for n in names)
     assert peak[0] > 1  # several notebooklm processes ran at once
     assert max(i for i, v in enumerate(order) if v == "wait") < min(
@@ -260,15 +110,15 @@ def test_an_unexpected_error_in_one_upload_is_reported_and_the_rest_reconcile(tm
         return fake(cmd, **kw)
 
     with pytest.raises(SyncError) as err:
-        _fake_engine(tmp_path, flaky).sync_to_notebooklm("Chan", _real_dir(tmp_path))  # type: ignore[arg-type]
-    assert any("Beta_Topics.md" in f and "RuntimeError" in f for f in err.value.failed)
+        _fake_engine(tmp_path, flaky).publish("Chan", _books())  # type: ignore[arg-type]
+    assert any("Beta Topics" in f and "RuntimeError" in f for f in err.value.failed)
     assert fake.titles("Chan") == ["Alpha Topics"]  # the other upload was waited on and kept
 
 
 def test_resync_replaces_old_copies_including_filename_titled_ones(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     fake.seed("Chan", ["Alpha Topics", "Alpha Topics", "Beta_Topics.md", "My own notes"])
-    result = _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    result = _fake_engine(tmp_path, fake).publish("Chan", _books())
     assert result.replaced == 3  # both exact copies and the filename-titled one
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "My own notes"]  # user's own source kept
 
@@ -276,17 +126,17 @@ def test_resync_replaces_old_copies_including_filename_titled_ones(tmp_path: Pat
 def test_titles_the_service_resets_to_file_names_are_corrected(tmp_path: Path) -> None:
     fake = FakeNotebookLM(reset_titles=True)  # the behaviour seen against the real NotebookLM
     engine = _fake_engine(tmp_path, fake)
-    directory = _real_dir(tmp_path)
-    engine.sync_to_notebooklm("Chan", directory)
+    directory = _books()
+    engine.publish("Chan", directory)
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]
-    engine.sync_to_notebooklm("Chan", directory)  # a second run must not pile up duplicates
+    engine.publish("Chan", directory)  # a second run must not pile up duplicates
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]
 
 
 def test_sync_adds_before_it_deletes_and_waits_before_renaming(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     fake.seed("Chan", ["Alpha Topics"])
-    _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    _fake_engine(tmp_path, fake).publish("Chan", _books())
     verbs = [" ".join(c) for c in fake.calls]
     first_add = next(i for i, c in enumerate(verbs) if "source add" in c)
     first_wait = next(i for i, c in enumerate(verbs) if "source wait" in c)
@@ -297,8 +147,8 @@ def test_sync_adds_before_it_deletes_and_waits_before_renaming(tmp_path: Path) -
 def test_sync_reports_each_failed_file_and_still_uploads_the_rest(tmp_path: Path) -> None:
     fake = FakeNotebookLM(fail={"add": "Beta_Topics.md"})
     with pytest.raises(SyncError) as err:
-        _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
-    assert err.value.failed == ["Beta_Topics.md: `notebooklm source add` failed: add failed on purpose"]
+        _fake_engine(tmp_path, fake).publish("Chan", _books())
+    assert err.value.failed == ["Beta Topics: `notebooklm source add` failed: add failed on purpose"]
     assert fake.titles("Chan") == ["Alpha Topics"]
 
 
@@ -306,7 +156,7 @@ def test_an_old_copy_that_cannot_be_deleted_is_reported(tmp_path: Path) -> None:
     fake = FakeNotebookLM(fail={"delete": "old-"})
     fake.seed("Chan", ["Alpha Topics"])
     with pytest.raises(SyncError) as err:
-        _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+        _fake_engine(tmp_path, fake).publish("Chan", _books())
     assert any("old copy not removed" in f for f in err.value.failed)
     assert any("appears 2 times" in f for f in err.value.failed)  # the read-back catches the duplicate
 
@@ -314,109 +164,29 @@ def test_an_old_copy_that_cannot_be_deleted_is_reported(tmp_path: Path) -> None:
 def test_a_source_that_never_finishes_processing_is_reported(tmp_path: Path) -> None:
     fake = FakeNotebookLM(fail={"wait": "src-"})
     with pytest.raises(SyncError) as err:
-        _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+        _fake_engine(tmp_path, fake).publish("Chan", _books())
     assert all("processing did not finish" in f for f in err.value.failed) and len(err.value.failed) == 2
 
 
 def test_sync_needs_a_working_session(tmp_path: Path) -> None:
     engine = _sync_engine(tmp_path, FakeProcess())
     with pytest.raises(SessionError):
-        engine.sync_to_notebooklm("Chan", _real_dir(tmp_path))
-
-
-def test_sync_refuses_mock_output(engine: AlchemyEngine, tmp_path: Path) -> None:
-    _session(tmp_path)
-    engine.run_distillation(use_mock=True, force_offline=True)
-    process = FakeProcess(("list", 0, LIST_NBS, ""))
-    engine.client = NotebookLMClient(engine.config, runner=process)
-    with pytest.raises(AlchemyError, match="sample data, which is never uploaded"):
-        engine.sync_to_notebooklm("Chan", tmp_path / "vault" / MOCK_DIR / "compendiums")
-    assert not any("source add" in " ".join(c) for c in process.calls)
-
-
-def test_sync_with_no_files_is_an_error(tmp_path: Path) -> None:
-    _session(tmp_path)
-    engine = _sync_engine(tmp_path, FakeProcess(("list", 0, "[]", "")))
-    with pytest.raises(VaultError):
-        engine.sync_to_notebooklm("Chan", tmp_path / "missing")
+        engine.publish("Chan", _books())
 
 
 # --- append ---------------------------------------------------------------------------------------
-
-
-def _built(engine: AlchemyEngine, tmp_path: Path) -> Path:
-    report = engine.analyzer._build_report(
-        nb_id="nb",
-        nb_title="Chan",
-        videos=[VideoSourceSummary("a1", "Build a React app", "https://youtu.be/a1", "ready")],
-        others=[],
-        total_sources=1,
-        origin="youtube",
-        progress=None,
-    )
-    return engine.run_distillation(dry_run=report, force_offline=True).vault_directory  # type: ignore[return-value]
-
-
-def test_append_adds_once_and_skips_duplicates(engine: AlchemyEngine, tmp_path: Path) -> None:
-    directory = _built(engine, tmp_path)
-    domain = next(p for p in directory.glob("*.md") if not p.name.startswith("_")).read_text(encoding="utf-8")
-    domain_name = next(line for line in domain.splitlines() if line.startswith("domain:")).split('"')[1]
-    video = {"id": "n1", "title": "New video", "url": "https://youtu.be/n1"}
-
-    first = engine.append_incremental_sources([video], directory, domain=domain_name)
-    again = engine.append_incremental_sources([video], directory, domain=domain_name)
-    assert (first.added, first.skipped) == (1, 0)
-    assert (again.added, again.skipped) == (0, 1)
-    catalog = (directory / "_MASTER_SOURCES_CATALOG.md").read_text(encoding="utf-8")
-    assert catalog.count("`n1`") == 1 and "total_sources: 2" in catalog
-    body = (directory / first.updated_files[0]).read_text(encoding="utf-8")
-    assert "source_count: 2" in body and "[Added] [New video]" in body
-
-
-def test_append_creates_a_new_domain_file(engine: AlchemyEngine, tmp_path: Path) -> None:
-    directory = _built(engine, tmp_path)
-    result = engine.append_incremental_sources(
-        [{"id": "n2", "title": "Cooking pasta", "url": "https://youtu.be/n2"}],
-        directory,
-        domain="Cooking",
-    )
-    assert result.updated_files == ["Cooking.md"]
-    assert 'domain: "Cooking"' in (directory / "Cooking.md").read_text(encoding="utf-8")
-
-
-def test_clustering_and_synthesis_share_one_gemini_client(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    config.gemini_api_key = "K" * 24
-    engine = AlchemyEngine(config)
-    assert engine.gemini is not None
-    assert engine.analyzer._gemini_client() is engine.gemini
-    assert engine.synthesizer._client() is engine.gemini  # a failover seen once is seen by both
 
 
 def test_no_gemini_client_without_a_key(engine: AlchemyEngine) -> None:
     assert engine.gemini is None
 
 
-def _write_set(tmp_path: Path, names: tuple[str, ...]) -> Path:
-    directory = tmp_path / "vault" / "chan" / "compendiums"
-    if directory.exists():
-        for old in directory.glob("*.md"):
-            old.unlink()
-    directory.mkdir(parents=True, exist_ok=True)
-    for n in names:
-        (directory / f"{n}.md").write_text(
-            f'---\ndomain: "{n.replace("_", " ")}"\nvolume: 1\nsource_count: 1\n---\n# {n}\n',
-            encoding="utf-8",
-        )
-    return directory
-
-
 def test_a_later_run_with_different_domains_prunes_the_earlier_runs_sources(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     engine = _fake_engine(tmp_path, fake)
     fake.seed("Chan", ["My own notes"])
-    engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Alpha_Topics", "Beta_Topics")))
-    second = engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Gamma_Topics", "Beta_Topics")))
+    engine.publish("Chan", _books(("Alpha_Topics", "Beta_Topics")))
+    second = engine.publish("Chan", _books(("Gamma_Topics", "Beta_Topics")))
     assert second.pruned == 1  # Alpha Topics is gone from this build
     assert fake.titles("Chan") == ["Beta Topics", "Gamma Topics", "My own notes"]
 
@@ -424,67 +194,22 @@ def test_a_later_run_with_different_domains_prunes_the_earlier_runs_sources(tmp_
 def test_nothing_is_pruned_without_a_record_of_an_earlier_sync(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     fake.seed("Chan", ["Old Domain", "My own notes"])
-    result = _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    result = _fake_engine(tmp_path, fake).publish("Chan", _books())
     assert result.pruned == 0 and "Old Domain" in fake.titles("Chan")
 
 
 def test_a_failed_sync_does_not_overwrite_the_record(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     engine = _fake_engine(tmp_path, fake)
-    engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Alpha_Topics",)))
+    engine.publish("Chan", _books(("Alpha_Topics",)))
     broken = FakeNotebookLM(fail={"add": "Gamma"})
     broken.notebooks, broken.sources = fake.notebooks, fake.sources
     engine.client = NotebookLMClient(engine.config, runner=broken)
     with pytest.raises(SyncError):
-        engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Gamma_Topics",)))
+        engine.publish("Chan", _books(("Gamma_Topics",)))
     engine.client = NotebookLMClient(engine.config, runner=fake)
-    engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Gamma_Topics",)))
+    engine.publish("Chan", _books(("Gamma_Topics",)))
     assert fake.titles("Chan") == ["Gamma Topics"]  # Alpha was still recorded, so it is pruned now
-
-
-def test_status_shows_home_paths_as_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(NotebookLMClient, "cli_version", lambda self: None)
-    config = AlchemyConfig(vault_path=Path.home() / "my-vault", cache_dir=Path.home() / "c")
-    facts = AlchemyEngine(config).status()
-    assert facts["vault_path"] == str(Path("~") / "my-vault")
-    assert str(Path.home()) not in json.dumps(facts)
-
-
-def test_missing_transcripts_are_summarised_once_for_the_whole_run(engine: AlchemyEngine) -> None:
-    engine.transcripts.blocked_total = 40
-    comps = [
-        DomainCompendium("A", 1, [], [], "a.md", "", 1, title_only=True),
-        DomainCompendium("A", 2, [], [], "a2.md", "", 1, title_only=True),
-        DomainCompendium("B", 1, [], [], "b.md", "", 1, is_live_synthesized=True),
-    ]
-    lines = engine._transcript_summary(comps)
-    assert len(lines) == 2
-    assert "40 videos" in lines[0] and "2 of 3 documents" in lines[1]
-    engine.transcripts.blocked_total = 0
-    assert engine._transcript_summary(comps[2:]) == []
-
-
-def test_source_titles_come_from_the_domain_name_not_the_file_name(tmp_path: Path) -> None:
-    d = tmp_path / "c"
-    d.mkdir()
-    (d / "SAMgov_Registration.md").write_text(
-        '---\ndomain: "SAM.gov Registration"\nvolume: 1\n---\n', encoding="utf-8"
-    )
-    (d / "Big_Vol_2.md").write_text('---\ndomain: "Big: Pricing"\nvolume: 2\n---\n', encoding="utf-8")
-    (d / "_INDEX.md").write_text("# index", encoding="utf-8")
-    assert AlchemyEngine._source_title_for(d / "SAMgov_Registration.md") == "SAM.gov Registration"
-    assert AlchemyEngine._source_title_for(d / "Big_Vol_2.md") == "Big: Pricing (Part 2)"
-    assert AlchemyEngine._source_title_for(d / "_INDEX.md") == "_INDEX"
-
-
-def test_the_upload_keeps_characters_a_file_name_cannot(tmp_path: Path) -> None:
-    fake = FakeNotebookLM()
-    d = _real_dir(tmp_path, ("Alpha_Topics",))
-    (d / "SAMgov_Registration.md").write_text(
-        '---\ndomain: "SAM.gov Registration"\nvolume: 1\nsource_count: 1\n---\n', encoding="utf-8"
-    )
-    _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", d)
-    assert "SAM.gov Registration" in fake.titles("Chan")
 
 
 # --- the account's source limit --------------------------------------------------------------------
@@ -503,7 +228,7 @@ def test_a_sync_that_cannot_fit_the_plan_uploads_nothing(tmp_path: Path) -> None
     fake.seed("Chan", ["Notes of my own", "Another note"])
     names = ("Alpha_Topics", "Beta_Topics", "Gamma_Topics")
     with pytest.raises(SyncError, match="would hold 5 sources") as err:
-        _limited_engine(tmp_path, fake, 4).sync_to_notebooklm("Chan", _real_dir(tmp_path, names))
+        _limited_engine(tmp_path, fake, 4).publish("Chan", _books(names))
     assert "Standard" in err.value.message and "holds up to 4" in err.value.message
     assert not any("add" in call for call in fake.calls)
     assert fake.titles("Chan") == ["Another note", "Notes of my own"]
@@ -512,7 +237,7 @@ def test_a_sync_that_cannot_fit_the_plan_uploads_nothing(tmp_path: Path) -> None
 def test_a_tight_notebook_frees_the_replaced_copies_before_uploading(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     fake.seed("Chan", ["Alpha Topics", "Beta Topics", "Mine"])
-    result = _limited_engine(tmp_path, fake, 4).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    result = _limited_engine(tmp_path, fake, 4).publish("Chan", _books())
     assert result.freed_first and (result.uploaded, result.replaced) == (2, 2)
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "Mine"]
     verbs = [c[c.index("source") + 1] for c in fake.calls if "source" in c]
@@ -522,7 +247,7 @@ def test_a_tight_notebook_frees_the_replaced_copies_before_uploading(tmp_path: P
 def test_with_room_the_old_copies_go_only_after_the_new_ones_are_in(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     fake.seed("Chan", ["Alpha Topics", "Beta Topics"])
-    result = _limited_engine(tmp_path, fake, 300).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    result = _limited_engine(tmp_path, fake, 300).publish("Chan", _books())
     assert not result.freed_first and result.source_limit == 300
     verbs = [c[c.index("source") + 1] for c in fake.calls if "source" in c]
     assert verbs.index("add") < verbs.index("delete")
@@ -530,7 +255,7 @@ def test_with_room_the_old_copies_go_only_after_the_new_ones_are_in(tmp_path: Pa
 
 def test_an_unknown_limit_is_not_guessed(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
-    result = _limited_engine(tmp_path, fake, None).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    result = _limited_engine(tmp_path, fake, None).publish("Chan", _books())
     assert result.source_limit is None and not result.freed_first and result.uploaded == 2
 
 
@@ -569,3 +294,113 @@ def test_notebooklm_route_needs_a_sign_in(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     engine.client = NotebookLMClient(engine.config, runner=fake)
     assert engine.transcripts_via_notebooklm([("abcdefghijk", "One")]) == {} and fake.calls == []
+
+
+# --- the whole pipeline ----------------------------------------------------------------------------
+
+
+class PipelineGemini:
+    """Answers every request the pipeline makes: labels, the topics, placement, consolidation."""
+
+    model = "gemini-test"
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def generate(self, prompt: str, **kw):
+        import re as _re
+
+        from notebook_alchemy.gemini import GeminiResult
+
+        self.prompts.append(prompt)
+        if prompt.startswith("Video:"):
+            nums = [int(n) for n in _re.findall(r"^\[(\d+)\]", prompt, _re.MULTILINE)]
+            segs = [
+                {"from": nums[0], "to": nums[-1], "keep": True, "headline": "Registering", "kind": "rule"}
+            ]
+            return GeminiResult(json.dumps({"segments": segs}), "STOP")
+        if "study library" in prompt:
+            topics = [
+                {
+                    "name": "Getting Registered",
+                    "sections": [{"name": "SAM.gov", "about": "the federal register"}],
+                }
+            ]
+            return GeminiResult(json.dumps({"notebook_title": "GovCon Basics", "topics": topics}), "STOP")
+        if "Place each numbered passage" in prompt:
+            nums = _re.findall(r"^(\d+): ", prompt, _re.MULTILINE)
+            return GeminiResult(json.dumps({"assignments": {n: 0 for n in nums}}), "STOP")
+        nums = [int(n) for n in _re.findall(r"^(\d+): \[", prompt, _re.MULTILINE)]
+        return GeminiResult(json.dumps({"intro": "How to register.", "order": nums}), "STOP")
+
+    def submit_batch(self, requests, name):
+        from notebook_alchemy.errors import GeminiError
+
+        raise GeminiError("refused", status=400, detail="Precondition check failed.")
+
+    @staticmethod
+    def batch_refused(exc) -> bool:
+        return True
+
+    def usage(self):
+        return []
+
+
+def test_a_channel_becomes_topic_books_and_a_rerun_asks_gemini_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_alchemy.channel import (
+        ChannelScanner,
+        ChannelScanResult,
+        ChannelVideo,
+        TranscriptManager,
+        TranscriptResult,
+    )
+
+    videos = [ChannelVideo(f"vid0000000{i}", f"SAM.gov part {i}", "u", 600, "2026-03-01") for i in range(3)]
+    monkeypatch.setattr(
+        ChannelScanner, "scan", lambda self, url, limit=None, **kw: ChannelScanResult("Chan", videos)
+    )
+    words = (
+        "Welcome back to the channel. Registering in SAM.gov takes ten days. You need your EIN exactly as "
+        "the IRS shows it."
+    )
+    monkeypatch.setattr(
+        TranscriptManager,
+        "fetch_many",
+        lambda self, items, progress=None: {
+            v: TranscriptResult(v, f"{words} Video {v} adds its own fact.", "youtube") for v, _ in items
+        },
+    )
+    engine = AlchemyEngine(_config(tmp_path))
+    engine.gemini = PipelineGemini()  # type: ignore[assignment]
+    report = engine.build("@chan")
+    assert report.library.notebook_title == "GovCon Basics" and report.used_ai
+    book = next(b for b in report.books if b.title == "Getting Registered")
+    assert book.content.count("takes ten days") == 1  # said in all three videos, kept once
+    assert all(f"vid0000000{i} adds its own fact" in book.content for i in range(3))  # what is new stays
+    assert "Welcome back" not in book.content and not book.content.startswith("---")
+    asked = len(engine.gemini.prompts)
+    engine.build("@chan")
+    assert len(engine.gemini.prompts) == asked  # labels, topics, placement and sections all cached
+
+
+def test_a_rerun_updates_the_same_notebook_even_when_the_title_changes(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    first = engine.publish("First Title", _books(), channel_key="@chan")
+    second = engine.publish("A Better Title", _books(), channel_key="@chan")
+    assert second.notebook_id == first.notebook_id and not second.created
+    assert [n["title"] for n in fake.notebooks] == ["First Title"]
+
+
+def test_the_estimate_counts_cached_words_and_spends_nothing(tmp_path: Path) -> None:
+    from notebook_alchemy.channel import ChannelVideo
+
+    engine = AlchemyEngine(_config(tmp_path))
+    engine.transcripts._write_cache("vid00000001", "t", "word " * 1000, method="youtube")
+    est = engine.estimate(
+        [ChannelVideo("vid00000001", "t", "u", 600), ChannelVideo("vid00000002", "t", "u", 600)]
+    )
+    assert est.videos_known == 1 and est.words_known == 1000
+    assert est.words_estimated == 1000 + int(600 * 2.5) and est.cost_usd > 0

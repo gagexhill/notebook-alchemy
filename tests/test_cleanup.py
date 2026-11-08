@@ -70,3 +70,19 @@ def test_undated_videos_are_compared_last() -> None:
     dated, undated = [Chunk("dated", 1, FACT)], [Chunk("undated", 1, FACT)]
     mark_duplicates([("", undated), ("2022-05-05", dated)])
     assert dated[0].kept and undated[0].duplicate_of == "dated:1"
+
+
+def test_a_repeated_run_inside_a_chunk_is_taken_out_and_the_rest_stays() -> None:
+    older = [Chunk("old", 1, FACT + ". Only the old video says that 8a needs two years in business.")]
+    newer = [Chunk("new", 1, FACT + ". Only the new video says the fee is zero dollars.")]
+    mark_duplicates([("2023-01-01", older), ("2025-01-01", newer)])
+    assert newer[0].text.startswith("To register in SAM.gov") and "fee is zero" in newer[0].text
+    assert "SAM.gov" not in older[0].text and "8a needs two years in business" in older[0].text
+    assert newer[0].also_in == ["old"] and older[0].kept
+
+
+def test_a_short_shared_phrase_is_not_a_repeat() -> None:
+    a = [Chunk("a", 1, "In this video we talk about the CAGE code and how long it takes to arrive.")]
+    b = [Chunk("b", 1, "In this video we talk about pricing a janitorial bid for a federal building.")]
+    mark_duplicates([("2024-01-01", a), ("2025-01-01", b)])
+    assert a[0].text.startswith("In this video we talk about")  # shared, but shorter than a passage

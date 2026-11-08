@@ -6,7 +6,7 @@
 
 <div align="center">
 
-![Notebook Alchemy](https://img.shields.io/badge/Notebook%20Alchemy-0.2.0-5B3FD0?style=for-the-badge)
+![Notebook Alchemy](https://img.shields.io/badge/Notebook%20Alchemy-0.3.0-5B3FD0?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Click](https://img.shields.io/badge/Click-8.1%2B-4EAA25?style=for-the-badge)
 ![Rich](https://img.shields.io/badge/Rich-13%2B-FF6F61?style=for-the-badge)
