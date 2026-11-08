@@ -98,6 +98,7 @@ link       yt-dlp   captions,  filler,   Gemini,   topics,  order, dupes,    pla
 
 | Mode | Command | Calls out to | Writes | Use it when |
 |---|---|---|---|---|
+| Guided first run | `notebook-alchemy` | YouTube, NotebookLM, Gemini if you add a key | One notebook | You want to be asked for each choice instead of reading options |
 | Preview | `notebook-alchemy dry-run <url>` | YouTube | Nothing | You want the video count, the words already read and the cost first |
 | Build and upload | `notebook-alchemy run <url>` | YouTube, NotebookLM, Gemini if a key is set | One notebook | You want the books in NotebookLM |
 | Keep a copy | `notebook-alchemy run <url> --save books` | YouTube, NotebookLM for blocked captions, Gemini | `books/` | You want the books as files instead of uploading |
@@ -257,6 +258,14 @@ notebook-alchemy test
 `notebook-alchemy test` builds the sample catalog in a temporary folder and needs no network or credentials. Use `python3` on macOS and Linux if `python` is not Python 3, and run any command as `python -m notebook_alchemy.cli …` if `notebook-alchemy` is not on your `PATH`.
 
 ### Set up and run
+
+The quickest start is the guided run: type `notebook-alchemy` with nothing after it. It signs you in to NotebookLM (a browser window), offers to keep that sign-in fresh, offers a free Gemini key for topic sorting, asks for a channel link, and builds the notebook. Every question has a default, so Enter is enough.
+
+```bash
+notebook-alchemy
+```
+
+For more control, the separate commands below do the same steps one at a time.
 
 The guided setup asks for the Gemini key (hidden as you type) and the Google account to upload to, and writes them to `.env`. Run it again whenever you want to change either:
 

@@ -8,6 +8,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 from rich.console import Console
@@ -1046,3 +1047,80 @@ def test_setup_without_a_sign_in_says_so(
     result = runner.invoke(cli, ["setup"], input="\ndefault\nkeep\n")
     assert result.exit_code == 0, result.output
     assert "Not signed in to NotebookLM yet" in result.output and "Uploads go to" not in result.output
+
+
+# --- the guided first run ---------------------------------------------------------------------------
+
+
+def test_no_command_outside_a_terminal_prints_the_help(runner: CliRunner) -> None:
+    result = runner.invoke(cli, [])
+    assert result.exit_code == 0 and "Usage:" in result.output and "guided first run" in result.output
+
+
+def _recorded_run(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    runs: list[dict[str, object]] = []
+    fake = click.Command(
+        "run",
+        callback=lambda **kw: runs.append(kw),
+        params=[click.Argument(["source"]), click.Option(["--offline"], is_flag=True)],
+    )
+    monkeypatch.setattr(cli_module, "run_pipeline", fake)
+    return runs
+
+
+def _guided(monkeypatch: pytest.MonkeyPatch, *, signed_in: bool) -> None:
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    monkeypatch.setattr(NotebookLMClient, "is_authenticated", lambda self: signed_in)
+    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(signed_in, "ok", 1))
+
+
+def test_the_guided_run_needs_only_a_channel_link_when_signed_in(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _guided(monkeypatch, signed_in=True)
+    runs = _recorded_run(monkeypatch)
+    # keep signed in: Enter (yes); key: Enter (no); a wrong link, then a channel
+    result = runner.invoke(cli, [], input="\n\nnot a link\n@kizzyparks\n")
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert f"Signed in as [{ACCOUNT}]" in flat and "does not look like a YouTube link" in flat
+    assert runs == [{"source": "@kizzyparks", "offline": True}]  # no key: every word, sorted by title
+    assert "notebook-alchemy run @kizzyparks" in flat
+    assert list(isolated_environment.scheduler.tasks) == ["Notebook Alchemy keep signed in (default)"]
+
+
+def test_the_guided_run_can_add_a_gemini_key(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _guided(monkeypatch, signed_in=True)
+    runs = _recorded_run(monkeypatch)
+    opened: list[str] = []
+    monkeypatch.setattr(click, "launch", lambda url, **kw: opened.append(url))
+    key = "AIzaSyTEST-not-a-real-key-000"
+    result = runner.invoke(cli, [], input=f"n\ny\n{key}\nhttps://www.youtube.com/@kizzyparks\n")
+    assert result.exit_code == 0, result.output
+    assert opened == ["https://aistudio.google.com/apikey"] and key not in result.output
+    assert f"GEMINI_API_KEY={key}" in (isolated_environment.work / ".env").read_text(encoding="utf-8")
+    assert runs == [{"source": "https://www.youtube.com/@kizzyparks", "offline": False}]
+
+
+def test_the_guided_run_stops_cleanly_without_a_sign_in(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _guided(monkeypatch, signed_in=False)
+    runs = _recorded_run(monkeypatch)
+    result = runner.invoke(cli, [], input="n\n")
+    assert result.exit_code == 1 and "Nothing was done" in result.output and runs == []
+
+
+def test_the_guided_run_builds_and_uploads_for_real(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _guided(monkeypatch, signed_in=True)
+    fake_channel("Build a REST API", "CSS grid tricks")
+    uploads = _record_uploads(monkeypatch)
+    result = runner.invoke(
+        cli, [], input="n\nn\n@my\ny\n\n"
+    )  # y: the upload account; Enter: the notebook name
+    assert result.exit_code == 0, result.output
+    assert len(uploads) == 1 and "Created notebook" in result.output
