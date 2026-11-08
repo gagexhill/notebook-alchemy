@@ -81,7 +81,7 @@ link       yt-dlp   captions,  filler,   Gemini,   topics,  order, dupes,    pla
    - yt-dlp's subtitle download;
    - NotebookLM, which fetches a video's transcript on Google's side and is not affected when YouTube refuses your connection.
 
-   A refused route pauses while the others carry on. A video still missing is listed in the overview and retried on the next run.
+   A refused route pauses while the others carry on. A video still missing is listed in the overview and retried on the next run. With `--watch N`, Gemini watches up to N of those videos itself and writes down what is said (paid: about $0.15 per 30 minutes; videos over 90 minutes are skipped); the overview names each video read this way.
 3. **Clean.** On your machine, free: caption noise and filler go, short calls to action and sponsor sentences go, and a passage repeated across videos (or within one) is kept once, in the newest video.
 4. **Label.** One Gemini request per video reads its numbered chunks and returns labels only: keep or drop, a headline, how long the information stays true, and an editor's note where a passage needs context. Captions without punctuation also come back punctuated; the punctuation is copied onto the original words, and no word is added or lost. Labels are cached per video.
 5. **Sort.**
@@ -102,6 +102,7 @@ link       yt-dlp   captions,  filler,   Gemini,   topics,  order, dupes,    pla
 | Preview | `notebook-alchemy dry-run <url>` | YouTube | Nothing | You want the video count, the words already read and the cost first |
 | Build and upload | `notebook-alchemy run <url>` | YouTube, NotebookLM, Gemini if a key is set | One notebook | You want the books in NotebookLM |
 | Keep a copy | `notebook-alchemy run <url> --save books` | YouTube, NotebookLM for blocked captions, Gemini | `books/` | You want the books as files instead of uploading |
+| Read the unreadable | `notebook-alchemy run <url> --watch 10` | YouTube, NotebookLM, Gemini | One notebook | Some videos have no captions any route can read, and you accept Gemini's cost to have it watch them |
 | Without AI | `notebook-alchemy run <url> --offline` | YouTube, NotebookLM | One notebook | You want every word, sorted by title, at no API cost |
 | Try it | `notebook-alchemy run --mock --save books` | Nothing | `books/` | You want to see the output before pointing it at a channel |
 | Self-test | `notebook-alchemy test` | Nothing | A temporary folder | You want to check that everything installed correctly |
