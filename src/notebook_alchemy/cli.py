@@ -19,15 +19,17 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__, ui
-from .channel import video_id_from_url
+from .channel import CHANNEL_TABS, DEFAULT_TABS, video_id_from_url
 from .client import (
     AccountIdentity,
     NotebookLMClient,
+    consent_file,
     record_upload_consent,
     upload_confirmed,
 )
 from .config import (
     DEFAULT_MAX_PER_VOLUME,
+    LOG_LEVELS,
     AlchemyConfig,
     is_usable_api_key,
     update_dotenv,
@@ -38,18 +40,8 @@ from .errors import AlchemyError, ConfigError, NotebookLMError, SessionError, Va
 from .synthesizer import (
     CATALOG_FILENAME,
     INDEX_FILENAME,
-    LEGACY_CATALOG_FILENAME,
-    LEGACY_INDEX_FILENAME,
 )
 from .ui import esc, handle_errors
-
-_LOG_LEVELS = {
-    "DEBUG": logging.DEBUG,
-    "INFO": logging.INFO,
-    "WARNING": logging.WARNING,
-    "ERROR": logging.ERROR,
-    "CRITICAL": logging.CRITICAL,
-}
 
 MOCK_NOTE = (
     "This run uses the bundled sample catalog, not a real source. Its output is for trying the tool "
@@ -68,7 +60,7 @@ COOKIE_BROWSERS = ("chrome", "edge", "firefox", "brave")
 SETUP_KEYS = ("GEMINI_API_KEY", "ALCHEMY_NOTEBOOKLM_PROFILE", "ALCHEMY_VAULT_PATH")
 KEY_BILLING_NOTE = (
     "The key bills to the Google Cloud project it was created in (see aistudio.google.com/apikey). "
-    "A Google AI Pro subscription does not change Gemini API quota or billing."
+    "A Google AI subscription plan does not change Gemini API quota or billing."
 )
 
 
@@ -119,7 +111,7 @@ def _show_upload_target(engine: AlchemyEngine) -> AccountIdentity:
     ui.info(f"  Upload account: {_account_text(identity)}")
     if not identity.email:
         ui.info(
-            "  [dim]Record it with `notebook-alchemy login --account <email> --browser-cookies edge`"
+            "  [dim]Record it with `notebook-alchemy login --account <email> --browser-cookies chrome`"
             " or `notebook-alchemy setup`.[/dim]"
         )
     ui.info(f"  Gemini API key: {'set' if engine.config.has_gemini_key else 'not set'}")
@@ -140,7 +132,8 @@ def _confirm_first_upload(identity: AccountIdentity, yes: bool) -> None:
             f"This is {first} to NotebookLM {target}, and it needs your confirmation.",
             hint=(
                 "Run the command in a terminal to confirm, or pass --yes. Record the account with "
-                "`notebook-alchemy login --browser-cookies edge --account <email>` so it is asked only once."
+                "`notebook-alchemy login --browser-cookies chrome --account <email>` so it is asked "
+                "only once."
             ),
         )
     ui.console.print(
@@ -164,6 +157,41 @@ def _same_account_as_confirmed(engine: AlchemyEngine, confirmed: AccountIdentity
             hint="The files are built; check the account with `notebook-alchemy status`, then run "
             "`notebook-alchemy sync` to upload them.",
         )
+
+
+def _gemini_usage_text(engine: AlchemyEngine) -> str:
+    """What Gemini actually used, as Google reported it, priced at today's listed rates."""
+    rows = engine.gemini.usage() if engine.gemini else []
+    if not rows:
+        return ""
+    lines = [
+        f"{esc(model)}: {tokens_in:,} input and {tokens_out:,} output tokens (about ${cost:.4f})"
+        for model, tokens_in, tokens_out, cost in rows
+    ]
+    return "\nGemini used " + "; ".join(lines) + " [dim](output includes thinking)[/dim]"
+
+
+def _parse_tabs(_ctx: click.Context, _param: click.Parameter, value: str) -> tuple[str, ...]:
+    tabs = tuple(dict.fromkeys(t.strip().lower() for t in value.split(",") if t.strip()))
+    unknown = [t for t in tabs if t not in CHANNEL_TABS]
+    if unknown or not tabs:
+        raise click.BadParameter(f"use one or more of {', '.join(CHANNEL_TABS)}, separated by commas.")
+    return tabs
+
+
+tabs_option = click.option(
+    "--tabs",
+    default=",".join(DEFAULT_TABS),
+    show_default=True,
+    callback=_parse_tabs,
+    help="Channel tabs to read: videos, streams, shorts (comma-separated). Ignored for playlists and videos.",
+)
+
+
+def _last_words(text: str, limit: int = 300) -> str:
+    """The end of a tool's output on one line: the cause is usually last, after progress notes."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else "..." + flat[-limit:].split(" ", 1)[-1]
 
 
 def _target(source: str | None, notebook: str | None, mock: bool) -> str:
@@ -238,7 +266,7 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
     ui.configure(quiet=quiet, no_color=no_color or bool(os.getenv("NO_COLOR")), debug=debug)
     # -vv / -v / -q win; otherwise ALCHEMY_LOG_LEVEL (validated in AlchemyConfig) or warnings only.
     env_level = os.getenv("ALCHEMY_LOG_LEVEL", "").strip().upper()
-    level = _LOG_LEVELS.get(env_level, logging.WARNING)
+    level = LOG_LEVELS.get(env_level, logging.WARNING)
     if verbose:
         level = logging.DEBUG if verbose > 1 else logging.INFO
     if quiet:
@@ -268,6 +296,7 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
 @click.option("--offline", is_flag=True, help="No Gemini calls: keyword clustering, offline indexes.")
 @click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real source.")
 @click.option("--limit", type=click.IntRange(min=1), help="Only scan the first N videos.")
+@tabs_option
 @click.option(
     "--max-per-vol",
     type=click.IntRange(min=1),
@@ -287,6 +316,7 @@ def run_pipeline(
     offline: bool,
     mock: bool,
     limit: int | None,
+    tabs: tuple[str, ...],
     max_per_vol: int,
     write: bool,
     sync: bool,
@@ -321,7 +351,7 @@ def run_pipeline(
     ui.step(1, total_steps, "Discover and group videos")
     with ui.Reporter() as reporter:
         report = engine.analyzer_for(offline).generate_dry_run(
-            target, use_mock=mock, limit=limit, progress=reporter
+            target, use_mock=mock, limit=limit, tabs=tabs, progress=reporter
         )
     if report.is_mock:
         ui.banner("Sample data", MOCK_NOTE)
@@ -372,7 +402,7 @@ def run_pipeline(
             str(c.volume),
             str(len(c.titles)),
             f"~{c.token_count:,}",
-            "gemini" if c.is_live_synthesized else "offline",
+            "gemini" if c.is_live_synthesized else ("index (no transcripts)" if c.title_only else "offline"),
         )
     console.print(table)
     for w in result.warnings:
@@ -388,7 +418,7 @@ def run_pipeline(
         Panel(
             f"[bold]{result.total_compendiums}[/bold] compendiums from "
             f"[bold]{result.total_sources_scanned}[/bold] videos, ~{result.total_tokens:,} tokens\n"
-            f"Saved to: {esc(where)}",
+            f"Saved to: {esc(where)}" + _gemini_usage_text(engine),
             title="Build complete",
             border_style="green",
             padding=(0, 2),
@@ -436,10 +466,18 @@ def run_pipeline(
 @click.argument("source", required=False)
 @click.option("-n", "--notebook", help="YouTube URL or existing notebook (alternative to SOURCE).")
 @click.option("--limit", type=click.IntRange(min=1), help="Only scan the first N videos.")
+@tabs_option
 @click.option("--offline", is_flag=True, help="No Gemini calls: keyword clustering only.")
 @click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real source.")
 @handle_errors
-def dry_run(source: str | None, notebook: str | None, limit: int | None, offline: bool, mock: bool) -> None:
+def dry_run(
+    source: str | None,
+    notebook: str | None,
+    limit: int | None,
+    tabs: tuple[str, ...],
+    offline: bool,
+    mock: bool,
+) -> None:
     """Preview videos, domains and cost. Writes and uploads nothing."""
     target = _target(source, notebook, mock)
     engine = _engine()
@@ -447,7 +485,7 @@ def dry_run(source: str | None, notebook: str | None, limit: int | None, offline
     ui.info(f"[bold cyan]Analyzing[/bold cyan] {esc(target)}")
     with ui.Reporter() as reporter:
         report = engine.analyzer_for(offline).generate_dry_run(
-            target, use_mock=mock, limit=limit, progress=reporter
+            target, use_mock=mock, limit=limit, tabs=tabs, progress=reporter
         )
     if report.is_mock:
         ui.banner("Sample data", MOCK_NOTE)
@@ -534,7 +572,7 @@ def status(profile: str | None) -> None:
         next_steps.append("notebook-alchemy setup (or: notebook-alchemy login)")
     elif not identity.email:
         next_steps.append(
-            "record the upload account: notebook-alchemy login --browser-cookies edge --account <email>"
+            "record the upload account: notebook-alchemy login --browser-cookies chrome --account <email>"
         )
     if not has_key:
         next_steps.append(
@@ -598,14 +636,23 @@ def _sign_in(
         ) from exc
     if proc.returncode != 0:
         detail = ((proc.stderr or proc.stdout or "") if browser_cookies else "").strip()
+        if browser_cookies:
+            browser_name = browser_cookies.split("::", 1)[0]
+            hint = (
+                f"List the accounts that browser holds with `notebooklm auth inspect --browser "
+                f"{browser_name}`, sign in to Google in it first, or try another browser "
+                f"({', '.join(COOKIE_BROWSERS)})."
+            )
+        else:
+            hint = (
+                "If no window opened, install its browser once with `python -m playwright install "
+                "chromium`, or use `--browser chrome`. Reusing a browser you are already signed in "
+                "to also works: `notebook-alchemy login --browser-cookies chrome`."
+            )
         raise NotebookLMError(
             f"Sign-in did not complete (exit code {proc.returncode})."
-            + (f" {' '.join(detail.split())[:300]}" if detail else ""),
-            hint=(
-                "List the accounts a browser holds with `notebooklm auth inspect --browser edge`, "
-                "try `notebook-alchemy login --browser-cookies edge`, or set NOTEBOOKLM_AUTH_JSON "
-                "with exported session cookies."
-            ),
+            + (f" {_last_words(detail)}" if detail else ""),
+            hint=hint,
         )
     identity = client.upload_account()
     if account and (identity.email or "").casefold() != account.strip().casefold():
@@ -614,7 +661,7 @@ def _sign_in(
             f"{identity.display}, not {account}. Uploads through this profile would go to that account.",
             hint=(
                 "Check the email with `notebooklm auth inspect --browser "
-                f"{(browser_cookies or 'edge').split('::', 1)[0]}` and sign in again before uploading."
+                f"{(browser_cookies or 'chrome').split('::', 1)[0]}` and sign in again before uploading."
             ),
         )
     with ui.console.status("Confirming the session works..."):
@@ -633,7 +680,7 @@ def _sign_in(
     epilog=(
         "\b\nExamples:\n"
         "  notebook-alchemy login                        sign in through a browser window\n"
-        "  notebook-alchemy login --browser-cookies edge reuse an Edge sign-in, no window\n"
+        "  notebook-alchemy login --browser-cookies chrome  reuse a Chrome sign-in, no window\n"
         "  notebook-alchemy login --browser-cookies chrome --account you@example.com --profile personal\n"
         "                                                pick one of several signed-in accounts\n"
         "  notebook-alchemy login --check                is the stored session still valid?\n"
@@ -797,9 +844,14 @@ def setup() -> None:
     save("ALCHEMY_NOTEBOOKLM_PROFILE", profile)
 
     ui.step(3, 3, "Vault folder")
-    vault = click.prompt("  Where should compendiums be written?", default=str(config.vault_path))
+    # The default is what .env already says (or "vault"), never the resolved path with the home folder.
+    vault = click.prompt(
+        "  Where should compendiums be written?",
+        default=os.getenv("ALCHEMY_VAULT_PATH", "").strip() or "vault",
+    )
     vault_path = Path(vault).expanduser().resolve()
-    save("ALCHEMY_VAULT_PATH", str(vault_path))
+    # Saved as typed (relative or ~/...), so .env does not carry the user's home folder name.
+    save("ALCHEMY_VAULT_PATH", vault.strip())
 
     ui.console.print(
         Panel(
@@ -894,7 +946,17 @@ def append_video(
 
 
 # Files that mark a folder as this tool's vault output, in current and earlier layouts.
-_VAULT_MARKERS = (INDEX_FILENAME, CATALOG_FILENAME, LEGACY_INDEX_FILENAME, LEGACY_CATALOG_FILENAME)
+_VAULT_MARKERS = (INDEX_FILENAME, CATALOG_FILENAME)
+
+
+def _is_sync_record(path: Path) -> bool:
+    """A record this tool wrote after a sync: a JSON object whose `titles` is a list of strings."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    titles = data.get("titles") if isinstance(data, dict) else None
+    return isinstance(titles, list) and all(isinstance(t, str) for t in titles)
 
 
 def _is_cache_record(path: Path) -> bool:
@@ -926,20 +988,32 @@ def _remove(path: Path) -> int:
         "\b\nExamples:\n"
         "  notebook-alchemy clean                  clear the transcript cache\n"
         "  notebook-alchemy clean --vaults         delete built compendiums (asks first)\n"
-        "  notebook-alchemy clean --all --yes      both, without asking\n"
+        "  notebook-alchemy clean --records        forget past uploads and upload confirmations\n"
+        "  notebook-alchemy clean --all --yes      cache, vaults and records, without asking\n"
     ),
 )
-@click.option("--all", "clean_all", is_flag=True, help="Clear the cache and delete built vaults.")
+@click.option(
+    "--all", "clean_all", is_flag=True, help="Clear the cache, delete built vaults and local records."
+)
 @click.option("--cache", "clean_cache", is_flag=True, help="Clear the transcript cache.")
 @click.option("--vaults", "clean_vaults", is_flag=True, help="Delete built compendium folders.")
+@click.option(
+    "--records",
+    "clean_records",
+    is_flag=True,
+    help="Delete the records of past uploads and upload confirmations.",
+)
 @click.option("-y", "--yes", is_flag=True, help="Do not ask before deleting.")
 @handle_errors
-def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: bool) -> None:
-    """Reclaim disk space from the transcript cache and built vaults."""
+def clean_pipeline(
+    clean_all: bool, clean_cache: bool, clean_vaults: bool, clean_records: bool, yes: bool
+) -> None:
+    """Remove the transcript cache, built vaults, or this tool's local records."""
     config = _config()
     engine = AlchemyEngine(config)
     do_vaults = clean_all or clean_vaults
-    do_cache = clean_all or clean_cache or not do_vaults
+    do_records = clean_all or clean_records
+    do_cache = clean_all or clean_cache or not (do_vaults or do_records)
 
     targets: list[tuple[str, Path]] = []
     skipped: list[str] = []
@@ -957,6 +1031,17 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: 
                 targets.append(("vault", d))
             else:
                 skipped.append(str(d))
+    if do_records:
+        # Records of past uploads (titles per notebook id) and the upload-confirmation hashes.
+        records_dir = engine.sync_records_dir()
+        if records_dir.is_dir():
+            for f in sorted(records_dir.glob("*.json")):
+                if _is_sync_record(f):
+                    targets.append(("record", f))
+                else:
+                    skipped.append(str(f))
+        if consent_file().is_file():
+            targets.append(("record", consent_file()))
     for item in skipped:
         ui.warn(f"Skipped {esc(item)}: it does not look like Notebook Alchemy output.")
     if not targets:
@@ -965,7 +1050,8 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: 
 
     cache_targets = [p for kind, p in targets if kind == "cache"]
     vault_targets = [p for kind, p in targets if kind == "vault"]
-    ask = (vault_targets or (cache_targets and custom_cache)) and not yes
+    record_targets = [p for kind, p in targets if kind == "record"]
+    ask = (vault_targets or record_targets or (cache_targets and custom_cache)) and not yes
     if ask:
         if cache_targets and custom_cache:
             ui.console.print(
@@ -976,6 +1062,11 @@ def clean_pipeline(clean_all: bool, clean_cache: bool, clean_vaults: bool, yes: 
             ui.console.print("[bold]These built vault folders will be deleted:[/bold]")
             for p in vault_targets:
                 ui.console.print(f"  {esc(p)}")
+        if record_targets:
+            ui.console.print(
+                f"[bold]{len(record_targets)} local records will be deleted[/bold] (the next sync cannot "
+                "remove sources an earlier sync uploaded, and the next upload asks for confirmation again)."
+            )
         if not click.confirm("Continue?", default=False):
             ui.warn("Cancelled. Nothing was deleted.")
             return
@@ -1021,7 +1112,6 @@ def run_automated_test() -> None:
         test_config = AlchemyConfig(
             env="test",
             vault_path=tmp_path / "vault",
-            state_dir=tmp_path / "state",
             cache_dir=tmp_path / "cache",
             gemini_api_key="",
         )

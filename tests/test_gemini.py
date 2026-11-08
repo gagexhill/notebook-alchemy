@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 
@@ -129,15 +130,24 @@ def test_scrub_removes_key_forms() -> None:
     assert KEY not in scrub(f"x https://h/p?key={KEY} y {KEY}", KEY)
 
 
+NOV_2026, JAN_2027 = datetime.date(2026, 11, 7), datetime.date(2027, 1, 1)
+
+
 def test_price_table() -> None:
-    assert price_for("gemini-2.5-flash-lite") == (0.10, 0.40, None)
-    low, high, note = price_for("gemini-3.8-flash")
+    assert price_for("gemini-2.5-flash-lite", NOV_2026) == (0.10, 0.40, None)
+    low, high, note = price_for("gemini-3.8-flash", NOV_2026)
     assert (low, high) == (0.75, 3.75)
     assert note == THINKING_NOTE  # 3.x models think by default, so the output estimate is a floor
 
 
+def test_a_scheduled_price_change_applies_from_its_date() -> None:
+    assert price_for("gemini-3.8-flash", datetime.date(2026, 12, 31))[:2] == (0.75, 3.75)
+    assert price_for("gemini-3.8-flash", JAN_2027)[:2] == (1.50, 7.50)
+    assert price_for("gemini-unknown", JAN_2027)[:2] == (1.50, 7.50)  # follows the fallback model
+
+
 def test_unlisted_model_is_priced_high_and_flagged() -> None:
-    low, high, note = price_for("gemini-unknown")
+    low, high, note = price_for("gemini-unknown", NOV_2026)
     assert (low, high) == (0.75, 3.75)
     assert note and "gemini-unknown" in note and THINKING_NOTE in note
 
@@ -299,6 +309,45 @@ def test_a_daily_quota_with_no_fallback_explains_the_next_step() -> None:
     assert err.value.status == 429 and "billing" in (err.value.hint or "")
 
 
+def _structured_429(quota_id: str, delay: str = "") -> httpx.Response:
+    details: list[dict[str, object]] = [
+        {
+            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+            "violations": [{"quotaMetric": "generativelanguage.googleapis.com/x", "quotaId": quota_id}],
+        }
+    ]
+    if delay:
+        details.append({"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": delay})
+    # The message deliberately says nothing about days, so only the structured detail can tell.
+    return httpx.Response(
+        429, json={"error": {"code": 429, "message": "Quota exceeded.", "details": details}}
+    )
+
+
+def test_a_per_day_quota_is_read_from_the_structured_detail() -> None:
+    sleeps: list[float] = []
+    daily = _structured_429("GenerateRequestsPerDayPerProjectPerModel-FreeTier")
+    handler, calls = _router({PRIMARY: daily, BACKUP: httpx.Response(200, json=_ok())})
+    client = GeminiClient(
+        KEY, PRIMARY, fallback_model=BACKUP, transport=httpx.MockTransport(handler), sleep=sleeps.append
+    )
+    assert client.generate("hi").model == BACKUP and calls == [PRIMARY, BACKUP] and sleeps == []
+
+
+def test_a_per_minute_quota_waits_for_the_structured_retry_delay() -> None:
+    sleeps: list[float] = []
+    responses = iter(
+        [
+            _structured_429("GenerateRequestsPerMinutePerProjectPerModel", "7.5s"),
+            httpx.Response(200, json=_ok()),
+        ]
+    )
+    client = GeminiClient(
+        KEY, PRIMARY, transport=httpx.MockTransport(lambda r: next(responses)), sleep=sleeps.append
+    )
+    assert client.generate("hi").model == PRIMARY and sleeps == [7.5]
+
+
 def test_a_rate_limit_that_clears_in_seconds_is_still_retried() -> None:
     attempts = {"n": 0}
 
@@ -321,3 +370,21 @@ def test_long_error_text_is_shortened_in_the_detail() -> None:
     with pytest.raises(GeminiError) as err:
         client.generate("hi")
     assert len(err.value.detail) < 180
+
+
+def test_usage_adds_up_what_google_reported_including_thinking() -> None:
+    body = _ok()
+    body["usageMetadata"]["thoughtsTokenCount"] = 20
+    client = _client(lambda r: httpx.Response(200, json=body))
+    client.generate("a")
+    client.generate("b")
+    ((model, tokens_in, tokens_out, cost),) = client.usage()
+    assert (model, tokens_in, tokens_out) == ("gemini-2.5-flash-lite", 20, 50)  # 2 x (5 + 20) out
+    assert cost == pytest.approx((20 * 0.10 + 50 * 0.40) / 1e6)
+
+
+def test_a_failed_request_adds_no_usage() -> None:
+    client = _client(lambda r: httpx.Response(400, json={"error": {"message": "bad"}}))
+    with pytest.raises(GeminiError):
+        client.generate("a")
+    assert client.usage() == []

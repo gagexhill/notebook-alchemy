@@ -11,17 +11,24 @@ import os
 import pathlib
 import socket
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import youtube_transcript_api  # noqa: F401
+
+# The tool imports these on first use. Load them now, before the fixtures below replace
+# subprocess.Popen: yt-dlp subclasses Popen while it imports.
+import yt_dlp  # noqa: F401
 
 _ENV_TO_CLEAR = (
     "GEMINI_API_KEY",
     "ALCHEMY_ENV",
     "ALCHEMY_LOG_LEVEL",
     "ALCHEMY_VAULT_PATH",
-    "ALCHEMY_STATE_DIR",
+    "ALCHEMY_GEMINI_FALLBACK_MODEL",
+    "ALCHEMY_CAPTION_LANGUAGES",
     "ALCHEMY_SESSION_FILE",
     "ALCHEMY_CACHE_DIR",
     "ALCHEMY_GEMINI_MODEL",
@@ -92,6 +99,7 @@ class FakeNotebookLM:
         self.fail = fail or {}
         self.calls: list[list[str]] = []
         self._n = 0
+        self._lock = threading.Lock()  # the sync uploads from several threads
 
     def seed(self, notebook_title: str, source_titles: list[str]) -> str:
         nb_id = self._new_id("nb")
@@ -110,6 +118,10 @@ class FakeNotebookLM:
         return f"{prefix}-{self._n}"
 
     def __call__(self, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        with self._lock:
+            return self._handle(cmd)
+
+    def _handle(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(cmd))
         args = [a for a in cmd[1:] if a != "--json"]
         if "--storage" in args:

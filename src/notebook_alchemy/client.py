@@ -6,10 +6,15 @@ success for work that did not happen.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import importlib.metadata
 import json
 import logging
 import os
 import re
+import secrets
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -26,6 +31,9 @@ NOTEBOOKLM_BIN = "notebooklm"
 LIST_TIMEOUT = 60.0
 WRITE_TIMEOUT = 120.0
 UPLOAD_TIMEOUT = 300.0
+# notebooklm's own HTTP timeout for an upload (its default is 30 s, short for a large compendium);
+# kept below UPLOAD_TIMEOUT so notebooklm reports the timeout itself.
+UPLOAD_HTTP_TIMEOUT = 180.0
 _AUTH_HINTS = ("authentication", "auth not found", "sign-in", "signed-out", "login", "re-authenticate")
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]  # defaults to subprocess.run at call time
@@ -38,7 +46,6 @@ class SourceDocument:
     source_id: str
     title: str
     content: str
-    source_type: str = "document"
 
 
 @dataclass
@@ -82,28 +89,44 @@ def _read_consents() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _account_hash(email: str, salt: str) -> str:
+    """Salted SHA-256 of the email: enough to notice the account changed, without storing who it is."""
+    return hashlib.sha256(f"{salt}:{email.strip().casefold()}".encode()).hexdigest()
+
+
 def upload_confirmed(identity: AccountIdentity) -> bool:
     """True when uploads to this profile were confirmed for this same, known account.
 
-    An unknown account is never confirmed: two different unknown accounts cannot be told apart.
+    An unknown account is never confirmed: two different unknown accounts cannot be told apart. A
+    record in any other shape (including the plain-email form of earlier versions) asks again.
     """
     if identity.email is None:
         return False
-    entry = _read_consents().get(identity.profile)
-    return isinstance(entry, dict) and "email" in entry and entry["email"] == identity.email
+    data = _read_consents()
+    salt = data.get("salt")
+    entry = data.get("profiles", {}).get(identity.profile) if isinstance(data.get("profiles"), dict) else None
+    if not isinstance(salt, str) or not isinstance(entry, str):
+        return False
+    return hmac.compare_digest(entry.encode(), _account_hash(identity.email, salt).encode())
 
 
 def record_upload_consent(identity: AccountIdentity) -> None:
-    """Remember that the user confirmed uploads to this profile and account (a known one only)."""
+    """Remember that the user confirmed uploads to this profile and account (a known one only).
+
+    The file holds a random per-install salt and, per profile, a salted hash of the account email;
+    the email itself is never written.
+    """
     if identity.email is None:
         return
     path = consent_file()
     data = _read_consents()
-    data[identity.profile] = {"email": identity.email}
+    salt = data.get("salt") if isinstance(data.get("salt"), str) else secrets.token_hex(16)
+    profiles = data.get("profiles") if isinstance(data.get("profiles"), dict) else {}
+    profiles[identity.profile] = _account_hash(identity.email, salt)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps({"salt": salt, "profiles": profiles}, indent=2), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as exc:
         raise NotebookLMError(
@@ -169,19 +192,17 @@ class NotebookLMClient:
         return bool(os.getenv("NOTEBOOKLM_AUTH_JSON")) or self.session_file() is not None
 
     def cli_version(self) -> str | None:
-        """Version text from `notebooklm --version`, or None when the CLI cannot run."""
-        try:
-            res = (self._runner or subprocess.run)(
-                [NOTEBOOKLM_BIN, "--version"],
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=15.0,
-            )
-        except (OSError, subprocess.TimeoutExpired):
+        """The installed notebooklm-py version, or None when the `notebooklm` command is missing.
+
+        Read from package metadata: starting `notebooklm --version` takes seconds.
+        """
+        if shutil.which(NOTEBOOKLM_BIN) is None:
             return None
-        return (res.stdout or "").strip() or None if res.returncode == 0 else None
+        try:
+            version = importlib.metadata.version("notebooklm-py")
+        except importlib.metadata.PackageNotFoundError:
+            return "on PATH, but not installed in this Python (version unknown)"
+        return f"notebooklm-py {version}"
 
     def check_session(self) -> SessionStatus:
         """Ask NotebookLM whether the stored session works (one read-only list call)."""
@@ -370,7 +391,8 @@ class NotebookLMClient:
     def add_source_document(self, notebook_id: str, document: SourceDocument) -> str:
         """Upload one document as a file source (content never travels on the command line)."""
         safe = re.sub(r"[^\w\-]+", "_", document.title).strip("_") or "source"
-        with tempfile.TemporaryDirectory(prefix="notebook-alchemy-") as tmp:
+        # A scanner briefly holding the temp file must not turn a finished upload into an error.
+        with tempfile.TemporaryDirectory(prefix="notebook-alchemy-", ignore_cleanup_errors=True) as tmp:
             path = Path(tmp) / f"{safe[:80]}.md"
             path.write_text(document.content, encoding="utf-8")
             data = self._run(
@@ -384,8 +406,17 @@ class NotebookLMClient:
                     "file",
                     "--title",
                     document.title,
+                    "--request-timeout",
+                    f"{UPLOAD_HTTP_TIMEOUT:g}",
                 ],
                 timeout=UPLOAD_TIMEOUT,
             )
         source_id = _first(data, "id", "source_id") or _first(_first(data, "source"), "id")
-        return str(source_id or document.source_id)
+        if not source_id:
+            # Without the new source's id it cannot be waited on, renamed or told apart from an
+            # older copy, so the upload is not reported as done.
+            raise NotebookLMError(
+                f"`notebooklm source add` returned no source id for '{document.title}'.",
+                hint="Check the notebook in NotebookLM, then run the sync again.",
+            )
+        return str(source_id)

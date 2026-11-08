@@ -14,7 +14,7 @@ from typing import Any
 from . import __version__
 from .channel import TranscriptManager, TranscriptResult
 from .client import normalize_title
-from .config import DEFAULT_GEMINI_MODEL, is_usable_api_key
+from .config import DEFAULT_GEMINI_MODEL, WINDOWS_RESERVED_NAMES, is_usable_api_key
 from .errors import GeminiError
 from .gemini import GeminiClient
 
@@ -27,22 +27,11 @@ MAX_CHARS_PER_VIDEO = 60_000
 LIVE_MAX_OUTPUT_TOKENS = 32_768
 LIVE_TIMEOUT_SECONDS = 150.0
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
-_WINDOWS_RESERVED = {
-    "con",
-    "prn",
-    "aux",
-    "nul",
-    *(f"com{i}" for i in range(1, 10)),
-    *(f"lpt{i}" for i in range(1, 10)),
-}
 # Files the vault writes beside the compendiums. The leading underscore sorts them above every
 # domain in NotebookLM's title sort and in file browsers, and no domain slug can take these names,
 # because safe_filename strips leading underscores.
 INDEX_FILENAME = "_INDEX.md"
 CATALOG_FILENAME = "_MASTER_SOURCES_CATALOG.md"
-# Names used by vaults built before the underscore prefix; still recognised there.
-LEGACY_INDEX_FILENAME = "INDEX.md"
-LEGACY_CATALOG_FILENAME = "MASTER_SOURCES_CATALOG.md"
 # Volume 2+ files end in _Vol_<n>; a domain slug of that form could take another domain's file.
 _VOLUME_FORM = re.compile(r"_vol_\d+$", re.IGNORECASE)
 
@@ -66,7 +55,7 @@ def safe_filename(text: str) -> str:
     stem = re.sub(r"[-\s]+", "_", cleaned).strip("_")[:80].strip("_")
     if not stem:
         stem = "domain"
-    if stem.lower() in _WINDOWS_RESERVED:
+    if stem.lower() in WINDOWS_RESERVED_NAMES:
         stem = f"{stem}_"
     return stem
 
@@ -81,10 +70,7 @@ def unique_slugs(domains: list[str]) -> dict[str, str]:
     the suffix, so no domain can take another's file.
     """
     slugs: dict[str, str] = {}
-    taken: set[str] = {
-        normalize_title(n)
-        for n in (INDEX_FILENAME, CATALOG_FILENAME, LEGACY_INDEX_FILENAME, LEGACY_CATALOG_FILENAME)
-    }
+    taken: set[str] = {normalize_title(n) for n in (INDEX_FILENAME, CATALOG_FILENAME)}
     for domain in domains:
         base = safe_filename(domain)
         slug = base
@@ -107,7 +93,7 @@ def notebook_url(notebook_id: str) -> str:
 
 
 def _now() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
 @dataclass
@@ -123,6 +109,12 @@ class DomainCompendium:
     token_count: int
     is_live_synthesized: bool = False
     warnings: list[str] = field(default_factory=list)
+    # Live mode was asked for, but no video in the volume had a transcript, so it is an offline index.
+    title_only: bool = False
+
+
+class _NoTranscripts(Exception):
+    """Every video in a volume lacks a transcript; Gemini would only have titles to work from."""
 
 
 class Synthesizer:
@@ -145,9 +137,6 @@ class Synthesizer:
 
     def _is_valid_api_key(self) -> bool:
         return is_usable_api_key(self.api_key)
-
-    def _safe_filename(self, text: str) -> str:
-        return safe_filename(text)
 
     def _client(self) -> GeminiClient:
         if self._gemini is None:
@@ -182,13 +171,17 @@ class Synthesizer:
 
         warnings: list[str] = []
         content = ""
-        is_live = False
+        is_live = title_only = False
         if not force_offline and self._is_valid_api_key():
             try:
                 content = self._synthesize_live(
                     domain, videos, volume, notebook_title, notebook_id, warnings, progress
                 )
                 is_live = True
+            except _NoTranscripts:
+                # Titles alone are not material for a synthesis; an index says honestly what it is,
+                # and the Gemini request is saved. The engine reports these volumes once.
+                title_only = True
             except GeminiError as exc:
                 if self._gemini is not None:
                     warnings.extend(f"{domain} (Vol. {volume}): {n}" for n in self._gemini.drain_notices())
@@ -211,6 +204,7 @@ class Synthesizer:
             token_count=max(len(content) // 4, 1),
             is_live_synthesized=is_live,
             warnings=warnings,
+            title_only=title_only,
         )
 
     def _frontmatter(
@@ -297,17 +291,12 @@ class Synthesizer:
             blocks.append(f"### [{n}] {v.get('title') or 'Untitled'}\n{body}\n")
 
         no_text = sum(1 for s in status.values() if s.startswith("none"))
+        if no_text == len(videos):
+            raise _NoTranscripts
         if no_text:
             warnings.append(f"{label}: {no_text} of {len(videos)} videos had no transcript (title only).")
         if shortened:
             warnings.append(f"{label}: {shortened} transcripts were shortened to {per_video:,} characters.")
-        blocked = [r for r in results.values() if r.source == "blocked"]
-        if blocked:
-            noun = "request" if len(blocked) == 1 else "requests"
-            warnings.append(
-                f"{label}: YouTube blocked {len(blocked)} transcript {noun}; retry later or add "
-                "local transcript files."
-            )
 
         prompt = (
             f"Synthesize the {len(videos)} numbered videos below, from '{notebook_title}', into one "

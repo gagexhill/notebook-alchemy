@@ -16,7 +16,14 @@ from notebook_alchemy import __version__, ui
 from notebook_alchemy import cli as cli_module
 from notebook_alchemy.channel import ChannelScanner, ChannelScanResult, ChannelVideo
 from notebook_alchemy.cli import cli
-from notebook_alchemy.client import AccountIdentity, NotebookLMClient, SessionStatus, upload_confirmed
+from notebook_alchemy.client import (
+    AccountIdentity,
+    NotebookLMClient,
+    SessionStatus,
+    consent_file,
+    record_upload_consent,
+    upload_confirmed,
+)
 from notebook_alchemy.engine import AlchemyEngine, SyncResult
 from notebook_alchemy.errors import ChannelScanError, SyncError
 
@@ -52,7 +59,7 @@ def _scan_result(*titles: str) -> ChannelScanResult:
         ChannelVideo(f"vid{i:08d}", t, f"https://www.youtube.com/watch?v=vid{i:08d}", 120)
         for i, t in enumerate(titles)
     ]
-    return ChannelScanResult("My Channel", "https://www.youtube.com/@my/videos", len(videos), videos, True)
+    return ChannelScanResult("My Channel", videos)
 
 
 @pytest.fixture
@@ -275,6 +282,14 @@ def test_login_cookie_failure_does_not_fall_through(
     assert len(calls) == 1  # did not open an interactive browser afterwards
 
 
+def test_a_long_sign_in_failure_shows_its_cause(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    notes = "Note: sibling-product domains are not requested by default. " * 8
+    out = notes + "Reading cookies from chrome... Could not read chrome cookies: browser database is locked."
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 1, "", out))
+    result = runner.invoke(cli, ["login", "--browser-cookies", "chrome"], terminal_width=200)
+    assert result.exit_code == 1 and "database is locked" in " ".join(result.output.split())
+
+
 # --- clean ----------------------------------------------------------------------------------------
 
 
@@ -288,17 +303,6 @@ def _seed_cache_and_vault(env) -> tuple[Path, Path]:
     (vault / "A.md").write_text("built", encoding="utf-8")
     (vault / "_INDEX.md").write_text("index", encoding="utf-8")
     return cache, vault
-
-
-def test_clean_recognises_a_vault_from_before_the_underscore_names(
-    runner: CliRunner, isolated_environment
-) -> None:
-    vault = isolated_environment.work / "vault" / "old" / "compendiums"
-    vault.mkdir(parents=True)
-    (vault / "MASTER_SOURCES_CATALOG.md").write_text("catalog", encoding="utf-8")
-    result = runner.invoke(cli, ["clean", "--vaults", "--yes"])
-    assert result.exit_code == 0, result.output
-    assert not vault.exists()
 
 
 def test_clean_defaults_to_the_cache_and_keeps_vaults(runner: CliRunner, isolated_environment) -> None:
@@ -321,6 +325,52 @@ def test_clean_yes_skips_the_prompt(runner: CliRunner, isolated_environment) -> 
     _cache, vault = _seed_cache_and_vault(isolated_environment)
     assert runner.invoke(cli, ["clean", "--all", "--yes"]).exit_code == 0
     assert not vault.exists()
+
+
+def test_setup_saves_a_home_relative_vault_path_without_the_home_folder(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, ["setup"], input="\ndefault\nkeep\n~/alchemy-vault\n")
+    assert result.exit_code == 0, result.output
+    text = (isolated_environment.work / ".env").read_text(encoding="utf-8")
+    assert "ALCHEMY_VAULT_PATH=~/alchemy-vault" in text
+    assert str(isolated_environment.home) not in text
+
+
+def test_setup_default_vault_path_carries_no_home_folder(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, ["setup"], input="\ndefault\nkeep\n\n")  # Enter at every prompt
+    assert result.exit_code == 0, result.output
+    text = (isolated_environment.work / ".env").read_text(encoding="utf-8")
+    assert "ALCHEMY_VAULT_PATH=vault" in text and str(isolated_environment.work) not in text
+
+
+def test_clean_records_removes_upload_records_and_confirmations(
+    runner: CliRunner, isolated_environment
+) -> None:
+    cache, vault = _seed_cache_and_vault(isolated_environment)
+    sync_dir = isolated_environment.home / ".notebook-alchemy" / "sync"
+    sync_dir.mkdir(parents=True)
+    (sync_dir / "nb-1.json").write_text('{"titles": ["A"]}', encoding="utf-8")
+    record_upload_consent(AccountIdentity("default", ACCOUNT))
+    declined = runner.invoke(cli, ["clean", "--records"], input="n\n")
+    assert declined.exit_code == 0 and "local records" in declined.output and consent_file().exists()
+    assert runner.invoke(cli, ["clean", "--records", "--yes"]).exit_code == 0
+    assert not list(sync_dir.iterdir()) and not consent_file().exists()
+    assert list(cache.iterdir()) and vault.exists()  # --records touches nothing else
+
+
+def test_clean_records_leaves_files_it_did_not_write(runner: CliRunner, isolated_environment) -> None:
+    sync_dir = isolated_environment.home / ".notebook-alchemy" / "sync"
+    sync_dir.mkdir(parents=True)
+    (sync_dir / "mine.json").write_text('{"titles": ["A"]}', encoding="utf-8")
+    (sync_dir / "theirs.json").write_text('{"settings": true}', encoding="utf-8")
+    result = runner.invoke(cli, ["clean", "--records", "--yes"])
+    assert result.exit_code == 0 and "theirs.json" in result.output
+    assert [p.name for p in sync_dir.iterdir()] == ["theirs.json"]
 
 
 def test_clean_reports_real_failures(
@@ -489,7 +539,7 @@ def test_status_shows_account_and_key_state_but_never_the_key(
     result = runner.invoke(cli, ["status", "--profile", "personal"])
     assert result.exit_code == 0, result.output
     assert "owner@example.test" in result.output and "personal" in result.output
-    assert "AI Pro" in result.output and key not in result.output and key[:10] not in result.output
+    assert "subscription plan" in result.output and key not in result.output and key[:10] not in result.output
 
 
 def test_first_upload_without_a_terminal_needs_yes(
@@ -629,7 +679,7 @@ def test_setup_writes_env_without_echoing_the_key_and_reruns(
     text = env.read_text(encoding="utf-8")
     assert text.startswith("# keep me\nALCHEMY_LOG_LEVEL=INFO\n")
     assert f"GEMINI_API_KEY={key}" in text and "ALCHEMY_NOTEBOOKLM_PROFILE=personal" in text
-    assert f'ALCHEMY_VAULT_PATH="{vault.resolve()}"' in text
+    assert f'ALCHEMY_VAULT_PATH="{vault}"' in text  # as typed
 
     for name in ("GEMINI_API_KEY", "ALCHEMY_NOTEBOOKLM_PROFILE", "ALCHEMY_VAULT_PATH"):
         os.environ.pop(name, None)  # loaded into this process by the first run
@@ -775,3 +825,8 @@ def test_login_writes_the_session_file_every_other_call_reads(
     assert result.exit_code == 0, result.output
     assert calls[0][:3] == ["notebooklm", "--storage", str(storage)] and "login" in calls[0]
     assert "session file" in result.output
+
+
+def test_tabs_option_rejects_unknown_tabs(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["dry-run", "@my", "--tabs", "videos,reels"])
+    assert result.exit_code == 2 and "shorts" in result.output

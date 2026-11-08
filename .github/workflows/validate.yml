@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.12", "3.13"]
+        python-version: ["3.11", "3.13", "3.14"]
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -52,8 +52,8 @@ jobs:
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
-    # Reports known vulnerabilities without blocking a merge. A finding follows the severity clock in
-    # ventryn-cloud STANDARDS.md; blocking here would stop unrelated work on a third-party advisory.
+    # Reports known vulnerabilities without blocking a merge; blocking here would stop unrelated work
+    # on a third-party advisory. A finding is fixed in its own pull request.
     continue-on-error: true
     steps:
       - name: Check out repository

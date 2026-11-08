@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
-from youtube_transcript_api import NoTranscriptFound, RequestBlocked, TranscriptsDisabled
+from youtube_transcript_api import (
+    AgeRestricted,
+    FailedToCreateConsentCookie,
+    NoTranscriptFound,
+    PoTokenRequired,
+    RequestBlocked,
+    TranscriptsDisabled,
+)
 
-from notebook_alchemy import channel
 from notebook_alchemy.channel import (
     ChannelScanner,
     TranscriptManager,
@@ -81,7 +87,7 @@ def test_normalize_url(raw: str, expected: str) -> None:
         ("my/c/notes", False),
         ("Learn youtube.com growth", False),
         ("@handle not a url", False),
-        ("6fd9a6b5-5065-4c0f-ba7e-711c712fc3c9", False),
+        ("00000000-0000-4000-8000-000000000000", False),
         ("", False),
     ],
 )
@@ -126,7 +132,7 @@ class _FakeYDL:
 def ydl(monkeypatch: pytest.MonkeyPatch) -> type[_FakeYDL]:
     _FakeYDL.script = {}
     _FakeYDL.opts_seen = []
-    monkeypatch.setattr(channel.yt_dlp, "YoutubeDL", _FakeYDL)
+    monkeypatch.setattr("yt_dlp.YoutubeDL", _FakeYDL)
     return _FakeYDL
 
 
@@ -145,7 +151,7 @@ def test_scan_returns_real_videos(ydl: type[_FakeYDL]) -> None:
         "entries": [_entry(1), _entry(2), _entry(2), None],
     }
     result = ChannelScanner().scan("@x", limit=5)
-    assert result.is_live and result.channel_name == "X"
+    assert result.channel_name == "X"
     assert [v.id for v in result.videos] == ["vid00000001", "vid00000002"]  # duplicate id dropped
     assert result.videos[1].duration_seconds == 120
     assert ydl.opts_seen[0]["playlist_items"] == "1-5"
@@ -212,18 +218,46 @@ def test_tabs_only_with_no_videos_tab_raises(ydl: type[_FakeYDL]) -> None:
         ChannelScanner().scan("@t")
 
 
+def test_a_channel_reads_videos_and_streams_but_not_shorts_by_default(ydl: type[_FakeYDL]) -> None:
+    ydl.script["https://www.youtube.com/@x/videos"] = {
+        "title": "X - Videos",
+        "entries": [_entry(1), _entry(2)],
+    }
+    ydl.script["https://www.youtube.com/@x/streams"] = {
+        "title": "X - Live",
+        "entries": [_entry(3), _entry(1)],
+    }
+    ydl.script["https://www.youtube.com/@x/shorts"] = {"title": "X - Shorts", "entries": [_entry(9)]}
+    result = ChannelScanner().scan("@x")
+    assert result.channel_name == "X"
+    assert [v.id for v in result.videos] == ["vid00000001", "vid00000002", "vid00000003"]  # deduplicated
+    everything = ChannelScanner().scan("https://www.youtube.com/@x", tabs=("videos", "streams", "shorts"))
+    assert "vid00000009" in [v.id for v in everything.videos]
+
+
+def test_a_tab_the_channel_lacks_is_skipped_and_the_limit_counts_all_tabs(ydl: type[_FakeYDL]) -> None:
+    ydl.script["https://www.youtube.com/@x/videos"] = {
+        "title": "X - Videos",
+        "entries": [_entry(1), _entry(2)],
+    }
+    ydl.script["https://www.youtube.com/@x/streams"] = RuntimeError(
+        "This channel does not have a streams tab"
+    )
+    assert [v.id for v in ChannelScanner().scan("@x", limit=1).videos] == ["vid00000001"]
+    assert len(ChannelScanner().scan("@x").videos) == 2
+
+
+def test_a_playlist_ignores_tabs(ydl: type[_FakeYDL]) -> None:
+    url = "https://www.youtube.com/playlist?list=PL123"
+    ydl.script[url] = {"title": "List", "entries": [_entry(4)]}
+    assert [v.id for v in ChannelScanner().scan(url, tabs=("shorts",)).videos] == ["vid00000004"]
+
+
 def test_single_video_url(ydl: type[_FakeYDL]) -> None:
     url = "https://www.youtube.com/watch?v=abcdefghijk"
     ydl.script[url] = {"id": "abcdefghijk", "title": "Solo", "webpage_url": url}
     result = ChannelScanner().scan(url)
-    assert result.total_videos == 1 and result.videos[0].title == "Solo"
-
-
-def test_mock_is_explicit_and_labelled() -> None:
-    result = ChannelScanner().scan("anything", limit=50, use_mock=True)
-    assert not result.is_live
-    assert len(result.videos) == 50
-    assert all(v.id.startswith("mock_") for v in result.videos)
+    assert len(result.videos) == 1 and result.videos[0].title == "Solo"
 
 
 # --- captions -------------------------------------------------------------------------------------
@@ -308,7 +342,7 @@ def test_disabled_captions_are_remembered(tmp_path: Path) -> None:
 def test_negative_cache_expires(tmp_path: Path) -> None:
     api = _Api(lambda vid: [_Snippet(text="now available")])
     tm = _manager(tmp_path, api)
-    stale = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    stale = (datetime.now(UTC) - timedelta(days=30)).isoformat()
     (tmp_path / "cache").mkdir()
     (tmp_path / "cache" / "abcdefghijk.json").write_text(
         json.dumps({"full_text": "", "unavailable": True, "reason": "x", "checked_at": stale}),
@@ -327,6 +361,68 @@ def test_blocked_is_not_cached(tmp_path: Path) -> None:
     assert not (tmp_path / "cache" / "abcdefghijk.json").exists()
 
 
+def test_a_second_proof_of_origin_demand_stops_later_requests(tmp_path: Path) -> None:
+    def behaviour(vid: str):
+        raise PoTokenRequired(vid)
+
+    api = _Api(behaviour)
+    tm = _manager(tmp_path, api)
+    results = [tm.resolve(v) for v in ("abcdefghijk", "bcdefghijkl", "cdefghijklm")]
+    assert [r.source for r in results] == ["blocked", "blocked", "blocked"]
+    assert len(api.fetches) == 2  # no retries; the third video never asked
+    assert not (tmp_path / "cache").exists()  # a block is not remembered as "no captions"
+
+
+def test_a_consent_page_failure_is_a_block_not_missing_captions(tmp_path: Path) -> None:
+    def behaviour(vid: str):
+        raise FailedToCreateConsentCookie(vid)
+
+    api = _Api(behaviour)
+    tm = _manager(tmp_path, api)
+    assert tm.resolve("abcdefghijk").source == "blocked"
+    assert tm.resolve("bcdefghijkl").source == "blocked" and len(api.fetches) == 1
+    assert not (tmp_path / "cache").exists()
+
+
+def test_only_youtube_video_ids_reach_the_captions_api(tmp_path: Path) -> None:
+    api = _Api(lambda vid: pytest.fail("network used"))
+    tm = _manager(tmp_path, api)
+    for vid in ("mock_001", "", "0f3c2a9e-uuid-from-notebooklm", "short"):
+        assert tm.resolve(vid).source == "skipped"
+
+
+def test_any_other_retrieval_failure_is_remembered_as_unavailable(tmp_path: Path) -> None:
+    def behaviour(vid: str):
+        raise AgeRestricted(vid)
+
+    api = _Api(behaviour)
+    tm = _manager(tmp_path, api)
+    assert tm.resolve("abcdefghijk").source == "unavailable"
+    assert tm.resolve("abcdefghijk").detail == "AgeRestricted" and len(api.fetches) == 1
+
+
+class _Track(SimpleNamespace):
+    def fetch(self):
+        return [_Snippet(text=self.text)]
+
+
+def test_a_written_caption_track_is_preferred_over_an_automatic_one(tmp_path: Path) -> None:
+    class Api(_Api):
+        def list(self, video_id: str):
+            return [_Track(is_generated=True, text="auto"), _Track(is_generated=False, text="written")]
+
+    def behaviour(vid: str):
+        raise NoTranscriptFound(vid, ("en",), None)
+
+    assert _manager(tmp_path, Api(behaviour)).resolve("abcdefghijk").text == "written"
+
+
+def test_caption_languages_are_asked_for_in_order(tmp_path: Path) -> None:
+    api = _Api(lambda vid: [_Snippet(text="hola")])
+    _manager(tmp_path, api, languages=("es", "en")).resolve("abcdefghijk")
+    assert api.fetches == [("abcdefghijk", ("es", "en"))]
+
+
 def test_transient_errors_retry(tmp_path: Path) -> None:
     calls = {"n": 0}
 
@@ -338,13 +434,6 @@ def test_transient_errors_retry(tmp_path: Path) -> None:
 
     assert _manager(tmp_path, _Api(behaviour)).resolve("abcdefghijk").text == "ok"
     assert calls["n"] == 3
-
-
-def test_mock_and_empty_ids_never_hit_the_network(tmp_path: Path) -> None:
-    api = _Api(lambda vid: pytest.fail("network used"))
-    tm = _manager(tmp_path, api)
-    assert tm.resolve("mock_001").source == "skipped"
-    assert tm.resolve("").source == "skipped"
 
 
 def test_cache_path_is_sanitised(tmp_path: Path) -> None:
