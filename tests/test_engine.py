@@ -718,3 +718,16 @@ def test_watching_waits_for_the_cost_to_be_accepted(tmp_path: Path, monkeypatch)
     report = engine.build("@chan", offline=True, watch=5, confirm_watch=decline)
     assert gemini.watched == [] and asked[0][:2] == (2, 3600) and asked[0][2] > 0
     assert "2 unread videos were not watched" in " ".join(report.notices)
+
+
+def test_books_a_0_2_upload_recorded_under_its_own_file_name_are_replaced(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    nb = fake.seed("Chan", ["Old Domain: Basics", "_INDEX", "My own notes"])
+    engine.publish("Chan", _books())  # a 0.3 upload: its record has ids, under the new name
+    legacy = engine.sync_records_dir() / f"{nb.replace('-', '_')}.json"
+    legacy.write_text(json.dumps({"titles": ["Old Domain: Basics", "_INDEX"]}), encoding="utf-8")
+    assert legacy != engine._sync_state_path(nb)
+    result = engine.publish("Chan", _books())
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "My own notes"]  # yours stays
+    assert result.pruned == 2 and not legacy.exists()

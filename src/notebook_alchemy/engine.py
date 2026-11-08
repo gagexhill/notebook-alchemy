@@ -16,6 +16,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import re
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -619,6 +620,12 @@ class AlchemyEngine:
     def _sync_state_path(self, notebook_id: str) -> Path:
         return self.sync_records_dir() / f"{_safe_name(notebook_id)}.json"
 
+    def _legacy_record_path(self, notebook_id: str) -> Path | None:
+        """Where version 0.2 kept this notebook's record: its file names turned "-" into "_"."""
+        stem = re.sub(r"[-\s]+", "_", re.sub(r"[^\w\s-]", "", notebook_id).strip()).strip("_")[:80]
+        path = self.sync_records_dir() / f"{stem or 'domain'}.json"
+        return None if path == self._sync_state_path(notebook_id) else path
+
     def _read_record(self, notebook_id: str) -> dict[str, Any]:
         """What this tool uploaded to a notebook.
 
@@ -631,11 +638,16 @@ class AlchemyEngine:
         ids = ids if isinstance(ids, dict) else {}
         hashes = hashes if isinstance(hashes, dict) else {}
         orphans = orphans if isinstance(orphans, list) else []
+        legacy_path = self._legacy_record_path(notebook_id)
+        legacy = self._read_json(legacy_path) if legacy_path and legacy_path.is_file() else {}
         return {
             "titles": [str(t) for t in data.get("titles", [])],
             "ids": {str(k): str(v) for k, v in ids.items()},
             "hashes": {str(k): str(v) for k, v in hashes.items()},
             "orphans": [str(o) for o in orphans],
+            # Titles a version 0.2 upload recorded under its own file name; matched by title until a
+            # successful upload has replaced or removed them.
+            "legacy_titles": [str(t) for t in legacy.get("titles", []) if isinstance(t, str)],
         }
 
     def _write_record(
@@ -701,6 +713,7 @@ class AlchemyEngine:
         orphans = set(record["orphans"])
         mine_ids = set(record["ids"].values()) | orphans
         legacy = {normalize_title(t) for t in record["titles"]} if not record["ids"] else set()
+        legacy |= {normalize_title(t) for t in record["legacy_titles"]}
         ours = [
             s
             for s in before
@@ -857,4 +870,10 @@ class AlchemyEngine:
             )
         # A kept old copy keeps its old hash (its text is not this build's), so the next run sends it.
         self._write_record(nb_id, {**kept_old, **same, **new_ids}, {**record["hashes"], **confirmed})
+        legacy_path = self._legacy_record_path(nb_id)
+        if record["legacy_titles"] and legacy_path is not None:
+            try:  # its sources are replaced or removed now, so the 0.2 record has done its job
+                legacy_path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Could not remove the old upload record %s (%s).", legacy_path, exc)
         return SyncResult(nb_id, created, len(new_ids), replaced, pruned, limit, freed_first, len(same))
