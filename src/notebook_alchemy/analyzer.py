@@ -72,6 +72,7 @@ class DryRunReport:
     cluster_method: str = "keyword"  # gemini | keyword
     model: str = ""
     notes: list[str] = field(default_factory=list)
+    split_requests: int = 0  # Gemini requests spent splitting large domains into subtopics
 
     @property
     def total_estimated_cost_usd(self) -> float:
@@ -79,10 +80,100 @@ class DryRunReport:
 
     @property
     def estimated_gemini_requests(self) -> int:
-        """Domain discovery, title assignment batches, and one synthesis call per volume."""
+        """Domain discovery, title assignment batches, subtopic splits, one synthesis call per volume."""
         titles = len(self.youtube_videos)
         volumes = sum(-(-len(v) // DEFAULT_MAX_PER_VOLUME) for v in self.domain_videos.values())
-        return 1 + -(-titles // ASSIGN_BATCH_SIZE) + volumes
+        return 1 + -(-titles // ASSIGN_BATCH_SIZE) + self.split_requests + volumes
+
+
+_WORD_RE = re.compile(r"[a-z][a-z0-9.'-]{3,}")
+# Words too common in video titles to name a subtopic.
+_STOP_WORDS = frozenset(
+    [
+        "this",
+        "that",
+        "with",
+        "from",
+        "your",
+        "what",
+        "when",
+        "where",
+        "which",
+        "their",
+        "they",
+        "them",
+        "have",
+        "will",
+        "into",
+        "about",
+        "than",
+        "then",
+        "just",
+        "more",
+        "most",
+        "only",
+        "over",
+        "also",
+        "some",
+        "here",
+        "there",
+        "these",
+        "those",
+        "does",
+        "doing",
+        "done",
+        "make",
+        "made",
+        "making",
+        "how",
+        "why",
+        "who",
+        "video",
+        "videos",
+        "part",
+        "full",
+        "guide",
+        "tips",
+        "step",
+        "steps",
+        "best",
+        "ways",
+        "need",
+        "know",
+        "want",
+        "first",
+        "next",
+        "every",
+        "should",
+        "would",
+        "could",
+        "really",
+        "thing",
+        "things",
+        "before",
+        "after",
+        "without",
+        "inside",
+        "start",
+        "started",
+        "get",
+        "getting",
+        "you're",
+        "it's",
+        "don't",
+        "i'm",
+        "never",
+        "ever",
+    ]
+)
+
+
+def _stem(word: str) -> str:
+    """A rough stem, so "contract", "contracts" and "contracting" count as one word."""
+    for suffix in ("ings", "ing", "ers", "ies", "ed", "er", "s"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[: -len(suffix)] + ("y" if suffix == "ies" else "")
+    return word
 
 
 def _kw(pattern: str) -> re.Pattern[str]:
@@ -175,6 +266,9 @@ OTHER_DOMAIN = "General / Specialized Topics"
 class NotebookAnalyzer:
     """Discovers sources, clusters them into domains, and estimates token cost."""
 
+    split_requests = 0
+    max_per_section = DEFAULT_MAX_PER_VOLUME
+
     def __init__(
         self,
         config: AlchemyConfig | None = None,
@@ -220,9 +314,11 @@ class NotebookAnalyzer:
         use_mock: bool = False,
         limit: int | None = None,
         tabs: tuple[str, ...] = DEFAULT_TABS,
+        max_per_section: int = DEFAULT_MAX_PER_VOLUME,
         progress: ProgressFn | None = None,
     ) -> DryRunReport:
         """Analyse a YouTube URL, an existing notebook, or (only with use_mock) the sample catalog."""
+        self.max_per_section = max_per_section
         scanner = ChannelScanner()
         if not use_mock and scanner.is_youtube_url(notebook_query):
             return self.scan_channel(notebook_query, limit=limit, tabs=tabs, progress=progress)
@@ -342,7 +438,9 @@ class NotebookAnalyzer:
         input_cost = (total_tokens / 1_000_000) * price_in
         output_cost = (len(videos) * OUTPUT_TOKENS_PER_VIDEO / 1_000_000) * price_out
 
-        indices = self._cluster_indices([v.title for v in videos], progress)
+        titles = [v.title for v in videos]
+        indices = self._cluster_indices(titles, progress)
+        indices = self._split_large_domains(titles, indices, progress)
         domain_videos = {d: [videos[i] for i in ids] for d, ids in indices.items()}
         notes = list(self.notes)
         if price_note:
@@ -362,6 +460,7 @@ class NotebookAnalyzer:
             cluster_method=self.cluster_method,
             model=self.model,
             notes=notes,
+            split_requests=self.split_requests,
         )
 
     # -- clustering --
@@ -468,6 +567,167 @@ class NotebookAnalyzer:
             )
             clusters[MISC_DOMAIN] = misc
         return {d: ids for d, ids in clusters.items() if ids}
+
+    # -- subtopics --
+
+    def _split_large_domains(
+        self, titles: list[str], indices: dict[str, list[int]], progress: ProgressFn | None
+    ) -> dict[str, list[int]]:
+        """Split each domain larger than one volume into named subtopics ("Domain: Subtopic").
+
+        A volume called "Vol 7" tells a reader nothing; a subtopic name does. With Gemini the
+        subtopics are discovered from that domain's own titles and every title is assigned by
+        number; otherwise titles are grouped by the words that set them apart. A subtopic still
+        larger than one volume is cut into parts by the engine.
+        """
+        self.split_requests = 0
+        limit = max(1, getattr(self, "max_per_section", DEFAULT_MAX_PER_VOLUME))
+        out: dict[str, list[int]] = {}
+        for domain, ids in indices.items():
+            if len(ids) <= limit:
+                out[domain] = ids
+                continue
+            groups: dict[str, list[int]] | None = None
+            if self.cluster_method == "gemini" and self.llm_enabled:
+                try:
+                    groups = self._subtopics_with_gemini(domain, [titles[i] for i in ids], limit, progress)
+                except (GeminiError, ValueError, KeyError, TypeError) as exc:
+                    reason = exc.message if isinstance(exc, GeminiError) else f"unusable answer ({exc})"
+                    self.notes.append(f"Could not split '{domain}' with Gemini ({reason}); used title words.")
+                self.notes.extend(self._gemini_notices())
+            if groups is None:
+                groups = self._subtopics_by_words(domain, [titles[i] for i in ids], limit)
+            for name, local in groups.items():
+                if local:
+                    out.setdefault(f"{domain}: {name}", []).extend(ids[j] for j in local)
+        return out
+
+    def _subtopics_with_gemini(
+        self, domain: str, titles: list[str], limit: int, progress: ProgressFn | None
+    ) -> dict[str, list[int]]:
+        wanted = -(-len(titles) // limit)
+        sample = "\n".join(f"- {t[:120]}" for t in self._sample(titles, MAX_DOMAIN_SAMPLE))
+        prompt = (
+            f"These video titles all belong to the subject '{domain}'. Name {wanted} to {wanted + 1} "
+            "distinct subtopics within it that together cover the titles. Each name is 2 to 6 words, "
+            f"specific, and does not repeat the words '{domain}'.\n"
+            'Return only JSON: {"subtopics": ["Subtopic name", ...]}\n\n'
+            f"Titles:\n{sample}"
+        )
+        result = self._gemini_client().generate(
+            prompt, json_mode=True, max_output_tokens=4096, temperature=0.1, timeout=45.0
+        )
+        self.split_requests += 1
+        raw = json.loads(result.text).get("subtopics")
+        if not isinstance(raw, list):
+            raise TypeError("no 'subtopics' list")
+        names: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            name = " ".join(str(item).split())[:60]
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                names.append(name)
+        if len(names) < 2:
+            raise ValueError(f"only {len(names)} usable subtopics")
+        assigned = self._assign_by_number(titles, names, f"Splitting {domain}", progress)
+        groups: dict[str, list[int]] = {name: [] for name in names}
+        other: list[int] = []
+        for i in range(len(titles)):
+            (groups[names[assigned[i]]] if i in assigned else other).append(i)
+        if other:
+            groups["Other"] = other
+        return groups
+
+    def _assign_by_number(
+        self, titles: list[str], names: list[str], label: str, progress: ProgressFn | None
+    ) -> dict[int, int]:
+        """Ask Gemini to place each numbered title under one numbered name; invalid answers are dropped."""
+        listing = "\n".join(f"{i}: {name}" for i, name in enumerate(names))
+        assigned: dict[int, int] = {}
+        batches = range(0, len(titles), ASSIGN_BATCH_SIZE)
+        for done, start in enumerate(batches, 1):
+            batch = titles[start : start + ASSIGN_BATCH_SIZE]
+            lines = "\n".join(f"{start + i}: {t[:120]}" for i, t in enumerate(batch))
+            prompt = (
+                "Assign each numbered video title to exactly one category.\n"
+                f"Categories:\n{listing}\n\nTitles:\n{lines}\n\n"
+                'Return only JSON: {"assignments": {"<title number>": <category number>, ...}} '
+                "covering every title number."
+            )
+            result = self._gemini_client().generate(
+                prompt, json_mode=True, max_output_tokens=16384, temperature=0.0, timeout=60.0
+            )
+            if label.startswith("Splitting"):
+                self.split_requests += 1
+            mapping = json.loads(result.text).get("assignments")
+            if not isinstance(mapping, dict):
+                raise TypeError("no 'assignments' object")
+            for key, value in mapping.items():
+                try:
+                    t_idx, n_idx = int(key), int(value)
+                except (TypeError, ValueError):
+                    continue
+                if start <= t_idx < start + len(batch) and 0 <= n_idx < len(names):
+                    assigned[t_idx] = n_idx
+            if progress:
+                progress(label, done, len(batches))
+        return assigned
+
+    @staticmethod
+    def _subtopics_by_words(domain: str, titles: list[str], limit: int) -> dict[str, list[int]]:
+        """Group titles by the words that set them apart, most common first; name each by its words.
+
+        Words shared by most of the domain (and the domain's own name) say nothing, so they are
+        skipped. Titles no distinctive word claims are kept together as "More".
+        """
+        ignore = {_stem(w) for w in _WORD_RE.findall(domain.lower())} | _STOP_WORDS
+        shown: dict[str, str] = {}  # stem -> the first spelling seen, for the name
+        words: list[set[str]] = []
+        for title in titles:
+            stems = set()
+            for w in _WORD_RE.findall(title.lower()):
+                s = _stem(w)
+                if s not in ignore and w not in _STOP_WORDS:
+                    stems.add(s)
+                    shown.setdefault(s, w)
+            words.append(stems)
+        counts: dict[str, int] = {}
+        for ws in words:
+            for w in ws:
+                counts[w] = counts.get(w, 0) + 1
+        # A word in most of the domain's titles describes the domain, not a part of it.
+        common = {w for w, n in counts.items() if n > len(titles) * 0.5}
+        remaining = set(range(len(titles)))
+        groups: dict[str, list[int]] = {}
+        while remaining:
+            tally: dict[str, int] = {}
+            for i in remaining:
+                for w in words[i] - common:
+                    tally[w] = tally.get(w, 0) + 1
+            best = max(tally.items(), key=lambda kv: (kv[1], kv[0]), default=None)
+            if best is None or best[1] < 2:
+                break
+            members = sorted(i for i in remaining if best[0] in words[i])[:limit]
+            # Name the group by its most frequent distinctive words, the chosen word first.
+            freq: dict[str, int] = {}
+            for i in members:
+                for w in words[i] - common:
+                    freq[w] = freq.get(w, 0) + 1
+            ranked = [best[0]] + [
+                w for w, n in sorted(freq.items(), key=lambda kv: (-kv[1], kv[0])) if w != best[0] and n >= 2
+            ]
+            name = ", ".join(shown.get(w, w).strip(".-'").title() for w in ranked[:3])
+            if name in groups:
+                n = 2
+                while f"{name} ({n})" in groups:
+                    n += 1
+                name = f"{name} ({n})"
+            groups[name] = members
+            remaining -= set(members)
+        if remaining:
+            groups["More"] = sorted(remaining)
+        return groups
 
     @staticmethod
     def _cluster_with_keywords(titles: list[str]) -> dict[str, list[int]]:

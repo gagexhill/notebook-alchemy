@@ -65,6 +65,8 @@ class SyncResult:
     uploaded: int
     replaced: int
     pruned: int = 0
+    source_limit: int | None = None
+    freed_first: bool = False  # old copies were removed before uploading to stay within the limit
 
 
 @dataclass
@@ -200,7 +202,11 @@ class AlchemyEngine:
             )
         self.analyzer.force_offline = force_offline
         report = dry_run or self.analyzer.generate_dry_run(
-            notebook_query, use_mock=use_mock, limit=limit, progress=progress
+            notebook_query,
+            use_mock=use_mock,
+            limit=limit,
+            max_per_section=max_videos_per_volume,
+            progress=progress,
         )
         if not report.youtube_videos:
             raise AlchemyError(
@@ -383,8 +389,43 @@ class AlchemyEngine:
                     hint="Run `notebook-alchemy run <real source>` to build real compendiums.",
                 )
 
+        limits = self.client.plan_limits()
+        limit = limits.source_limit if limits else None
         nb_id, created = self.client.create_notebook(notebook_title)
         before = [] if created else [s for s in self.client.list_sources(nb_id) if s.get("id")]
+
+        # Which existing sources this sync replaces or prunes, known before anything is uploaded.
+        wanted_titles = {normalize_title(self._source_title_for(f)) for f in files}
+        stale_titles = {normalize_title(t) for t in self._read_synced_titles(nb_id)} - wanted_titles
+        outgoing = [
+            s for s in before if normalize_title(str(s.get("title", ""))) in wanted_titles | stale_titles
+        ]
+        final_count = len(before) - len(outgoing) + len(files)
+        if limit is not None and final_count > limit:
+            plan = limits.plan if limits else "unknown plan"
+            raise SyncError(
+                f"'{notebook_title}' would hold {final_count} sources, and this account's NotebookLM plan "
+                f"({plan}) allows {limit} per notebook. Nothing was uploaded.",
+                failed=[],
+                hint="Raise --max-per-vol for fewer, larger compendiums, sync to a new notebook name with "
+                "-n, or remove sources you no longer need from the notebook.",
+            )
+        freed_first = limit is not None and len(before) + len(files) > limit
+        freed: set[str] = set()
+        if freed_first:
+            # Adding everything before removing the old copies would briefly exceed the limit, so the
+            # copies this sync replaces go first. A file that then fails to upload is reported, and
+            # the next run uploads it again.
+            for old in outgoing:
+                try:
+                    self.client.delete_source(nb_id, str(old["id"]))
+                    freed.add(str(old["id"]))
+                except AlchemyError as exc:
+                    raise SyncError(
+                        f"Could not free a slot in '{notebook_title}' before uploading: {exc.message}",
+                        failed=[str(old.get("title", old["id"]))],
+                        hint="Remove an old source in NotebookLM, then run the same command again.",
+                    ) from exc
 
         failed: list[str] = []
         steps = _Counter(progress, "Uploading to NotebookLM", len(files) * 2)
@@ -393,7 +434,7 @@ class AlchemyEngine:
         # few at a time. Results are gathered in file order, so the outcome does not depend on
         # which call finishes first; titles are corrected only after every wait has finished.
         def add(md_file: Path) -> tuple[str, str | None, str | None]:
-            title = source_title(md_file.stem)
+            title = self._source_title_for(md_file)
             content = md_file.read_text(encoding="utf-8")
             try:
                 source_id = self.client.add_source_document(
@@ -456,6 +497,10 @@ class AlchemyEngine:
             key = normalize_title(str(old.get("title", "")))
             if str(old["id"]) in added or (key not in wanted and key not in stale):
                 continue
+            if str(old["id"]) in freed:
+                replaced += key in wanted
+                pruned += key not in wanted
+                continue
             try:
                 self.client.delete_source(nb_id, str(old["id"]))
                 if key in wanted:
@@ -482,9 +527,22 @@ class AlchemyEngine:
                 hint="Fix the cause above and run the same command again; it replaces, not duplicates.",
             )
         self._write_synced_titles(nb_id, list(new_ids))
-        return SyncResult(nb_id, created, len(new_ids), replaced, pruned)
+        return SyncResult(nb_id, created, len(new_ids), replaced, pruned, limit, freed_first)
 
     # -- append --
+
+    @classmethod
+    def _source_title_for(cls, path: Path) -> str:
+        """The NotebookLM title: the compendium's own domain name, with its part number after the first.
+
+        Taken from the file's frontmatter, because a file name loses characters ("SAM.gov" becomes
+        "SAMgov"). The index and catalog, which have no domain, use their file names.
+        """
+        found = cls._read_domain(path)
+        if not found:
+            return source_title(path.stem)
+        domain, volume = found
+        return domain if volume <= 1 else f"{domain} (Part {volume})"
 
     @staticmethod
     def _read_domain(path: Path) -> tuple[str, int] | None:
