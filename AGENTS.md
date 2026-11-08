@@ -11,7 +11,8 @@ to propose a change; this file covers what a change must keep true.
   - `channel.py`: YouTube scanning and every route to a video's words.
   - `cleanup.py`: local cleanup, chunks and dedupe.
   - `knowledge.py`: Gemini labels, cached per video.
-  - `library.py`: passages, topics, sections, consolidation and dates.
+  - `library.py`: passages, topics, sections, consolidation and dates; the topic map grows, it is
+    not rebuilt.
   - `writer.py`: the topic books and overview.
   - `engine.py`: the pipeline and the upload.
   - `cli.py`: commands.
@@ -19,6 +20,7 @@ to propose a change; this file covers what a change must keep true.
   - `client.py`: NotebookLM through the `notebooklm` CLI.
   - `gemini.py`: the Gemini API, including batch mode.
   - `offline.py`: the no-key path.
+  - `state.py`: `export-state` and `import-state`.
   - `config.py`: settings.
   - `errors.py`: typed errors.
   - `mock_data.py`: the sample catalog behind `--mock`.
@@ -39,17 +41,22 @@ to propose a change; this file covers what a change must keep true.
   upload, and not kept. A local copy is made only with `run --save DIR`. Working files (captions,
   labels, sorting answers, upload records) live under `~/.notebook-alchemy/` and `clean` removes them.
 - The books hold the speakers' own words. Gemini labels, sorts and orders passages; it never writes the
-  passages, and punctuation it adds is used only when `knowledge.same_words` confirms the words are
-  unchanged. A kept chunk the model leaves unlabelled is kept, never dropped.
+  passages. Punctuation it adds is copied onto the original words by `knowledge.apply_punctuation`,
+  which keeps every original word in order and never takes a word the model added. A kept chunk the
+  model leaves unlabelled is kept, never dropped.
 - Every paid Gemini answer is cached by what the request saw (transcript, prompt version and model;
-  passages and taxonomy; section contents and month), so a rerun pays only for what changed. Labels are
+  passages and taxonomy; section contents and month), so a rerun pays only for what changed. A passage
+  keeps its section (stored by name) across runs; only `--resort` rebuilds the map. Labels are
   never made by the fallback model (`allow_fallback=False`); a used-up daily quota stops the step and
   the next run resumes.
 - Upload content goes to `notebooklm` as a file, never on the command line (Windows limits one argument
   to about 32,000 characters). NotebookLM can reset a source title to its file name after processing, so
   an upload waits, corrects titles, and reads the notebook back before it reports success. An upload
-  replaces or removes only sources it recorded as its own (by id); a book that fails to upload keeps its
-  old copy, and nothing is uploaded while videos still wait for Gemini.
+  replaces or removes only sources it recorded as its own (by id); a book whose text matches the
+  recorded copy still in the notebook is not sent again; a book that fails to upload keeps its old copy
+  (and its old hash), and nothing is uploaded while videos still wait for Gemini.
+- `import-state` writes only the working-file folders it knows, checks every file before writing any,
+  and never carries sign-ins, the Gemini key or the upload confirmation.
 - Text that comes from outside (titles, errors, paths) is passed through `ui.esc` before Rich prints it.
 - Output follows Google's `gcloud` conventions, through the helpers in `ui.py`: everyday words by
   default (topic, book, section, passage; no internal terms), detail such as paths, tokens and models through `ui.detail` (shown with `-v`), names in

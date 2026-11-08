@@ -83,13 +83,14 @@ link       yt-dlp   captions,  filler,   Gemini,   topics,  order, dupes,    pla
 
    A refused route pauses while the others carry on. A video still missing is listed in the overview and retried on the next run.
 3. **Clean.** On your machine, free: caption noise and filler go, short calls to action and sponsor sentences go, and a passage repeated across videos (or within one) is kept once, in the newest video.
-4. **Label.** One Gemini request per video reads its numbered chunks and returns labels only: keep or drop, a headline, how long the information stays true, and an editor's note where a passage needs context. Captions without punctuation also come back punctuated, used only if every word is unchanged. Labels are cached per video.
+4. **Label.** One Gemini request per video reads its numbered chunks and returns labels only: keep or drop, a headline, how long the information stays true, and an editor's note where a passage needs context. Captions without punctuation also come back punctuated; the punctuation is copied onto the original words, and no word is added or lost. Labels are cached per video.
 5. **Sort.**
    - One request names the notebook and its topics and sections.
    - Every passage is placed by number; one the model does not place goes to a visible Miscellaneous book.
+   - When new videos bring passages that fit nowhere, the map grows: new sections or topics are added, and nothing already placed moves. A section past 200 passages is divided into named subsections.
    - One request per section orders it, finds duplicates and finds passages a newer one replaces.
    - Old news is left out; old rules and figures are kept, marked "As of".
-6. **Books and upload.** One plain-Markdown book per topic (split only past 450,000 words), plus an `_OVERVIEW`. Each goes to NotebookLM as a file. The tool waits for processing, corrects any title NotebookLM changes, replaces earlier copies, removes books the last run made that this one no longer has, and reads the notebook back. A rerun updates the same notebook.
+6. **Books and upload.** One plain-Markdown book per topic (split into parts only past 450,000 words; a section stays in its part from run to run), plus an `_OVERVIEW`. Each goes to NotebookLM as a file. The tool waits for processing, corrects any title NotebookLM changes, replaces earlier copies of books whose text changed (the rest are left as they are), removes books the last run made that this one no longer has, and reads the notebook back. A rerun updates the same notebook.
 
 ---
 
@@ -103,9 +104,10 @@ link       yt-dlp   captions,  filler,   Gemini,   topics,  order, dupes,    pla
 | Without AI | `notebook-alchemy run <url> --offline` | YouTube, NotebookLM | One notebook | You want every word, sorted by title, at no API cost |
 | Try it | `notebook-alchemy run --mock --save books` | Nothing | `books/` | You want to see the output before pointing it at a channel |
 | Self-test | `notebook-alchemy test` | Nothing | A temporary folder | You want to check that everything installed correctly |
+| Move computers | `notebook-alchemy export-state FILE`, then `import-state FILE` | Nothing | A zip, then `~/.notebook-alchemy/` | You want to carry on from another computer without paying again |
 | Set up | `notebook-alchemy setup` | `notebooklm` login, only if you sign in | `.env` | You want to set the Gemini key or the upload account; run it again to change either |
 
-Run `run` again whenever the channel posts. Only new videos cost anything, and the notebook is updated in place.
+Run `run` again whenever the channel posts. Only new videos cost anything, new passages join the sections they belong to, and only the books that changed are uploaded again.
 
 ---
 
@@ -140,6 +142,7 @@ src/notebook_alchemy/
 ├── library.py      # Passages, date rules, topics and sections, consolidation, request cache
 ├── writer.py       # The topic books and the overview
 ├── offline.py      # The no-key path: every video's words, sorted by title words
+├── state.py        # export-state / import-state: the working files, moved as a checked zip
 ├── gemini.py       # Gemini client: header auth, retries, batch mode, scrubbed errors, price table
 ├── client.py       # NotebookLM through the `notebooklm` command, with checked results
 ├── config.py       # Environment and .env settings
@@ -169,7 +172,8 @@ src/notebook_alchemy/
   - A refused route pauses without stopping the run.
 - **Cheap to run again.**
   - Captions, labels, the topics, every passage's place and every section's order are cached by what produced them.
-  - A rerun with no new videos asks Gemini nothing.
+  - A rerun with no new videos asks Gemini nothing and uploads nothing.
+  - New videos are placed into the existing topics; the map grows instead of being rebuilt, and only the books whose text changed are uploaded.
   - Gemini's batch mode (half price) is used when the key's project has billing.
   - A used-up daily quota stops cleanly and resumes the next day.
 - **Nothing kept that you did not ask for.** The books go to NotebookLM and are not stored; `--save DIR` writes a copy.
@@ -202,14 +206,13 @@ taken |= span
 
 ### Punctuation without changing a word
 
-For captions with no punctuation, the label answer also carries the kept words punctuated. It is used only when the words match the original.
+For captions with no punctuation, the label answer also carries the kept words punctuated. Its punctuation and capitals are copied onto the original words wherever the two line up; a word the model dropped keeps its original form, and a word it added is never used.
 
 ```python
-def same_words(original: str, punctuated: str) -> bool:
-    a, b = _norm_words(original), _norm_words(punctuated)
-    if not a or not b:
-        return False
-    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= PUNCTUATE_MIN_MATCH
+for tag, i1, i2, j1, _j2 in matcher.get_opcodes():
+    if tag == "equal":
+        for k in range(i2 - i1):
+            out[i1 + k] = pun[j1 + k]  # same word, with the model's punctuation and capitals
 ```
 
 ### Keeping the API key out of everything
@@ -310,6 +313,8 @@ Everything stays on your machine. `notebook-alchemy clean --all` removes the wor
 | `~/.notebook-alchemy/sync/`, `notebooks.json`, `upload_accounts.json`, `batch.json` | What the last upload added, which notebook each channel uses, a salted hash of the account you confirmed uploads to (not the email), and a running batch job | `clean --records` |
 | `~/.notebooklm/profiles/<profile>/` | The Google sign-in, kept by the `notebooklm` command | `notebooklm auth logout` |
 | Your NotebookLM account | The notebook itself, and the "Notebook Alchemy workspace" notebook used to read blocked videos (left empty after each run) | Delete them in NotebookLM |
+
+`notebook-alchemy export-state FILE` copies the cache, `knowledge/`, `library/`, `sync/` and `notebooks.json` into one zip; `import-state FILE` on another computer carries on from there. Sign-ins, the key and the upload confirmation are not included.
 
 Version 0.2 wrote a `vault/` folder; `clean --vaults` removes it.
 

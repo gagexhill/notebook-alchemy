@@ -42,6 +42,7 @@ from .config import (
 )
 from .engine import AlchemyEngine, BuildReport
 from .errors import AlchemyError, ConfigError, NotebookLMError, SessionError
+from .state import export_state, import_state
 from .ui import esc, handle_errors
 from .writer import OVERVIEW_TITLE
 
@@ -989,6 +990,57 @@ def removed_append() -> None:
         "`append` was removed: run `notebook-alchemy run <youtube-url>` again; new videos are added "
         "and old ones cost nothing."
     )
+
+
+# --- moving to another computer -------------------------------------------------------------------
+
+
+def _state_counts(files: dict[str, int]) -> str:
+    words = {
+        "captions": "caption file",
+        "knowledge": "label file",
+        "library": "sorting file",
+        "sync": "upload record",
+        "notebooks": "notebook list",
+    }
+    return ", ".join(_plural(n, words.get(k, k)) for k, n in files.items() if n) or "nothing"
+
+
+@cli.command(
+    name="export-state",
+    epilog="\b\nExample:\n  notebook-alchemy export-state alchemy-state.zip\n",
+)
+@click.argument("file", type=click.Path(dir_okay=False, path_type=Path))
+@verbose_option
+@handle_errors
+def export_state_command(file: Path) -> None:
+    """Save the captions, labels and sorting to FILE, to carry on from another computer.
+
+    Sign-ins, the Gemini key and the upload confirmation are not included.
+    """
+    summary = export_state(AlchemyEngine(_config()), file)
+    ui.success(f"Saved {ui.name(file)}.")
+    ui.detail(f"  {_state_counts(summary.files)}.")
+    ui.next_command("carry on from another computer", f"notebook-alchemy import-state {file.name}")
+
+
+@cli.command(
+    name="import-state",
+    epilog="\b\nExample:\n  notebook-alchemy import-state alchemy-state.zip\n",
+)
+@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--replace", is_flag=True, help="Overwrite files this computer already has.")
+@verbose_option
+@handle_errors
+def import_state_command(file: Path, replace: bool) -> None:
+    """Load captions, labels and sorting saved with `export-state`, so nothing is read or paid for again."""
+    summary = import_state(AlchemyEngine(_config()), file, replace=replace)
+    ui.success(f"Imported {_plural(summary.total, 'file')} from {ui.name(file)}.")
+    ui.detail(f"  {_state_counts(summary.files)}.")
+    if summary.kept:
+        ui.info(
+            f"  Kept {_plural(summary.kept, 'file')} this computer already had (use --replace to overwrite)."
+        )
 
 
 # --- clean / test --------------------------------------------------------------------------------
