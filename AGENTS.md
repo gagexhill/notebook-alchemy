@@ -56,11 +56,18 @@ to propose a change; this file covers what a change must keep true.
   to about 32,000 characters). NotebookLM can reset a source title to its file name after processing, so
   an upload waits, corrects titles, and reads the notebook back before it reports success. An upload
   replaces or removes only sources it recorded as its own (by id); a book whose text matches the
-  recorded copy still in the notebook is not sent again; a book that fails to upload keeps its old copy
-  (and its old hash), and nothing is uploaded while videos still wait for Gemini.
+  recorded copy still in the notebook is not sent again (its title is corrected if NotebookLM changed
+  it). A hash is recorded only for an upload confirmed with its title; a book that fails to upload keeps
+  its old copy and old hash; an old copy that could not be removed stays recorded as the tool's own and
+  is removed by the next run; and nothing is uploaded while videos still wait for Gemini.
 - `keep-signed-in` registers one per-user scheduler entry per profile (Task Scheduler, launchd, a
-  systemd user timer or cron), reads it back before reporting success, and records each refresh's
-  outcome so `status` reports whether it works, not only whether it is registered.
+  systemd user timer or cron), reads back that the scheduler has it active (not only that its files
+  exist) before reporting success, removes what it wrote when that fails, and records each refresh's
+  outcome so `status` reports whether it works, not only whether it is registered. The task runs
+  `notebooklm` as a module of the same Python, never through PATH.
+- A paid answer that arrived but was unusable is remembered for the inputs it saw, like a usable one,
+  so a rerun does not pay for it again; only a missing answer (a network or server error) is asked
+  again.
 - `import-state` writes only the working-file folders it knows, checks every file before writing any,
   and never carries sign-ins, the Gemini key or the upload confirmation.
 - Text that comes from outside (titles, errors, paths) is passed through `ui.esc` before Rich prints it.

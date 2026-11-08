@@ -10,7 +10,8 @@ NotebookLM profile, with the scheduler each system already has:
 - macOS: a launchd agent in `~/Library/LaunchAgents`.
 - Linux: a systemd user timer, or a crontab line when systemd is not available.
 
-The task runs `python -m notebook_alchemy.keepalive`, which calls `notebooklm auth refresh` and writes
+The task runs `python -m notebook_alchemy.keepalive`, which runs `python -m notebooklm auth refresh` (by
+the same Python, so the scheduler's short PATH does not matter) and writes
 the outcome to `keepalive.json` in the working folder, so `status` shows whether the refresh is
 actually succeeding rather than only whether the task exists.
 """
@@ -41,6 +42,11 @@ STATUS_FILE = "keepalive.json"
 REFRESH_TIMEOUT = 180
 # Longest a single refresh may run before Task Scheduler stops it.
 TASK_TIME_LIMIT = "PT10M"
+# `status` calls the refresh stale when this many runs in a row were missed.
+STALE_AFTER_MISSED = 3
+# Characters a scheduler would expand or split in a path: Task Scheduler %VAR%, systemd % and $,
+# cron % (a newline) and ` in a shell line.
+UNSAFE_PATH_CHARACTERS = frozenset("%$`")
 
 Runner = Callable[..., subprocess.CompletedProcess]
 PLATFORM = sys.platform  # read through this name so tests can pick a system
@@ -57,6 +63,7 @@ class KeepAliveState:
     last_at: str = ""  # ISO time of the last refresh the task ran
     last_ok: bool | None = None
     last_detail: str = ""
+    stale: bool = False  # on, but no refresh recorded for STALE_AFTER_MISSED intervals
 
 
 def task_name(profile: str) -> str:
@@ -169,6 +176,11 @@ class KeepAlive:
             return "Task Scheduler"
         if self.platform == "darwin":
             return "launchd"
+        # On Linux the choice depends on the session (a desktop has systemd --user, an SSH or
+        # container shell may not), so the scheduler an entry was made with is recorded and reused.
+        recorded = read_status(self.home).get(self.profile, {}).get("where")
+        if recorded in ("systemd", "cron"):
+            return str(recorded)
         return "systemd" if shutil.which("systemctl") and self._systemd_user_ok() else "cron"
 
     def _systemd_user_ok(self) -> bool:
@@ -202,106 +214,129 @@ class KeepAlive:
     def enable(self) -> str:
         """Register the task (replacing an earlier one) and return the scheduler's name."""
         kind = self.kind
-        if kind == "Task Scheduler":
-            # Registered from a task definition, not `schtasks /SC MINUTE`: only the definition can
-            # let the task run on battery (the default refuses, and a laptop's task then waits,
-            # "Queued", until it is plugged in) and catch up after sleep.
-            definition = task_xml(task_command(self.profile, self.home, windowless=True))
-            fd, xml_path = tempfile.mkstemp(suffix=".xml", prefix="notebook-alchemy-task-")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(definition.encode("utf-16"))
-                res = self._call(
-                    ["schtasks", "/Create", "/F", "/TN", task_name(self.profile), "/XML", xml_path],
-                    "register the Task Scheduler task",
-                )
-            finally:
-                Path(xml_path).unlink(missing_ok=True)
-            self._check(res, "register the Task Scheduler task")
-        elif kind == "launchd":
-            plist = self._plist_path()
-            plist.parent.mkdir(parents=True, exist_ok=True)
-            self._launchctl_bootout(plist)
-            plist.write_bytes(
-                plistlib.dumps(
-                    {
-                        "Label": _label(self.profile),
-                        "ProgramArguments": task_command(self.profile, self.home),
-                        "StartInterval": INTERVAL_MINUTES * 60,
-                        "RunAtLoad": True,
-                    }
-                )
-            )
-            res = self._call(
-                ["launchctl", "bootstrap", f"gui/{_uid()}", str(plist)], "start the launchd agent"
-            )
-            self._check(res, "start the launchd agent")
-        elif kind == "systemd":
-            folder = self._systemd_dir()
-            folder.mkdir(parents=True, exist_ok=True)
-            command = " ".join(_systemd_quote(a) for a in task_command(self.profile, self.home))
-            (folder / f"{_unit(self.profile)}.service").write_text(
-                f"[Unit]\nDescription={task_name(self.profile)}\n\n[Service]\nType=oneshot\nExecStart={command}\n",
-                encoding="utf-8",
-            )
-            (folder / f"{_unit(self.profile)}.timer").write_text(
-                f"[Unit]\nDescription={task_name(self.profile)}\n\n[Timer]\nOnBootSec=2min\n"
-                f"OnUnitActiveSec={INTERVAL_MINUTES}min\n\n[Install]\nWantedBy=timers.target\n",
-                encoding="utf-8",
-            )
-            self._check(
-                self._call(["systemctl", "--user", "daemon-reload"], "reload systemd"), "reload systemd"
-            )
-            res = self._call(
-                ["systemctl", "--user", "enable", "--now", f"{_unit(self.profile)}.timer"],
-                "start the systemd timer",
-            )
-            self._check(res, "start the systemd timer")
-        else:
-            lines = [ln for ln in self._crontab() if not ln.endswith(self._cron_marker())]
-            command = " ".join(_shell_quote(a) for a in task_command(self.profile, self.home))
-            lines.append(f"*/{INTERVAL_MINUTES} * * * * {command} >/dev/null 2>&1 {self._cron_marker()}")
-            res = self._call(["crontab", "-"], "update the crontab", stdin="\n".join(lines) + "\n")
-            self._check(res, "update the crontab")
-        if not self.state().on:
+        command = task_command(self.profile, self.home, windowless=kind == "Task Scheduler")
+        unsafe = sorted({c for arg in command for c in arg if c in UNSAFE_PATH_CHARACTERS})
+        if unsafe:
+            # Task Scheduler expands %VAR%, systemd expands % and $, and cron turns % into a newline.
             raise AlchemyError(
-                f"The {kind} entry was written but could not be read back.",
-                hint="Run `notebook-alchemy keep-signed-in` again.",
+                f"The path to Python or to the working folder contains {' '.join(unsafe)}, which "
+                f"{kind} would change, so the refresh would not run.",
+                hint="Install Notebook Alchemy (or set ALCHEMY_CACHE_DIR) in a folder without those "
+                "characters, or sign in again before each run.",
             )
+        self.home.mkdir(parents=True, exist_ok=True)
+        try:
+            if kind == "Task Scheduler":
+                self._enable_windows(command)
+            elif kind == "launchd":
+                self._enable_launchd(command)
+            elif kind == "systemd":
+                self._enable_systemd(command)
+            else:
+                self._enable_cron(command)
+            if not self.state().on:
+                raise AlchemyError(
+                    f"The {kind} entry was written but is not active.",
+                    hint="Run `notebook-alchemy keep-signed-in` again.",
+                )
+        except AlchemyError:
+            self._remove_files()  # nothing half-made is left to look like "on"
+            raise
+        _record(self.home, self.profile, where=kind)
         return kind
 
+    def _enable_windows(self, command: list[str]) -> None:
+        # Registered from a task definition, not `schtasks /SC MINUTE`: only the definition can let
+        # the task run on battery (the default refuses, and a laptop's task then waits, "Queued",
+        # until it is plugged in) and catch up after sleep.
+        fd, xml_path = tempfile.mkstemp(suffix=".xml", prefix="notebook-alchemy-task-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(task_xml(command).encode("utf-16"))
+            res = self._call(
+                ["schtasks", "/Create", "/F", "/TN", task_name(self.profile), "/XML", xml_path],
+                "register the Task Scheduler task",
+            )
+        finally:
+            Path(xml_path).unlink(missing_ok=True)
+        self._check(res, "register the Task Scheduler task")
+
+    def _enable_launchd(self, command: list[str]) -> None:
+        plist = self._plist_path()
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        self._launchctl_bootout()
+        plist.write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": _label(self.profile),
+                    "ProgramArguments": command,
+                    "StartInterval": INTERVAL_MINUTES * 60,
+                    "RunAtLoad": True,
+                }
+            )
+        )
+        res = self._call(["launchctl", "bootstrap", f"gui/{_uid()}", str(plist)], "start the launchd agent")
+        self._check(res, "start the launchd agent")
+
+    def _enable_systemd(self, command: list[str]) -> None:
+        folder = self._systemd_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        line = " ".join(_systemd_quote(a) for a in command)
+        (folder / f"{_unit(self.profile)}.service").write_text(
+            f"[Unit]\nDescription={task_name(self.profile)}\n\n[Service]\nType=oneshot\nExecStart={line}\n",
+            encoding="utf-8",
+        )
+        (folder / f"{_unit(self.profile)}.timer").write_text(
+            f"[Unit]\nDescription={task_name(self.profile)}\n\n[Timer]\nOnBootSec=2min\n"
+            f"OnUnitActiveSec={INTERVAL_MINUTES}min\n\n[Install]\nWantedBy=timers.target\n",
+            encoding="utf-8",
+        )
+        self._check(self._call(["systemctl", "--user", "daemon-reload"], "reload systemd"), "reload systemd")
+        res = self._call(
+            ["systemctl", "--user", "enable", "--now", f"{_unit(self.profile)}.timer"],
+            "start the systemd timer",
+        )
+        self._check(res, "start the systemd timer")
+
+    def _enable_cron(self, command: list[str]) -> None:
+        lines = [ln for ln in self._crontab() if not ln.endswith(self._cron_marker())]
+        line = " ".join(_shell_quote(a) for a in command)
+        lines.append(f"*/{INTERVAL_MINUTES} * * * * {line} >/dev/null 2>&1 {self._cron_marker()}")
+        res = self._call(["crontab", "-"], "update the crontab", stdin="\n".join(lines) + "\n")
+        self._check(res, "update the crontab")
+
     def disable(self) -> bool:
-        """Remove the task; True when there was one."""
-        if not self.state().on:
-            return False
+        """Remove the task; True when there was one (active, or its files left behind)."""
         kind = self.kind
+        had_files = self._has_files()
+        if not self.state().on and not had_files:
+            return False
         if kind == "Task Scheduler":
             res = self._call(["schtasks", "/Delete", "/F", "/TN", task_name(self.profile)], "remove the task")
             self._check(res, "remove the Task Scheduler task")
         elif kind == "launchd":
-            plist = self._plist_path()
-            self._launchctl_bootout(plist)
-            plist.unlink(missing_ok=True)
+            self._launchctl_bootout()
         elif kind == "systemd":
             res = self._call(
                 ["systemctl", "--user", "disable", "--now", f"{_unit(self.profile)}.timer"],
                 "stop the systemd timer",
             )
-            self._check(res, "stop the systemd timer")
-            for suffix in (".service", ".timer"):
-                (self._systemd_dir() / f"{_unit(self.profile)}{suffix}").unlink(missing_ok=True)
-            self._call(["systemctl", "--user", "daemon-reload"], "reload systemd")
+            if res.returncode != 0 and self._systemd_active():
+                self._check(res, "stop the systemd timer")  # files removed by hand: nothing to stop
         else:
             lines = [ln for ln in self._crontab() if not ln.endswith(self._cron_marker())]
             res = self._call(
                 ["crontab", "-"], "update the crontab", stdin="\n".join(lines) + "\n" if lines else ""
             )
             self._check(res, "update the crontab")
+        self._remove_files()
         if self.state().on:
             raise AlchemyError(f"The {kind} entry is still there after removing it.")
+        _record(self.home, self.profile, where=None)
         return True
 
     def state(self) -> KeepAliveState:
+        """Whether the scheduler has the entry *active* (not only its files), and the last refresh."""
         kind = self.kind
         if kind == "Task Scheduler":
             res = self._call(
@@ -309,29 +344,55 @@ class KeepAlive:
             )
             on = res.returncode == 0
         elif kind == "launchd":
-            on = self._plist_path().is_file()
+            res = self._call(["launchctl", "print", f"gui/{_uid()}/{_label(self.profile)}"], "read launchd")
+            on = res.returncode == 0
         elif kind == "systemd":
-            on = (self._systemd_dir() / f"{_unit(self.profile)}.timer").is_file()
+            on = self._systemd_active()
         else:
             on = any(ln.endswith(self._cron_marker()) for ln in self._crontab())
         last = read_status(self.home).get(self.profile, {})
+        at = str(last.get("at", ""))
         return KeepAliveState(
             on,
             kind if on else "",
-            str(last.get("at", "")),
+            at,
             last.get("ok") if isinstance(last.get("ok"), bool) else None,
             str(last.get("detail", "")),
+            stale=on and _older_than(at, INTERVAL_MINUTES * STALE_AFTER_MISSED),
         )
 
     # -- per-system details --
 
+    def _systemd_active(self) -> bool:
+        res = self._call(
+            ["systemctl", "--user", "is-enabled", f"{_unit(self.profile)}.timer"], "read systemd"
+        )
+        return res.returncode == 0
+
+    def _has_files(self) -> bool:
+        if self.kind == "launchd":
+            return self._plist_path().is_file()
+        if self.kind == "systemd":
+            return any(
+                (self._systemd_dir() / f"{_unit(self.profile)}{s}").is_file() for s in (".service", ".timer")
+            )
+        return False
+
+    def _remove_files(self) -> None:
+        if self.kind == "launchd":
+            self._plist_path().unlink(missing_ok=True)
+        elif self.kind == "systemd":
+            for suffix in (".service", ".timer"):
+                (self._systemd_dir() / f"{_unit(self.profile)}{suffix}").unlink(missing_ok=True)
+            # Best effort: systemd forgets removed units on its next reload in any case.
+            self._call(["systemctl", "--user", "daemon-reload"], "reload systemd")
+
     def _plist_path(self) -> Path:
         return self.user_home / "Library" / "LaunchAgents" / f"{_label(self.profile)}.plist"
 
-    def _launchctl_bootout(self, plist: Path) -> None:
-        if plist.is_file():
-            # Not loaded is the usual reason this fails, and the next step writes the file anew.
-            self._call(["launchctl", "bootout", f"gui/{_uid()}", str(plist)], "stop the launchd agent")
+    def _launchctl_bootout(self) -> None:
+        # Not loaded is the usual reason this fails; state() reads back what launchd really has.
+        self._call(["launchctl", "bootout", f"gui/{_uid()}/{_label(self.profile)}"], "stop the launchd agent")
 
     def _systemd_dir(self) -> Path:
         return self.user_home / ".config" / "systemd" / "user"
@@ -360,6 +421,16 @@ def _systemd_quote(arg: str) -> str:
     return '"' + arg.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _older_than(iso: str, minutes: int) -> bool:
+    try:
+        then = dt.datetime.fromisoformat(iso)
+    except ValueError:
+        return False  # no refresh recorded yet is reported as such, not as stale
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=dt.UTC)
+    return dt.datetime.now(dt.UTC) - then > dt.timedelta(minutes=minutes)
+
+
 # --- the task itself --------------------------------------------------------------------------------
 
 
@@ -373,10 +444,41 @@ def read_status(home: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _record(home: Path, profile: str, **fields: Any) -> None:
+    """Update this profile's entry in the status file; a field set to None is removed.
+
+    The working folder is not created here: after `clean` removed it, the refresh keeps running
+    (it is what keeps the sign-in alive) without bringing the folder back.
+    """
+    if not home.is_dir():
+        return
+    data = read_status(home)
+    entry = data.get(profile) if isinstance(data.get(profile), dict) else {}
+    for key, value in fields.items():
+        if value is None:
+            entry.pop(key, None)
+        else:
+            entry[key] = value
+    data[profile] = entry
+    try:
+        (home / STATUS_FILE).write_text(json.dumps(data), encoding="utf-8")
+    except OSError as exc:
+        print(f"Could not record the refresh: {exc}", file=sys.stderr)
+
+
+def _module_python() -> str:
+    """The Python that runs `notebooklm` as a module: no PATH needed (launchd, cron and systemd
+    give a task a minimal PATH), and a console Python even when the task itself runs under pythonw."""
+    exe = Path(sys.executable)
+    console = exe.with_name("python.exe")
+    return str(console) if exe.name.lower() == "pythonw.exe" and console.is_file() else str(exe)
+
+
 def refresh(profile: str, home: Path, *, runner: Runner | None = None) -> bool:
     """Run `notebooklm auth refresh` once and record the outcome; True when it worked."""
     profile = validate_profile_name(profile, source="--profile")
-    cmd = ["notebooklm", "--profile", profile, "auth", "refresh", "--quiet", "--allow-headless"]
+    cmd = [_module_python(), "-m", "notebooklm", "--profile", profile, "auth", "refresh", "--quiet"]
+    cmd.append("--allow-headless")
     kwargs: dict[str, Any] = {"capture_output": True, "text": True, "timeout": REFRESH_TIMEOUT}
     if sys.platform.startswith("win"):
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -387,16 +489,10 @@ def refresh(profile: str, home: Path, *, runner: Runner | None = None) -> bool:
         # notebooklm's own advice names its command; `status` gives this tool's sign-in command instead.
         detail = re.sub(r"\s*Run 'notebooklm login'[^.]*\.?", "", detail).strip()[:300]
     except FileNotFoundError:
-        ok, detail = False, "the notebooklm command was not found"
+        ok, detail = False, "Python could not be started to run notebooklm"
     except (OSError, subprocess.TimeoutExpired) as exc:
         ok, detail = False, str(exc)[:300]
-    data = read_status(home)
-    data[profile] = {"at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"), "ok": ok, "detail": detail}
-    try:
-        home.mkdir(parents=True, exist_ok=True)
-        (home / STATUS_FILE).write_text(json.dumps(data), encoding="utf-8")
-    except OSError as exc:
-        print(f"Could not record the refresh: {exc}", file=sys.stderr)
+    _record(home, profile, at=dt.datetime.now(dt.UTC).isoformat(timespec="seconds"), ok=ok, detail=detail)
     return ok
 
 

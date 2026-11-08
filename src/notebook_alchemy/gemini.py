@@ -243,7 +243,9 @@ class GeminiClient:
             temperature=0.0,
         )
         body["contents"][0]["parts"].insert(0, {"fileData": {"fileUri": video_url}})
-        result = self._call(self.model, body, self._retries, timeout or max(self._timeout, 600))
+        # Not retried: a timed-out watch may still be billed, so one attempt per run (a later run
+        # tries again).
+        result = self._call(self.model, body, 0, timeout or max(self._timeout, 600))
         self._record_usage(result)
         return result
 

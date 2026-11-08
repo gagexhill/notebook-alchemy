@@ -194,6 +194,12 @@ class RequestCache:
     def get(self, key: str) -> Any:
         return self.data.get(key)
 
+    def drop_prefix(self, prefix: str) -> None:
+        """Forget every answer whose key starts with `prefix`, and save."""
+        for key in [k for k in self.data if k.startswith(prefix)]:
+            del self.data[key]
+        self.save()
+
     def put(self, key: str, value: Any) -> None:
         """Store an answer and save at once: a run stopped part-way (a quota) keeps what it paid for."""
         self.data[key] = value
@@ -509,20 +515,22 @@ class LibraryBuilder:
         if resort:
             self.cache.put(self._map_key, None)
             self.cache.put(self._place_key, {})
+            self.cache.drop_prefix(f"sub:{self.channel}{SEP}")
         title, topics = self._topic_map(kept, titles)
         placement = self._place(kept, topics, progress)
         unplaced = [p for p in kept if not placement.get(p.id)]
         if len(unplaced) > max(EXTEND_AT_LEAST, len(kept) * EXTEND_SHARE) and self._new_unplaced(unplaced):
             grown = self._extend(topics, unplaced)
-            if grown is not topics:
+            if grown is None:
+                pass  # no answer came; the next run asks again
+            elif grown is topics:
+                self._mark_extended(unplaced)  # the answer came and added nothing: not asked again
+            else:
                 topics = grown
                 waiting = {p.id for p in unplaced}
                 self.cache.put(self._place_key, {k: v for k, v in placement.items() if k not in waiting})
                 placement = self._place(kept, topics, progress)
-                still = [p for p in kept if not placement.get(p.id)]
-                self.cache.put(
-                    self._map_key, {**self.cache.get(self._map_key), "extended_for": self._digest(still)}
-                )
+                self._mark_extended([p for p in kept if not placement.get(p.id)])
         by_name = {f"{t.name}{SEP}{s.name}": s for t in topics for s in t.sections}
         misc = Section(MISC, about="Points that fit no other section")
         for p in kept:
@@ -575,8 +583,16 @@ class LibraryBuilder:
         """
         return (self.cache.get(self._map_key) or {}).get("extended_for") != self._digest(unplaced)
 
-    def _extend(self, topics: list[Topic], unplaced: list[Passage]) -> list[Topic]:
-        """Add sections (or topics) for passages that fit nowhere; every existing one stays."""
+    def _mark_extended(self, unplaced: list[Passage]) -> None:
+        stored = self.cache.get(self._map_key) or {"title": self.channel}
+        self.cache.put(self._map_key, {**stored, "extended_for": self._digest(unplaced)})
+
+    def _extend(self, topics: list[Topic], unplaced: list[Passage]) -> list[Topic] | None:
+        """Add sections (or topics) for passages that fit nowhere; every existing one stays.
+
+        Returns the grown map, `topics` itself when an answer came but added nothing usable, or
+        None when no answer came (a network or server error), so the next run asks again.
+        """
         try:
             text = self._ask(extend_prompt(self.channel, topics, [p.headline for p in unplaced]), 8192)
             additions = parse_extension(text)
@@ -586,7 +602,7 @@ class LibraryBuilder:
             self.notices.append(
                 f"New topics could not be added ({exc.detail}); those passages wait in {MISC}."
             )
-            return topics
+            return None
         except (ValueError, TypeError) as exc:
             self.notices.append(f"New topics could not be added ({exc}); those passages wait in {MISC}.")
             return topics
@@ -612,6 +628,10 @@ class LibraryBuilder:
             k: v for k, v in (self.cache.get(self._place_key) or {}).items() if v in names or v == ""
         }
         todo = [p for p in passages if p.id not in placed]
+        if todo:
+            # Passages placed nowhere earlier ride along with new ones: the map may fit them now, and
+            # they are few (more than EXTEND_SHARE of them makes the map grow instead).
+            todo += [p for p in passages if placed.get(p.id) == ""]
         listing = "\n".join(f"{i}: {t.name} / {s.name} — {s.about}" for i, (t, s) in enumerate(sections))
         batches = [todo[i : i + ASSIGN_BATCH] for i in range(0, len(todo), ASSIGN_BATCH)]
         for done, batch in enumerate(batches, 1):
@@ -620,8 +640,8 @@ class LibraryBuilder:
             if mapping is None:
                 continue
             for n, p in numbered:
-                # Asked once: a passage the model placed nowhere is remembered as "" and is not asked
-                # about again (it may be placed when the map is extended).
+                # A passage the model placed nowhere is remembered as "": it is asked about again only
+                # with the next new passages, or when the map is extended.
                 placed[p.id] = names[mapping[n]] if n in mapping else ""
             self.cache.put(self._place_key, placed)
             if progress:
@@ -660,6 +680,9 @@ class LibraryBuilder:
         stored = self.cache.get(key) or {}
         names: list[str] = list(stored.get("names") or [])
         if not names:
+            digest = self._digest(section.passages)
+            if stored.get("unusable_for") == digest:
+                return [section]  # asked already for these passages; the answer was unusable
             try:
                 names = parse_subsections(self._ask(subsection_prompt(topic.name, section)))
             except GeminiError as exc:
@@ -669,7 +692,9 @@ class LibraryBuilder:
                 return [section]
             except (ValueError, TypeError) as exc:
                 self.notices.append(f"'{section.name}' was not divided ({exc}).")
+                self.cache.put(key, {"unusable_for": digest})
                 return [section]
+            self.cache.put(key, {"names": names, "placed": {}})  # paid for: kept even if a quota stops
         placed: dict[str, int] = dict(stored.get("placed") or {})
         todo = [p for p in section.passages if p.id not in placed]
         listing = "\n".join(f"{i}: {name}" for i, name in enumerate(names))
@@ -681,7 +706,7 @@ class LibraryBuilder:
                 continue
             for n, p in numbered:
                 placed[p.id] = mapping.get(n, -1)
-        self.cache.put(key, {"names": names, "placed": placed})
+            self.cache.put(key, {"names": names, "placed": placed})
         parts = [Section(f"{section.name}: {name}", about=section.about) for name in names]
         other = Section(f"{section.name}: {OTHER_SUBSECTION}", about=section.about)
         for p in section.passages:
