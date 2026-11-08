@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from .analyzer import DryRunReport, NotebookAnalyzer, ProgressFn
-from .channel import TranscriptManager
+from .channel import TranscriptManager, YtDlpSubtitles
 from .client import NotebookLMClient, SourceDocument, normalize_title
-from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig
+from .config import CAPTION_BLOCK_PAUSE, DEFAULT_MAX_PER_VOLUME, AlchemyConfig
 from .errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
 from .gemini import GeminiClient
 from .synthesizer import (
@@ -150,6 +150,11 @@ class AlchemyEngine:
             cache_dir=self.config.cache_dir,
             max_workers=self.config.max_concurrency,
             languages=self.config.caption_languages,
+            subtitles=YtDlpSubtitles(
+                self.config.caption_languages, cookies_browser=self.config.cookies_browser
+            ),
+            spacing=self.config.caption_spacing,
+            block_pause=CAPTION_BLOCK_PAUSE,
         )
         self.synthesizer = Synthesizer(
             api_key=self.config.gemini_api_key,

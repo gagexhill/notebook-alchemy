@@ -20,7 +20,10 @@ from youtube_transcript_api import (
 
 from notebook_alchemy.channel import (
     ChannelScanner,
+    SubtitlesBlocked,
+    SubtitlesUnavailable,
     TranscriptManager,
+    YtDlpSubtitles,
     parse_captions,
     video_id_from_url,
 )
@@ -465,3 +468,181 @@ def test_other_language_is_used_when_english_is_missing(tmp_path: Path) -> None:
 
     result = _manager(tmp_path, _SpanishOnly(lambda vid: None)).resolve("abcdefghijk")
     assert (result.text, result.source) == ("hola mundo", "youtube")
+
+
+# --- dates, routes and pacing ------------------------------------------------------------------------
+
+
+def test_a_channel_listing_gives_each_video_a_date(ydl: type[_FakeYDL]) -> None:
+    stamped = {**_entry(1), "timestamp": 1_700_000_000}  # 2023-11-14
+    exact = {**_entry(2), "upload_date": "20240105"}
+    ydl.script["https://www.youtube.com/@x/videos"] = {
+        "title": "X - Videos",
+        "entries": [stamped, exact, _entry(3)],
+    }
+    videos = ChannelScanner().scan("@x", tabs=("videos",)).videos
+    assert [v.published for v in videos] == ["2023-11-14", "2024-01-05", ""]
+    assert ydl.opts_seen[0]["extractor_args"] == {"youtubetab": {"approximate_date": [""]}}
+
+
+class _Subs:
+    """A scripted yt-dlp route: text, or an exception, per video."""
+
+    def __init__(self, script=None) -> None:
+        self.script = script or {}
+        self.calls: list[str] = []
+
+    def fetch(self, video_id: str):
+        self.calls.append(video_id)
+        out = self.script.get(video_id, ("subtitle words", "2024-03-02"))
+        if isinstance(out, Exception):
+            raise out
+        return out
+
+
+def _blocked_api(vid: str):
+    raise RequestBlocked(vid)
+
+
+def test_a_block_moves_on_to_yt_dlp_instead_of_stopping_the_run(tmp_path: Path) -> None:
+    api, subs = _Api(_blocked_api), _Subs()
+    tm = _manager(tmp_path, api, subtitles=subs)
+    results = tm.fetch_many([(f"vid{i:08d}", "") for i in range(3)])
+    assert [r.source for r in results.values()] == ["subtitles"] * 3
+    assert len(api.fetches) == 1  # the captions route paused after its block; the others went on
+    cached = json.loads((tmp_path / "cache" / "vid00000002.json").read_text(encoding="utf-8"))
+    assert cached["method"] == "subtitles" and cached["published"] == "2024-03-02"
+    assert tm.resolve("vid00000002").published == "2024-03-02"  # read back from the cache
+
+
+def test_no_captions_on_youtube_is_final_and_skips_yt_dlp(tmp_path: Path) -> None:
+    def disabled(vid: str):
+        raise TranscriptsDisabled(vid)
+
+    subs = _Subs()
+    assert _manager(tmp_path, _Api(disabled), subtitles=subs).resolve("abcdefghijk").source == "unavailable"
+    assert subs.calls == []
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def test_blocked_videos_are_tried_again_when_youtube_reopens(tmp_path: Path) -> None:
+    clock = _Clock()
+    state = {"blocked": True}
+
+    def api_behaviour(vid: str):
+        if state["blocked"]:
+            raise RequestBlocked(vid)
+        return [_Snippet(text=f"words {vid}")]
+
+    subs = _Subs({f"vid{i:08d}": SubtitlesBlocked("not a bot") for i in range(2)})
+    tm = TranscriptManager(
+        cache_dir=tmp_path / "cache",
+        api_factory=lambda: _Api(api_behaviour),
+        subtitles=subs,
+        sleep=lambda s: (clock.sleep(s), state.update(blocked=False)),
+        clock=clock,
+        block_pause=60,
+    )
+    results = tm.fetch_many([("vid00000000", ""), ("vid00000001", "")])
+    assert [r.source for r in results.values()] == ["youtube", "youtube"]
+    assert 60 in clock.sleeps and tm.blocked_total == 0
+
+
+def test_a_block_is_never_cached_and_is_reported(tmp_path: Path) -> None:
+    subs = _Subs({"abcdefghijk": SubtitlesBlocked("HTTP Error 429")})
+    tm = _manager(tmp_path, _Api(_blocked_api), subtitles=subs, block_pause=0)
+    result = tm.fetch_many([("abcdefghijk", "")])["abcdefghijk"]
+    assert result.source == "blocked" and tm.blocked_total == 1
+    assert not (tmp_path / "cache" / "abcdefghijk.json").exists()
+
+
+def test_remote_requests_are_spaced(tmp_path: Path) -> None:
+    clock = _Clock()
+    tm = TranscriptManager(
+        cache_dir=tmp_path / "cache",
+        api_factory=lambda: _Api(lambda vid: [_Snippet(text="hi")]),
+        sleep=clock.sleep,
+        clock=clock,
+        spacing=(3.0, 8.0),
+        rand=lambda low, high: 5.0,
+        max_workers=1,
+    )
+    tm.fetch_many([(f"vid{i:08d}", "") for i in range(3)])
+    assert clock.sleeps == [5.0, 5.0]  # none before the first request, one gap before each other
+    clock.sleeps.clear()
+    tm.fetch_many([(f"vid{i:08d}", "") for i in range(3)])  # all cached now: no waiting
+    assert clock.sleeps == []
+
+
+_VTT = "WEBVTT\n\n00:00.000 --> 00:01.000\nhi there\n"
+
+
+class _SubsYDL:
+    """Stands in for yt_dlp.YoutubeDL inside YtDlpSubtitles."""
+
+    def __init__(self, info=None, error: str | None = None, body: str = _VTT) -> None:
+        self.info, self.error, self.body = info or {}, error, body
+        self.opts: dict = {}
+        self.opened: list[str] = []
+
+    def __call__(self, opts):
+        self.opts = opts
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def extract_info(self, url, download=False):
+        if self.error:
+            self.opts["logger"].error(self.error)
+            raise RuntimeError("DownloadError")
+        return self.info
+
+    def urlopen(self, url):
+        self.opened.append(url)
+        return SimpleNamespace(read=lambda: self.body.encode("utf-8"))
+
+
+def test_yt_dlp_prefers_a_written_track_in_a_preferred_language_and_reads_the_date() -> None:
+    info = {
+        "upload_date": "20250911",
+        "subtitles": {"en": [{"ext": "json3", "url": "j"}, {"ext": "vtt", "url": "written-en"}]},
+        "automatic_captions": {"en": [{"ext": "vtt", "url": "auto-en"}]},
+    }
+    fake = _SubsYDL(info)
+    text, published = YtDlpSubtitles(ydl_factory=fake, cookies_browser="chrome").fetch("abcdefghijk")
+    assert (text, published) == ("hi there", "2025-09-11")
+    assert fake.opened == ["written-en"] and fake.opts["cookiesfrombrowser"] == ("chrome",)
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        ("Sign in to confirm you're not a bot", SubtitlesBlocked),
+        ("HTTP Error 429: Too Many Requests", SubtitlesBlocked),
+        ("Private video", SubtitlesUnavailable),
+    ],
+)
+def test_yt_dlp_failures_are_told_apart(error: str, kind: type[Exception]) -> None:
+    with pytest.raises(kind):
+        YtDlpSubtitles(ydl_factory=_SubsYDL(error=error)).fetch("abcdefghijk")
+
+
+def test_yt_dlp_with_no_track_is_unavailable() -> None:
+    with pytest.raises(SubtitlesUnavailable):
+        YtDlpSubtitles(ydl_factory=_SubsYDL({"subtitles": {}, "automatic_captions": {}})).fetch("abcdefghijk")

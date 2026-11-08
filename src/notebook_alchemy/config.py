@@ -30,6 +30,11 @@ WINDOWS_RESERVED_NAMES = frozenset(
 DEFAULT_MAX_CONCURRENCY = 4
 DEFAULT_MAX_PER_VOLUME = 50
 MAX_ALLOWED_CONCURRENCY = 16
+# Seconds between remote caption requests (a random gap in this range), so a long channel is not
+# refused by YouTube; and how long a refused route rests before it is tried again.
+DEFAULT_CAPTION_SPACING = (3.0, 8.0)
+CAPTION_BLOCK_PAUSE = 180.0
+COOKIE_BROWSERS = ("chrome", "edge", "firefox", "brave")
 LOG_LEVELS = {
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
@@ -171,6 +176,8 @@ class AlchemyConfig:
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     notebooklm_profile: str = DEFAULT_NOTEBOOKLM_PROFILE
     caption_languages: tuple[str, ...] = ("en", "en-US", "en-GB")
+    caption_spacing: tuple[float, float] = field(default_factory=lambda: DEFAULT_CAPTION_SPACING)
+    cookies_browser: str | None = None  # a browser yt-dlp may read the YouTube sign-in from
 
     @property
     def has_gemini_key(self) -> bool:
@@ -217,4 +224,18 @@ class AlchemyConfig:
                 if code.strip()
             )
             or ("en",),
+            cookies_browser=_cookies_browser(),
         )
+
+
+def _cookies_browser() -> str | None:
+    """ALCHEMY_COOKIES_BROWSER: chrome, edge, firefox or brave, or unset."""
+    value = os.getenv("ALCHEMY_COOKIES_BROWSER", "").strip().lower()
+    if not value:
+        return None
+    if value not in COOKIE_BROWSERS:
+        raise ConfigError(
+            f"ALCHEMY_COOKIES_BROWSER={value!r} is not a supported browser.",
+            hint=f"Use one of: {', '.join(COOKIE_BROWSERS)}, or leave it unset.",
+        )
+    return value

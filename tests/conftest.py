@@ -34,6 +34,7 @@ _ENV_TO_CLEAR = (
     "ALCHEMY_GEMINI_MODEL",
     "ALCHEMY_MAX_CONCURRENCY",
     "ALCHEMY_NOTEBOOKLM_PROFILE",
+    "ALCHEMY_COOKIES_BROWSER",
     "NOTEBOOKLM_AUTH_JSON",
     "NO_COLOR",
 )
@@ -60,6 +61,8 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(subprocess, "run", _no_process)
     monkeypatch.setattr(subprocess, "Popen", _no_process)
     monkeypatch.setattr(socket.socket, "connect", _no_network)
+    # Real runs space caption requests seconds apart; tests do not wait.
+    monkeypatch.setattr("notebook_alchemy.config.DEFAULT_CAPTION_SPACING", (0.0, 0.0))
     # The plan limit is a live NotebookLM read; it is unknown unless a test injects one.
     monkeypatch.setattr(
         "notebook_alchemy.client.NotebookLMClient._read_plan_limits_live", lambda self: None, raising=True
