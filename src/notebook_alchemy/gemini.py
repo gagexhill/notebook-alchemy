@@ -35,6 +35,8 @@ PRICING_USD_PER_M: dict[str, tuple[tuple[datetime.date, float, float], ...]] = {
 }
 # An unlisted model is estimated at the default model's rate, so the estimate errs high.
 FALLBACK_PRICING_MODEL = "gemini-3.8-flash"
+BATCH_PRICE_FACTOR = 0.5  # batch mode bills half the standard rate (aistudio.google.com/docs/batch-api)
+BATCH_SUFFIX = " (batch)"
 THINKING_NOTE = "Thinking tokens bill as output and are not in the output estimate."
 
 
@@ -181,9 +183,12 @@ class GeminiClient:
         max_output_tokens: int = 8192,
         temperature: float = 0.2,
         timeout: float | None = None,
+        allow_fallback: bool = True,
     ) -> GeminiResult:
-        models = [self.active_model]
-        if self.fallback_model and self.fallback_model != models[0]:
+        """One answer. With `allow_fallback=False` only the configured model answers: a step whose
+        results are cached per model (labelling) stops on a quota instead of mixing in another model."""
+        models = [self.active_model if allow_fallback else self.model]
+        if allow_fallback and self.fallback_model and self.fallback_model != models[0]:
             models.append(self.fallback_model)
         for index, model in enumerate(models):
             body = self._body(
@@ -210,9 +215,9 @@ class GeminiClient:
             return result
         raise AssertionError("unreachable: the loop returns or raises")  # pragma: no cover
 
-    def _record_usage(self, result: GeminiResult) -> None:
+    def _record_usage(self, result: GeminiResult, *, batch: bool = False) -> None:
         with self._usage_lock:
-            totals = self._usage.setdefault(result.model, [0, 0])
+            totals = self._usage.setdefault(result.model + (BATCH_SUFFIX if batch else ""), [0, 0])
             totals[0] += result.prompt_tokens
             totals[1] += result.output_tokens + result.thinking_tokens
 
@@ -226,9 +231,90 @@ class GeminiClient:
         with self._usage_lock:
             items = sorted(self._usage.items())
         for model, (tokens_in, tokens_out) in items:
-            price_in, price_out, _note = price_for(model)
-            rows.append((model, tokens_in, tokens_out, (tokens_in * price_in + tokens_out * price_out) / 1e6))
+            base = model.removesuffix(BATCH_SUFFIX)
+            price_in, price_out, _note = price_for(base)
+            factor = BATCH_PRICE_FACTOR if model.endswith(BATCH_SUFFIX) else 1.0
+            cost = (tokens_in * price_in + tokens_out * price_out) / 1e6 * factor
+            rows.append((model, tokens_in, tokens_out, cost))
         return rows
+
+    # -- batch mode: half price, asynchronous; Google refuses it for projects without billing --
+
+    def submit_batch(self, requests: list[tuple[str, dict]], display_name: str) -> str:
+        """Submit (key, generateContent body) pairs as one inline batch; return the job name.
+
+        Raises GeminiError; `batch_refused` tells a project that cannot use batch mode apart.
+        """
+        body = {
+            "batch": {
+                "display_name": display_name,
+                "input_config": {
+                    "requests": {"requests": [{"request": b, "metadata": {"key": k}} for k, b in requests]}
+                },
+            }
+        }
+        data = self._rest("POST", f"{API_ROOT}/{self.model}:batchGenerateContent", body)
+        name = data.get("name") or (data.get("metadata") or {}).get("name")
+        if not name:
+            raise GeminiError("Gemini accepted the batch but returned no job name.")
+        return str(name)
+
+    def batch_results(
+        self, name: str, keys: list[str]
+    ) -> tuple[str, dict[str, GeminiResult | GeminiError] | None]:
+        """(state, results by key once the job succeeded). Keys come from each response, else order."""
+        data = self._rest("GET", f"{API_ROOT.rsplit('/models', 1)[0]}/{name}", None)
+        meta = data.get("metadata") or {}
+        state = str(data.get("state") or meta.get("state") or "")
+        if not state.endswith("SUCCEEDED"):
+            return state, None
+        holder = data.get("dest") or data.get("response") or meta.get("output") or {}
+        inlined = holder.get("inlinedResponses") or holder.get("inlined_responses") or []
+        if isinstance(inlined, dict):  # nested one level deeper in some responses
+            inlined = inlined.get("inlinedResponses") or []
+        results: dict[str, GeminiResult | GeminiError] = {}
+        for index, item in enumerate(inlined):
+            key = str(
+                (item.get("metadata") or {}).get("key") or (keys[index] if index < len(keys) else index)
+            )
+            if item.get("error"):
+                message = str((item["error"] or {}).get("message", "request failed"))
+                results[key] = GeminiError(scrub(f"Gemini batch request failed: {message}", self._api_key))
+                continue
+            try:
+                result = self.parse_payload(item.get("response") or {}, self.model)
+            except GeminiError as exc:
+                results[key] = exc
+                continue
+            self._record_usage(result, batch=True)
+            results[key] = result
+        return state, results
+
+    @staticmethod
+    def batch_refused(exc: GeminiError) -> bool:
+        """The project cannot use batch mode (Google answers FAILED_PRECONDITION without billing)."""
+        return exc.status == 400 and "precondition" in exc.detail.lower()
+
+    def _rest(self, method: str, url: str, body: dict | None) -> dict:
+        headers = {"x-goog-api-key": self._api_key, "content-type": "application/json"}
+        try:
+            with httpx.Client(timeout=self._timeout, transport=self._transport) as client:
+                response = client.request(method, url, json=body, headers=headers)
+        except httpx.TransportError as exc:
+            raise GeminiError(f"Gemini batch request failed: network error: {type(exc).__name__}") from exc
+        if response.status_code != 200:
+            detail = self._describe(response)
+            raise GeminiError(
+                f"Gemini refused the batch request ({detail}).",
+                hint=self._hint(response.status_code),
+                status=response.status_code,
+                detail=detail,
+                quota=self._quota_exhausted(response),
+            )
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise GeminiError("Gemini returned a batch response that is not JSON.") from exc
 
     def _call(self, model: str, body: dict, retries: int, timeout: float) -> GeminiResult:
         headers = {"x-goog-api-key": self._api_key, "content-type": "application/json"}
@@ -264,6 +350,7 @@ class GeminiClient:
                         hint=self._hint(response.status_code),
                         status=response.status_code,
                         detail=last_error,
+                        quota=self._quota_exhausted(response),
                     )
 
             if attempt < retries:
@@ -366,7 +453,11 @@ class GeminiClient:
             data = response.json()
         except ValueError as exc:
             raise GeminiError("Gemini returned a response that is not JSON.") from exc
+        return self.parse_payload(data, model)
 
+    @staticmethod
+    def parse_payload(data: dict, model: str) -> GeminiResult:
+        """A GeminiResult from a generateContent response body (direct or from a batch)."""
         usage = data.get("usageMetadata", {}) or {}
         candidates = data.get("candidates") or []
         if not candidates:

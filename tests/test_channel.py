@@ -21,6 +21,7 @@ from youtube_transcript_api import (
 from notebook_alchemy.channel import (
     ChannelScanner,
     SubtitlesBlocked,
+    SubtitlesSetupError,
     SubtitlesUnavailable,
     TranscriptManager,
     YtDlpSubtitles,
@@ -646,3 +647,41 @@ def test_yt_dlp_failures_are_told_apart(error: str, kind: type[Exception]) -> No
 def test_yt_dlp_with_no_track_is_unavailable() -> None:
     with pytest.raises(SubtitlesUnavailable):
         YtDlpSubtitles(ydl_factory=_SubsYDL({"subtitles": {}, "automatic_captions": {}})).fetch("abcdefghijk")
+
+
+def test_videos_youtube_refuses_are_read_through_notebooklm_and_cached(tmp_path: Path) -> None:
+    def disabled_or_blocked(vid: str):
+        if vid == "nocaptions1":
+            raise TranscriptsDisabled(vid)
+        raise RequestBlocked(vid)
+
+    asked: list[list[str]] = []
+
+    def bulk(items):
+        asked.append([vid for vid, _ in items])
+        return {vid: f"notebooklm words {vid}" for vid, _ in items}
+
+    tm = _manager(tmp_path, _Api(disabled_or_blocked), bulk=bulk, block_pause=0)
+    results = tm.fetch_many([("vid00000001", "a"), ("nocaptions1", "b"), ("vid00000002", "c")])
+    assert asked == [["vid00000001", "vid00000002"]]  # a video with no captions at all is not sent
+    assert results["vid00000001"].source == "notebooklm" and tm.blocked_total == 0
+    cached = json.loads((tmp_path / "cache" / "vid00000002.json").read_text(encoding="utf-8"))
+    assert cached["method"] == "notebooklm" and cached["full_text"] == "notebooklm words vid00000002"
+
+
+def test_a_browser_sign_in_yt_dlp_cannot_read_closes_the_route_once_with_a_notice(tmp_path: Path) -> None:
+    class Unreadable(_Subs):
+        def fetch(self, video_id: str):
+            self.calls.append(video_id)
+            raise SubtitlesSetupError("yt-dlp could not read the chrome sign-in")
+
+    subs = Unreadable()
+    tm = _manager(tmp_path, _Api(_blocked_api), subtitles=subs, block_pause=0)
+    tm.fetch_many([(f"vid{i:08d}", "") for i in range(3)])
+    assert subs.calls == ["vid00000000"] and tm.notices == ["yt-dlp could not read the chrome sign-in"]
+
+
+def test_a_cookie_failure_is_a_setup_error_and_a_path_with_age_in_it_is_not_a_missing_video() -> None:
+    error = "could not find firefox cookies database in 'c:\\appdata\\local\\packages\\x'"
+    with pytest.raises(SubtitlesSetupError):
+        YtDlpSubtitles(ydl_factory=_SubsYDL(error=error), cookies_browser="firefox").fetch("abcdefghijk")
