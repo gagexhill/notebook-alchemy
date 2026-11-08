@@ -72,36 +72,60 @@ def _intro(channel: str) -> str:
     )
 
 
-def render_topic(topic: Topic, channel: str, titles: dict[str, str], exact: set[str]) -> list[Book]:
-    """The topic as one book, or as parts when it is longer than SOURCE_WORD_LIMIT words."""
-    blocks: list[str] = []
+def render_topic(
+    topic: Topic,
+    channel: str,
+    titles: dict[str, str],
+    exact: set[str],
+    parts: dict[str, int] | None = None,
+) -> list[Book]:
+    """The topic as one book, or as parts when it is longer than SOURCE_WORD_LIMIT words.
+
+    `parts` (section name -> part number) is read and updated in place, so a section stays in the
+    part it was in last time: new sections go to the last part, and only a part that grows past the
+    limit moves its last sections on to the next part. Sections keep the topic's order within a part.
+    """
+    parts = {} if parts is None else parts
+    blocks: list[tuple[str, str]] = []  # (key, text); a section cut into pieces gives one key per piece
     for s in topic.sections:
         text = _section(s, titles, exact)
         if len(text.split()) <= SOURCE_WORD_LIMIT:
-            blocks.append(text)
+            blocks.append((s.name, text))
             continue
         # A single section too large for one source is cut between passages.
-        current = f"## {s.name}\n\n" + (f"{s.intro}\n\n" if s.intro else "")
+        current, piece_no = f"## {s.name}\n\n" + (f"{s.intro}\n\n" if s.intro else ""), 1
         for p in s.passages:
             piece = _passage(p, titles, exact) + "\n"
             if len((current + piece).split()) > SOURCE_WORD_LIMIT:
-                blocks.append(current)
-                current = f"## {s.name} (continued)\n\n"
+                blocks.append((f"{s.name} #{piece_no}", current))
+                current, piece_no = f"## {s.name} (continued)\n\n", piece_no + 1
             current += piece
-        blocks.append(current)
+        blocks.append((f"{s.name} #{piece_no}", current))
+
+    order = {key: i for i, (key, _) in enumerate(blocks)}
+    words = {key: len(text.split()) for key, text in blocks}
+    last = max((parts[k] for k, _ in blocks if k in parts), default=1)
+    placed: dict[int, list[str]] = {}
+    for key, _ in blocks:
+        placed.setdefault(parts.get(key, last), []).append(key)
+    number = 1
+    while number <= max(placed):
+        keys = sorted(placed.get(number, []), key=order.__getitem__)
+        while len(keys) > 1 and sum(words[k] for k in keys) > SOURCE_WORD_LIMIT:
+            moved = keys.pop()  # the last section moves on; everything before it stays put
+            placed.setdefault(number + 1, []).append(moved)
+        placed[number] = keys
+        number += 1
+
+    texts = dict(blocks)
+    parts.clear()
     books: list[Book] = []
-    body: list[str] = []
-    for block in blocks:
-        if body and len(" ".join([*body, block]).split()) > SOURCE_WORD_LIMIT:
-            books.append(Book("", "\n".join(body)))
-            body = []
-        body.append(block)
-    if body:
-        books.append(Book("", "\n".join(body)))
-    for i, book in enumerate(books, 1):
-        title = topic.name if i == 1 else f"{topic.name} (Part {i})"
-        book.title = title
-        book.content = f"# {title}\n\n{_intro(channel)}\n{book.content}"
+    for keys in (placed[n] for n in sorted(placed) if placed[n]):
+        n = len(books) + 1  # numbered without gaps, should a part empty out
+        title = topic.name if n == 1 else f"{topic.name} (Part {n})"
+        body = "\n".join(texts[k] for k in sorted(keys, key=order.__getitem__))
+        books.append(Book(title, f"# {title}\n\n{_intro(channel)}\n{body}"))
+        parts.update(dict.fromkeys(keys, n))
     return books
 
 
@@ -171,9 +195,16 @@ def render_library(
     read: set[str],
     exact: set[str],
     dates: dict[str, str],
+    parts: dict[str, dict[str, int]] | None = None,
 ) -> list[Book]:
-    """Every source for the notebook: the overview first, then each topic book (and its parts)."""
+    """Every source for the notebook: the overview first, then each topic book (and its parts).
+
+    `parts` (topic -> section -> part number) is updated in place; see `render_topic`.
+    """
+    parts = {} if parts is None else parts
     books = [render_overview(library, channel, videos, read, videos, exact, dates)]
     for topic in library.topics:
-        books += render_topic(topic, channel, videos, exact)
+        books += render_topic(topic, channel, videos, exact, parts.setdefault(topic.name, {}))
+    for gone in set(parts) - {t.name for t in library.topics}:
+        del parts[gone]
     return books

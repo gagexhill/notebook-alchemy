@@ -13,6 +13,7 @@ Every paid step is cached under ~/.notebook-alchemy, so a rerun pays only for wh
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import logging
 import threading
@@ -54,6 +55,8 @@ SORTING_SHARE = 0.15  # sorting and consolidation, as a share of the labelling c
 
 # `notebooklm` processes run at once during an upload. Kept small to stay clear of rate limits.
 SYNC_WORKERS = 3
+# In the library cache: topic -> section -> the part of the topic book it is in.
+PARTS_KEY = "parts"
 
 
 @dataclass
@@ -65,6 +68,7 @@ class SyncResult:
     pruned: int = 0
     source_limit: int | None = None
     freed_first: bool = False  # old copies were removed before uploading to stay within the limit
+    unchanged: int = 0  # books whose text matched the copy already in the notebook, so not sent again
 
 
 @dataclass
@@ -93,6 +97,10 @@ class BuildReport:
     by_source: dict[str, int] = field(default_factory=dict)
     is_mock: bool = False
     used_ai: bool = True
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _run_pool(func: Callable[[Any], Any], items: list[Any]) -> list[Any]:
@@ -355,7 +363,13 @@ class AlchemyEngine:
             library = library_without_ai(channel, passages)
 
         # 6. books
-        books = render_library(library, channel, titles, read - set(waiting), exact, dated)
+        # Which part of a long topic each section is in is kept between runs, so a section does not
+        # move between "Part 1" and "Part 2" (and both get re-uploaded) whenever another one grows.
+        layout = None if mock else RequestCache(self.library_cache_path(channel))
+        parts = dict(layout.get(PARTS_KEY) or {}) if layout else {}
+        books = render_library(library, channel, titles, read - set(waiting), exact, dated, parts)
+        if layout:
+            layout.put(PARTS_KEY, parts)
         return BuildReport(
             channel=channel,
             videos=videos,
@@ -506,18 +520,23 @@ class AlchemyEngine:
         return self.sync_records_dir() / f"{_safe_name(notebook_id)}.json"
 
     def _read_record(self, notebook_id: str) -> dict[str, Any]:
-        """What this tool uploaded to a notebook: {"titles": [...], "ids": {title: source id}}."""
+        """What this tool uploaded to a notebook.
+
+        {"titles": [...], "ids": {title: source id}, "hashes": {title: hash of the text uploaded}}.
+        """
         data = self._read_json(self._sync_state_path(notebook_id))
-        ids = data.get("ids") if isinstance(data.get("ids"), dict) else {}
+        ids, hashes = data.get("ids"), data.get("hashes")
+        ids = ids if isinstance(ids, dict) else {}
+        hashes = hashes if isinstance(hashes, dict) else {}
         return {
             "titles": [str(t) for t in data.get("titles", [])],
             "ids": {str(k): str(v) for k, v in ids.items()},
+            "hashes": {str(k): str(v) for k, v in hashes.items()},
         }
 
-    def _write_record(self, notebook_id: str, ids: dict[str, str]) -> None:
-        self._write_json(
-            self._sync_state_path(notebook_id), {"titles": sorted(ids), "ids": ids}, "this upload"
-        )
+    def _write_record(self, notebook_id: str, ids: dict[str, str], hashes: dict[str, str]) -> None:
+        data = {"titles": sorted(ids), "ids": ids, "hashes": {t: h for t, h in hashes.items() if t in ids}}
+        self._write_json(self._sync_state_path(notebook_id), data, "this upload")
 
     def notebook_for(self, channel_key: str) -> str | None:
         return self._read_json(self.notebooks_path()).get(channel_key)
@@ -538,6 +557,9 @@ class AlchemyEngine:
         progress: ProgressFn | None = None,
     ) -> SyncResult:
         """Upload the books to the channel's notebook, replacing earlier copies; nothing is kept on disk.
+
+        A book whose text is the same as the copy this tool last uploaded (and which is still in the
+        notebook) is not sent again.
 
         The notebook is the one recorded for `channel_key` when it still exists (so a new AI title
         does not start a second notebook), else one titled `notebook_title`, created if needed.
@@ -573,6 +595,15 @@ class AlchemyEngine:
             if str(s["id"]) in mine_ids or normalize_title(str(s.get("title", ""))) in legacy
         ]
         book_titles = {normalize_title(b.title) for b in books}
+        present_ids = {str(s["id"]) for s in before}
+        hashes = {b.title: _content_hash(b.content) for b in books}
+        same = {
+            b.title: record["ids"][b.title]
+            for b in books
+            if record["hashes"].get(b.title) == hashes[b.title] and record["ids"].get(b.title) in present_ids
+        }
+        keep_ids = set(same.values())
+        sending = [b for b in books if b.title not in same]
         final_count = len(before) - len(ours) + len(books)
         if limit is not None and final_count > limit:
             plan = limits.plan if limits else "unknown plan"
@@ -583,12 +614,14 @@ class AlchemyEngine:
                 hint="Remove sources you no longer need from the notebook, or upload to a new notebook "
                 "with -N.",
             )
-        freed_first = limit is not None and len(before) + len(books) > limit
+        freed_first = limit is not None and len(before) + len(sending) > limit
         freed: set[str] = set()
         if freed_first:
             # Adding everything before removing the old copies would briefly exceed the limit, so
             # the copies this upload replaces go first.
             for old in ours:
+                if str(old["id"]) in keep_ids:
+                    continue
                 try:
                     self.client.delete_source(nb_id, str(old["id"]))
                     freed.add(str(old["id"]))
@@ -600,7 +633,7 @@ class AlchemyEngine:
                     ) from exc
 
         failed: list[str] = []
-        steps = _Counter(progress, "Uploading to NotebookLM", len(books) * 2)
+        steps = _Counter(progress, "Uploading to NotebookLM", len(sending) * 2)
 
         def add(book: Book) -> tuple[str, str | None, str | None]:
             try:
@@ -616,7 +649,7 @@ class AlchemyEngine:
                 steps.tick()
 
         new_ids: dict[str, str] = {}
-        for title, source_id, error in _run_pool(add, books):
+        for title, source_id, error in _run_pool(add, sending):
             if source_id:
                 new_ids[title] = source_id
             if error:
@@ -660,7 +693,7 @@ class AlchemyEngine:
         replaced = pruned = 0
         for old in ours:
             key = normalize_title(str(old.get("title", "")))
-            if str(old["id"]) in added:
+            if str(old["id"]) in added or str(old["id"]) in keep_ids:
                 continue
             if key in book_titles and key not in uploaded:
                 if str(old["id"]) not in freed:
@@ -687,11 +720,17 @@ class AlchemyEngine:
             )
         if failed:
             # The record keeps the old ids too, so the next run still knows which sources are its own.
-            self._write_record(nb_id, {**record["ids"], **new_ids})
+            new_hashes = {t: hashes[t] for t in new_ids}
+            self._write_record(nb_id, {**record["ids"], **new_ids}, {**record["hashes"], **new_hashes})
             raise SyncError(
                 f"{len(failed)} problems while uploading {len(books)} books.",
                 failed=failed,
                 hint="Fix the cause above and run the same command again; it replaces, not duplicates.",
             )
-        self._write_record(nb_id, {**kept_old, **new_ids})
-        return SyncResult(nb_id, created, len(new_ids), replaced, pruned, limit, freed_first)
+        # A kept old copy keeps its old hash (its text is not this build's), so the next run sends it.
+        self._write_record(
+            nb_id,
+            {**kept_old, **same, **new_ids},
+            {**record["hashes"], **{t: hashes[t] for t in [*same, *new_ids]}},
+        )
+        return SyncResult(nb_id, created, len(new_ids), replaced, pruned, limit, freed_first, len(same))

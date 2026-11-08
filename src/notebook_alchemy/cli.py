@@ -520,11 +520,15 @@ def _show_build(report: BuildReport, engine: AlchemyEngine) -> None:
 
 
 def _show_sync_result(name: str, synced) -> None:
-    ui.success(f"{'Created' if synced.created else 'Updated'} notebook {ui.name(name)}.")
+    if not (synced.created or synced.uploaded or synced.pruned):
+        ui.success(f"Notebook {ui.name(name)} is already up to date.")
+    else:
+        ui.success(f"{'Created' if synced.created else 'Updated'} notebook {ui.name(name)}.")
     ui.detail(
         f"  Uploaded {_plural(synced.uploaded, 'book')}"
         + (f", replaced {synced.replaced} earlier copies" if synced.replaced else "")
         + (f", removed {synced.pruned} sources from an earlier run" if synced.pruned else "")
+        + (f", {synced.unchanged} unchanged" if synced.unchanged else "")
         + "."
     )
     if synced.freed_first:

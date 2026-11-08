@@ -13,6 +13,7 @@ from notebook_alchemy.client import NotebookLMClient, PlanLimits
 from notebook_alchemy.config import AlchemyConfig
 from notebook_alchemy.engine import AlchemyEngine
 from notebook_alchemy.errors import SessionError, SyncError
+from notebook_alchemy.library import RequestCache
 from notebook_alchemy.writer import Book
 
 from .conftest import FakeNotebookLM, FakeProcess
@@ -397,6 +398,8 @@ def test_a_channel_becomes_topic_books_and_a_rerun_asks_gemini_nothing(
     asked = len(engine.gemini.prompts)
     engine.build("@chan")
     assert len(engine.gemini.prompts) == asked  # labels, topics, placement and sections all cached
+    stored = RequestCache(engine.library_cache_path("Chan")).get("parts")
+    assert stored and all(part == 1 for sections in stored.values() for part in sections.values())
 
 
 def test_a_rerun_updates_the_same_notebook_even_when_the_title_changes(tmp_path: Path) -> None:
@@ -473,11 +476,44 @@ def test_a_book_that_fails_to_upload_keeps_its_old_copy(tmp_path: Path) -> None:
     broken.notebooks, broken.sources = fake.notebooks, fake.sources
     engine.client = NotebookLMClient(engine.config, runner=broken)
     with pytest.raises(SyncError):
-        engine.publish("Chan", _books())
+        engine.publish("Chan", _edited(_books()))
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]  # Beta's old copy is still there
     engine.client = NotebookLMClient(engine.config, runner=fake)
-    engine.publish("Chan", _books())
+    result = engine.publish("Chan", _edited(_books()))
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]  # and the next run replaces it once
+    assert (result.uploaded, result.unchanged) == (1, 1)  # Beta was still the old text; Alpha was in
+
+
+def _edited(books: list[Book]) -> list[Book]:
+    return [Book(b.title, b.content + " and more") for b in books]
+
+
+def test_only_books_whose_text_changed_are_sent_again(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    engine.publish("Chan", _books())
+    ids = {s["title"]: s["id"] for s in fake.sources[fake.notebook_id("Chan")]}
+    again = engine.publish("Chan", _books())
+    assert (again.uploaded, again.replaced, again.unchanged) == (0, 0, 2)
+    assert {s["title"]: s["id"] for s in fake.sources[fake.notebook_id("Chan")]} == ids
+    alpha, beta = _books()
+    one = engine.publish("Chan", [alpha, *_edited([beta])])
+    assert (one.uploaded, one.replaced, one.unchanged) == (1, 1, 1)
+    now = {s["title"]: s["id"] for s in fake.sources[fake.notebook_id("Chan")]}
+    assert now["Alpha Topics"] == ids["Alpha Topics"] and now["Beta Topics"] != ids["Beta Topics"]
+
+
+def test_an_unchanged_book_removed_in_notebooklm_is_sent_again(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    engine.publish("Chan", _books())
+    nb = fake.notebook_id("Chan")
+    fake.sources[nb] = [s for s in fake.sources[nb] if s["title"] != "Alpha Topics"]
+    result = engine.publish("Chan", _books())
+    assert (result.uploaded, result.unchanged) == (1, 1) and fake.titles("Chan") == [
+        "Alpha Topics",
+        "Beta Topics",
+    ]
 
 
 def test_the_working_notebook_only_ever_loses_videos_and_titles_must_be_unique(tmp_path: Path) -> None:
