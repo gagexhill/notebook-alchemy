@@ -1,7 +1,7 @@
 """Render the repository's social preview image (1280x640 PNG) with Playwright.
 
 Playwright comes with the `notebooklm-py[browser]` dependency. GitHub has no API for the social
-preview, so the upload is a manual step in the repository settings (see OPERATIONS.md).
+preview, so the upload is a manual step in the repository settings (Settings, General, Social preview).
 
 Usage: python scripts/social_preview.py [--videos 52 --domains 6 --sources 8 --example @Hyperplexed]
 """

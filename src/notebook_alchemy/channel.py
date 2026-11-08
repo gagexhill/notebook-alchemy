@@ -7,27 +7,17 @@ import html
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-import yt_dlp
-from youtube_transcript_api import (
-    IpBlocked,
-    NoTranscriptFound,
-    RequestBlocked,
-    TranscriptsDisabled,
-    VideoUnavailable,
-    YouTubeTranscriptApi,
-)
-
 from .errors import ChannelScanError
-from .mock_data import MOCK_NOTEBOOK_TITLE, SAMPLE_VIDEOS
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +25,16 @@ YOUTUBE_HOSTS = frozenset({"youtube.com", "www.youtube.com", "m.youtube.com", "m
 _HANDLE_RE = re.compile(r"^@[\w.\-]+$")
 _CHANNEL_ROOT_RE = re.compile(r"^/(?:@[^/]+|channel/[^/]+|c/[^/]+|user/[^/]+)/?$")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# Caption languages to try first, in order; ALCHEMY_CAPTION_LANGUAGES overrides them. When none
+# exists, a caption track the uploader wrote is preferred over an automatic one in any language.
 PREFERRED_LANGUAGES = ("en", "en-US", "en-GB")
 NEGATIVE_CACHE_DAYS = 7
+# Channel tabs a scan can read. Videos and live streams have captions worth reading; Shorts are
+# usually under a minute, so they are left out unless asked for.
+CHANNEL_TABS = ("videos", "streams", "shorts")
+DEFAULT_TABS = ("videos", "streams")
+PO_TOKEN_STOP_AFTER = 2  # proof-of-origin demands before the run stops asking YouTube for captions
+_YOUTUBE_ID_RE = re.compile(r"^[\w-]{11}$")
 
 
 @dataclass
@@ -47,9 +45,6 @@ class ChannelVideo:
     title: str
     url: str
     duration_seconds: int = 0
-    upload_date: str = ""
-    view_count: int = 0
-    topic: str = "General"
 
 
 @dataclass
@@ -57,10 +52,7 @@ class ChannelScanResult:
     """Result of scanning a YouTube channel, playlist or video."""
 
     channel_name: str
-    channel_url: str
-    total_videos: int
     videos: list[ChannelVideo] = field(default_factory=list)
-    is_live: bool = True
 
 
 class _YdlLogger:
@@ -116,6 +108,17 @@ class ChannelScanner:
             return f"https://www.youtube.com{parts.path.rstrip('/')}/videos"
         return url
 
+    def channel_root(self, raw_url: str) -> str | None:
+        """`https://www.youtube.com/@handle` (or /channel/..., /c/..., /user/...) for a channel URL."""
+        url = self.normalize_url(raw_url)
+        parts = urlsplit(url)
+        if (parts.hostname or "").lower() not in YOUTUBE_HOSTS:
+            return None
+        path = parts.path.rstrip("/")
+        if path.endswith("/videos") and _CHANNEL_ROOT_RE.match(path[: -len("/videos")]):
+            return f"https://www.youtube.com{path[: -len('/videos')]}"
+        return None
+
     def is_youtube_url(self, text: str) -> bool:
         """True for YouTube URLs and bare @handles; false for free text that mentions YouTube."""
         value = text.strip()
@@ -132,17 +135,57 @@ class ChannelScanner:
         url: str,
         limit: int | None = None,
         *,
-        use_mock: bool = False,
-        _depth: int = 0,
+        tabs: tuple[str, ...] = DEFAULT_TABS,
     ) -> ChannelScanResult:
-        """Return video metadata, or raise ChannelScanError. Never substitutes sample data."""
+        """Return video metadata, or raise ChannelScanError. Never substitutes sample data.
+
+        A channel URL is read tab by tab (`tabs`, in order, a tab the channel does not have is
+        skipped); a playlist or video URL is read as it is.
+        """
         if limit is not None and limit < 1:
             raise ChannelScanError(
                 f"--limit must be 1 or more, got {limit}.", hint="Omit --limit to scan everything."
             )
+        unknown = [t for t in tabs if t not in CHANNEL_TABS]
+        if unknown or not tabs:
+            raise ChannelScanError(
+                f"Unknown channel tab: {', '.join(unknown) or '(none)'}.",
+                hint=f"Use one or more of: {', '.join(CHANNEL_TABS)}.",
+            )
+        root = self.channel_root(url)
+        if root is None:
+            return self._scan_one(url, limit)
+
+        name = ""
+        videos: list[ChannelVideo] = []
+        seen: set[str] = set()
+        for index, tab in enumerate(dict.fromkeys(tabs)):  # each tab once, in the order given
+            try:
+                result = self._scan_one(f"{root}/{tab}", limit)
+            except ChannelScanError as exc:
+                missing = f"does not have a {tab} tab" in exc.message or "No videos found" in exc.message
+                if missing or index > 0:
+                    # A tab the channel lacks is normal. A later tab failing after the first one
+                    # worked is not worth losing the scan over, so it is skipped and logged.
+                    logger.info("Skipped the %s tab of %s: %s", tab, root, exc.message)
+                    continue
+                raise
+            name = name or result.channel_name
+            for video in result.videos:
+                if video.id not in seen:
+                    seen.add(video.id)
+                    videos.append(video)
+        if not videos:
+            raise ChannelScanError(
+                f"No videos found at '{url}' (tabs: {', '.join(tabs)}).",
+                hint="Use a channel (@handle), a playlist, or a video URL that has public videos.",
+            )
+        return ChannelScanResult(channel_name=name, videos=videos[:limit] if limit else videos)
+
+    def _scan_one(self, url: str, limit: int | None, _depth: int = 0) -> ChannelScanResult:
+        """Read one channel tab, playlist or video."""
         norm_url = self.normalize_url(url)
-        if use_mock:
-            return self._mock_result(norm_url, limit)
+        import yt_dlp  # imported on use: it is slow to import and most commands never scan
 
         logger_sink = _YdlLogger()
         ydl_opts: dict[str, Any] = {
@@ -182,7 +225,7 @@ class ChannelScanner:
         if not videos and tab_urls and _depth == 0:
             videos_tab = next((u for u in tab_urls if u.rstrip("/").endswith("/videos")), None)
             if videos_tab:
-                return self.scan(videos_tab, limit, _depth=1)
+                return self._scan_one(videos_tab, limit, _depth=1)
 
         if not videos:
             raise ChannelScanError(
@@ -191,13 +234,10 @@ class ChannelScanner:
             )
 
         raw_title = info.get("title") or info.get("channel") or info.get("uploader") or "YouTube"
-        channel_name = str(raw_title).replace(" - Videos", "").strip() or "YouTube"
+        channel_name = re.sub(r" - (Videos|Live|Shorts)$", "", str(raw_title)).strip() or "YouTube"
         return ChannelScanResult(
             channel_name=channel_name,
-            channel_url=norm_url,
-            total_videos=len(videos),
             videos=videos,
-            is_live=True,
         )
 
     @staticmethod
@@ -226,26 +266,9 @@ class ChannelScanner:
                     title=str(e.get("title") or "Untitled Video"),
                     url=v_url,
                     duration_seconds=int(e.get("duration") or 0),
-                    upload_date=str(e.get("upload_date") or ""),
-                    view_count=int(e.get("view_count") or 0),
                 )
             )
         return videos, tab_urls
-
-    @staticmethod
-    def _mock_result(url: str, limit: int | None) -> ChannelScanResult:
-        entries = SAMPLE_VIDEOS[:limit] if limit else SAMPLE_VIDEOS
-        videos = [
-            ChannelVideo(id=v["id"], title=v["title"], url=v["url"], topic=v.get("topic", "General"))
-            for v in entries
-        ]
-        return ChannelScanResult(
-            channel_name=MOCK_NOTEBOOK_TITLE,
-            channel_url=url,
-            total_videos=len(videos),
-            videos=videos,
-            is_live=False,
-        )
 
 
 # --- Transcripts -----------------------------------------------------------------------------
@@ -302,12 +325,20 @@ class TranscriptManager:
         max_workers: int = 4,
         api_factory: Callable[[], Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        languages: tuple[str, ...] = PREFERRED_LANGUAGES,
     ) -> None:
         self.cache_dir = cache_dir or (Path.home() / ".notebook-alchemy" / "cache")
         self.transcripts_dir = transcripts_dir
         self.max_workers = max(1, max_workers)
-        self._api_factory = api_factory or YouTubeTranscriptApi
+        self._api_factory = api_factory
         self._sleep = sleep
+        self.languages = tuple(languages) or PREFERRED_LANGUAGES
+        # Set once YouTube blocks a request: the rest of the run would be blocked too, so later
+        # videos skip the network instead of each waiting for the same answer.
+        self._blocked = threading.Event()
+        self._po_token_demands = 0
+        self._po_lock = threading.Lock()
+        self.blocked_total = 0  # videos this run could not get captions for because YouTube blocked it
 
     # -- helpers --
 
@@ -368,7 +399,7 @@ class TranscriptManager:
                 checked = datetime.fromisoformat(str(data.get("checked_at", "")))
             except ValueError:
                 return None
-            if datetime.now(timezone.utc) - checked < timedelta(days=NEGATIVE_CACHE_DAYS):
+            if datetime.now(UTC) - checked < timedelta(days=NEGATIVE_CACHE_DAYS):
                 return TranscriptResult(video_id, "", "unavailable", str(data.get("reason", "no captions")))
         return None
 
@@ -381,7 +412,7 @@ class TranscriptManager:
             record.update(
                 unavailable=True,
                 reason=reason,
-                checked_at=datetime.now(timezone.utc).isoformat(),
+                checked_at=datetime.now(UTC).isoformat(),
             )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -396,49 +427,75 @@ class TranscriptManager:
         local = self._check_local_text_files(video_id, title)
         if local:
             return TranscriptResult(video_id, local, "local")
-        if not video_id.strip() or video_id.startswith("mock_"):
-            return TranscriptResult(video_id, "", "skipped", "no real video id")
+        if not _YOUTUBE_ID_RE.fullmatch(video_id.strip()):
+            return TranscriptResult(video_id, "", "skipped", "no YouTube video id")
         cached = self._read_cache(video_id)
         if cached:
             return cached
+        if self._blocked.is_set():
+            return TranscriptResult(video_id, "", "blocked", "YouTube blocked an earlier request in this run")
         return self._fetch_remote(video_id, title)
 
     def _fetch_remote(self, video_id: str, title: str) -> TranscriptResult:
-        api = self._api_factory()
-        permanent = (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable)
+        import youtube_transcript_api as yta  # imported on use, like yt-dlp
+
+        api = (self._api_factory or yta.YouTubeTranscriptApi)()
+        # Blocked: this network is refused (an IP block, or a consent page that cannot be passed
+        # from here); every retry and every later video gets the same answer, so stop the run's
+        # caption requests and cache nothing about the video.
+        blocked = (yta.RequestBlocked, yta.FailedToCreateConsentCookie)
+        # Retried: the request or the page YouTube sent back failed.
+        transient = (yta.YouTubeRequestFailed, yta.YouTubeDataUnparsable)
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
-                try:
-                    fetched = api.fetch(video_id, languages=list(PREFERRED_LANGUAGES))
-                except NoTranscriptFound:
-                    fetched = next(iter(api.list(video_id))).fetch()
-                text = " ".join(" ".join(s.text for s in fetched).split())
+                text = self._caption_text(api, video_id, yta.NoTranscriptFound)
                 if not text:
-                    raise NoTranscriptFound(video_id, PREFERRED_LANGUAGES, None)
+                    self._write_cache(video_id, title, "", reason="EmptyTranscript")
+                    return TranscriptResult(video_id, "", "unavailable", "EmptyTranscript")
                 self._write_cache(video_id, title, text)
                 return TranscriptResult(video_id, text, "youtube")
-            except (RequestBlocked, IpBlocked) as exc:
+            except blocked as exc:
+                self._blocked.set()
                 return TranscriptResult(
                     video_id, "", "blocked", f"YouTube blocked the request ({type(exc).__name__})"
                 )
-            except permanent as exc:
+            except yta.PoTokenRequired as exc:
+                # YouTube can demand a proof-of-origin token for some videos only, so one demand
+                # is not cached; the run stops asking after a second.
+                with self._po_lock:
+                    self._po_token_demands += 1
+                    if self._po_token_demands >= PO_TOKEN_STOP_AFTER:
+                        self._blocked.set()
+                return TranscriptResult(
+                    video_id, "", "blocked", f"YouTube blocked the request ({type(exc).__name__})"
+                )
+            except transient as exc:
+                last_exc = exc
+            except yta.CouldNotRetrieveTranscript as exc:
+                # No captions, disabled, private, age-restricted, removed, invalid id, and any
+                # reason a later library version adds: this video has no transcript to fetch.
                 reason = type(exc).__name__
                 self._write_cache(video_id, title, "", reason=reason)
                 return TranscriptResult(video_id, "", "unavailable", reason)
-            except StopIteration:
-                self._write_cache(video_id, title, "", reason="NoTranscriptFound")
-                return TranscriptResult(video_id, "", "unavailable", "NoTranscriptFound")
-            except Exception as exc:  # noqa: BLE001 - library raises varied transient errors
+            except Exception as exc:  # noqa: BLE001 - network errors from the HTTP stack vary
                 last_exc = exc
-                logger.debug("Transcript fetch for %s failed (attempt %d): %s", video_id, attempt + 1, exc)
-                if attempt < 2:
-                    self._sleep(2**attempt)
+            logger.debug("Transcript fetch for %s failed (attempt %d): %s", video_id, attempt + 1, last_exc)
+            if attempt < 2:
+                self._sleep(2**attempt)
         return TranscriptResult(video_id, "", "unavailable", f"fetch failed: {type(last_exc).__name__}")
 
-    def fetch_transcript_text(self, video_id: str, title: str = "") -> str:
-        """Return transcript text, or an empty string when none is available."""
-        return self.resolve(video_id, title).text
+    def _caption_text(self, api: Any, video_id: str, not_found: type[Exception]) -> str:
+        """Captions in a preferred language, else the uploader's own track, else an automatic one."""
+        try:
+            fetched = api.fetch(video_id, languages=list(self.languages))
+        except not_found:
+            tracks = list(api.list(video_id))
+            if not tracks:
+                raise
+            tracks.sort(key=lambda tr: bool(getattr(tr, "is_generated", False)))  # written first
+            fetched = tracks[0].fetch()
+        return " ".join(" ".join(s.text for s in fetched).split())
 
     def fetch_many(
         self,
@@ -454,6 +511,8 @@ class TranscriptManager:
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             for result in pool.map(lambda pair: self.resolve(pair[0], pair[1]), items):
                 results[result.video_id] = result
+                if result.source == "blocked":
+                    self.blocked_total += 1  # counted here, on the caller's thread
                 done += 1
                 if progress:
                     progress(done, total)

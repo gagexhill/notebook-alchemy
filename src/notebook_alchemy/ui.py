@@ -99,7 +99,10 @@ def handle_errors(func: F) -> F:
                 err_console.print(esc(traceback.format_exc()))
             sys.exit(exc.exit_code)
         except KeyboardInterrupt:
-            err_console.print("\n[yellow]Interrupted. Nothing was left half-written.[/yellow]")
+            err_console.print(
+                "\n[yellow]Interrupted. Local files were not left half-written; an upload may have "
+                "added some sources, and the next sync replaces them.[/yellow]"
+            )
             sys.exit(EXIT_INTERRUPTED)
         except (
             SystemExit,

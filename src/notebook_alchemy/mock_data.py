@@ -15,73 +15,61 @@ SAMPLE_VIDEOS: list[dict[str, str]] = [
         "id": "mock_001",
         "title": "💻📕✈️ How I Have Time to Run a Business, Homeschool My Kids & Travel Regularly",
         "url": "https://www.youtube.com/watch?v=mock_001",
-        "topic": "Solo Operator Systems & Productivity",
     },
     {
         "id": "mock_002",
         "title": "🤔 How You're Building Websites Could Be Completely Wrong",
         "url": "https://www.youtube.com/watch?v=mock_002",
-        "topic": "Web Design & Agency Operations",
     },
     {
         "id": "mock_003",
         "title": "😲 Quarterly Business Reviews: Get MORE Work From PAST & CURRENT Clients",
         "url": "https://www.youtube.com/watch?v=mock_003",
-        "topic": "Client Retention, Onboarding & QBRs",
     },
     {
         "id": "mock_004",
         "title": "😲 This SEO tool has a CRM, Task Manager, Marketing Calendar, Client Portal & More",
         "url": "https://www.youtube.com/watch?v=mock_004",
-        "topic": "Solo Operator Systems & Productivity",
     },
     {
         "id": "mock_005",
         "title": "🚀 The 1 Lead Generation Strategy That Helped My Business Takeoff",
         "url": "https://www.youtube.com/watch?v=mock_005",
-        "topic": "Lead Generation & Client Acquisition",
     },
     {
         "id": "mock_006",
         "title": "🚨 Beware of This GBP Scam (Don’t Let Your Clients Fall for It)",
         "url": "https://www.youtube.com/watch?v=mock_006",
-        "topic": "SEO & Local Search",
     },
     {
         "id": "mock_007",
         "title": "How to Price Website Projects ($3k to $10k Website Pricing Guide)",
         "url": "https://www.youtube.com/watch?v=mock_007",
-        "topic": "Pricing & Proposal Strategy",
     },
     {
         "id": "mock_008",
         "title": "Cold Email Outreach Scripts That Actually Book High-Ticket Web Design Clients",
         "url": "https://www.youtube.com/watch?v=mock_008",
-        "topic": "Lead Generation & Client Acquisition",
     },
     {
         "id": "mock_009",
         "title": "Google Business Profile Optimization Blueprint: Rank #1 in Local 3-Pack",
         "url": "https://www.youtube.com/watch?v=mock_009",
-        "topic": "SEO & Local Search",
     },
     {
         "id": "mock_010",
         "title": "Monthly SEO Retainers: How to Sell $1,500/mo Maintenance Packages",
         "url": "https://www.youtube.com/watch?v=mock_010",
-        "topic": "Pricing & Proposal Strategy",
     },
     {
         "id": "mock_011",
         "title": "Agency Client Onboarding Workflow: The Exact Process From Contract to Kickoff",
         "url": "https://www.youtube.com/watch?v=mock_011",
-        "topic": "Client Retention, Onboarding & QBRs",
     },
     {
         "id": "mock_012",
         "title": "Local Service Ads (LSA) vs Google Ads: Which Delivers Better ROI for Local Businesses",
         "url": "https://www.youtube.com/watch?v=mock_012",
-        "topic": "SEO & Local Search",
     },
 ]
 
@@ -151,23 +139,29 @@ _THEME_TEMPLATES = [
     ),
 ]
 
-_idx = len(SAMPLE_VIDEOS) + 1
-while len(SAMPLE_VIDEOS) < 288:
-    for theme, templates in _THEME_TEMPLATES:
-        if len(SAMPLE_VIDEOS) >= 288:
-            break
-        tmpl = templates[len(SAMPLE_VIDEOS) % len(templates)]
-        variant = len(SAMPLE_VIDEOS) // len(templates) + 1
-        title = f"{tmpl} (Vol. {variant})"
-        SAMPLE_VIDEOS.append(
-            {
-                "id": f"mock_{_idx:03d}",
-                "title": title,
-                "url": f"https://www.youtube.com/watch?v=mock_{_idx:03d}",
-                "topic": theme,
-            }
-        )
-        _idx += 1
+SAMPLE_SIZE = 288
+
+
+def _fill_sample(videos: list[dict[str, str]]) -> None:
+    """Extend the hand-written entries to SAMPLE_SIZE with titles cycled through the themes."""
+    idx = len(videos) + 1
+    while len(videos) < SAMPLE_SIZE:
+        for _theme, templates in _THEME_TEMPLATES:
+            if len(videos) >= SAMPLE_SIZE:
+                break
+            template = templates[len(videos) % len(templates)]
+            variant = len(videos) // len(templates) + 1
+            videos.append(
+                {
+                    "id": f"mock_{idx:03d}",
+                    "title": f"{template} (Vol. {variant})",
+                    "url": f"https://www.youtube.com/watch?v=mock_{idx:03d}",
+                }
+            )
+            idx += 1
+
+
+_fill_sample(SAMPLE_VIDEOS)
 
 
 def get_mock_sources() -> list[dict[str, str]]:

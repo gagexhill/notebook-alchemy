@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -12,7 +14,7 @@ from notebook_alchemy.client import NotebookLMClient
 from notebook_alchemy.config import AlchemyConfig
 from notebook_alchemy.engine import AlchemyEngine
 from notebook_alchemy.errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
-from notebook_alchemy.synthesizer import Synthesizer
+from notebook_alchemy.synthesizer import DomainCompendium, Synthesizer
 
 from .conftest import FakeNotebookLM, FakeProcess
 
@@ -22,7 +24,6 @@ MOCK_DIR = "sample_catalog_mock_data"
 def _config(tmp_path: Path) -> AlchemyConfig:
     return AlchemyConfig(
         vault_path=tmp_path / "vault",
-        state_dir=tmp_path / "state",
         cache_dir=tmp_path / "cache",
         gemini_api_key="",
     )
@@ -114,7 +115,7 @@ def test_max_per_vol_is_validated(engine: AlchemyEngine) -> None:
 
 
 def test_duplicate_titles_keep_distinct_ids(engine: AlchemyEngine) -> None:
-    videos = [VideoSourceSummary(f"id{i}", "Same Title", f"https://u/{i}", "yt", "ready") for i in range(4)]
+    videos = [VideoSourceSummary(f"id{i}", "Same Title", f"https://u/{i}", "ready") for i in range(4)]
     report = engine.analyzer._build_report(
         nb_id="nb_dup",
         nb_title="Dup",
@@ -135,7 +136,7 @@ def test_duplicate_titles_keep_distinct_ids(engine: AlchemyEngine) -> None:
 
 def _report_with_domains(engine: AlchemyEngine, domains: dict[str, int]):  # type: ignore[no-untyped-def]
     videos = [
-        VideoSourceSummary(f"{d[:3]}{i}", f"{d} talk {i}", f"https://u/{d}/{i}", "yt", "ready")
+        VideoSourceSummary(f"{d[:3]}{i}", f"{d} talk {i}", f"https://u/{d}/{i}", "ready")
         for d, n in domains.items()
         for i in range(n)
     ]
@@ -224,6 +225,45 @@ def test_sync_creates_the_notebook_and_uploads_every_file(tmp_path: Path) -> Non
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]
 
 
+def test_uploads_and_waits_overlap_but_titles_are_fixed_only_after_all_waits(tmp_path: Path) -> None:
+    fake = FakeNotebookLM(reset_titles=True)
+    active, peak, order = [0], [0], []
+    lock = threading.Lock()
+
+    def slow(cmd: list[str], **kw: object):
+        verb = cmd[cmd.index("source") + 1] if "source" in cmd else cmd[3]
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+            order.append(verb)
+        time.sleep(0.05 if verb in ("add", "wait") else 0)
+        with lock:
+            active[0] -= 1
+        return fake(cmd, **kw)
+
+    names = tuple(f"Topic_{i}" for i in range(6))
+    result = _fake_engine(tmp_path, slow).sync_to_notebooklm("Chan", _real_dir(tmp_path, names))  # type: ignore[arg-type]
+    assert result.uploaded == 6 and fake.titles("Chan") == sorted(n.replace("_", " ") for n in names)
+    assert peak[0] > 1  # several notebooklm processes ran at once
+    assert max(i for i, v in enumerate(order) if v == "wait") < min(
+        i for i, v in enumerate(order) if v == "rename"
+    )
+
+
+def test_an_unexpected_error_in_one_upload_is_reported_and_the_rest_reconcile(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+
+    def flaky(cmd: list[str], **kw: object):
+        if "add" in cmd and any("Beta" in part for part in cmd):
+            raise RuntimeError("something nobody expected")
+        return fake(cmd, **kw)
+
+    with pytest.raises(SyncError) as err:
+        _fake_engine(tmp_path, flaky).sync_to_notebooklm("Chan", _real_dir(tmp_path))  # type: ignore[arg-type]
+    assert any("Beta_Topics.md" in f and "RuntimeError" in f for f in err.value.failed)
+    assert fake.titles("Chan") == ["Alpha Topics"]  # the other upload was waited on and kept
+
+
 def test_resync_replaces_old_copies_including_filename_titled_ones(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     fake.seed("Chan", ["Alpha Topics", "Alpha Topics", "Beta_Topics.md", "My own notes"])
@@ -307,7 +347,7 @@ def _built(engine: AlchemyEngine, tmp_path: Path) -> Path:
     report = engine.analyzer._build_report(
         nb_id="nb",
         nb_title="Chan",
-        videos=[VideoSourceSummary("a1", "Build a React app", "https://youtu.be/a1", "yt", "ready")],
+        videos=[VideoSourceSummary("a1", "Build a React app", "https://youtu.be/a1", "ready")],
         others=[],
         total_sources=1,
         origin="youtube",
@@ -330,17 +370,6 @@ def test_append_adds_once_and_skips_duplicates(engine: AlchemyEngine, tmp_path: 
     assert catalog.count("`n1`") == 1 and "total_sources: 2" in catalog
     body = (directory / first.updated_files[0]).read_text(encoding="utf-8")
     assert "source_count: 2" in body and "[Added] [New video]" in body
-
-
-def test_append_moves_an_older_catalog_to_the_new_name(engine: AlchemyEngine, tmp_path: Path) -> None:
-    directory = _built(engine, tmp_path)
-    (directory / "_MASTER_SOURCES_CATALOG.md").rename(directory / "MASTER_SOURCES_CATALOG.md")
-    video = {"id": "n2", "title": "Another video", "url": "https://youtu.be/n2"}
-    result = engine.append_incremental_sources([video], directory)
-    assert result.added == 1
-    assert not (directory / "MASTER_SOURCES_CATALOG.md").exists()
-    catalog = (directory / "_MASTER_SOURCES_CATALOG.md").read_text(encoding="utf-8")
-    assert "`n2`" in catalog and "total_sources: 2" in catalog
 
 
 def test_append_creates_a_new_domain_file(engine: AlchemyEngine, tmp_path: Path) -> None:
@@ -409,3 +438,25 @@ def test_a_failed_sync_does_not_overwrite_the_record(tmp_path: Path) -> None:
     engine.client = NotebookLMClient(engine.config, runner=fake)
     engine.sync_to_notebooklm("Chan", _write_set(tmp_path, ("Gamma_Topics",)))
     assert fake.titles("Chan") == ["Gamma Topics"]  # Alpha was still recorded, so it is pruned now
+
+
+def test_status_shows_home_paths_as_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(NotebookLMClient, "cli_version", lambda self: None)
+    config = AlchemyConfig(vault_path=Path.home() / "my-vault", cache_dir=Path.home() / "c")
+    facts = AlchemyEngine(config).status()
+    assert facts["vault_path"] == str(Path("~") / "my-vault")
+    assert str(Path.home()) not in json.dumps(facts)
+
+
+def test_missing_transcripts_are_summarised_once_for_the_whole_run(engine: AlchemyEngine) -> None:
+    engine.transcripts.blocked_total = 40
+    comps = [
+        DomainCompendium("A", 1, [], [], "a.md", "", 1, title_only=True),
+        DomainCompendium("A", 2, [], [], "a2.md", "", 1, title_only=True),
+        DomainCompendium("B", 1, [], [], "b.md", "", 1, is_live_synthesized=True),
+    ]
+    lines = engine._transcript_summary(comps)
+    assert len(lines) == 2
+    assert "40 videos" in lines[0] and "2 of 3 volumes" in lines[1]
+    engine.transcripts.blocked_total = 0
+    assert engine._transcript_summary(comps[2:]) == []

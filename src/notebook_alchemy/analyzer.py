@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .channel import ChannelScanner
+from .channel import DEFAULT_TABS, ChannelScanner, video_id_from_url
 from .client import NotebookLMClient
 from .config import DEFAULT_MAX_PER_VOLUME, AlchemyConfig, is_usable_api_key
 from .errors import GeminiError, NotebookLMError, SessionError
@@ -46,7 +46,6 @@ class VideoSourceSummary:
     source_id: str
     title: str
     url: str
-    source_type: str
     status: str
     duration_seconds: int = 0
 
@@ -67,7 +66,6 @@ class DryRunReport:
     total_estimated_tokens: int
     estimated_input_cost_usd: float
     estimated_synthesis_output_cost_usd: float
-    domain_topic_clusters: dict[str, list[str]] = field(default_factory=dict)
     domain_videos: dict[str, list[VideoSourceSummary]] = field(default_factory=dict)
     is_mock: bool = False
     origin: str = "youtube"  # youtube | notebooklm | mock
@@ -221,12 +219,13 @@ class NotebookAnalyzer:
         *,
         use_mock: bool = False,
         limit: int | None = None,
+        tabs: tuple[str, ...] = DEFAULT_TABS,
         progress: ProgressFn | None = None,
     ) -> DryRunReport:
         """Analyse a YouTube URL, an existing notebook, or (only with use_mock) the sample catalog."""
         scanner = ChannelScanner()
         if not use_mock and scanner.is_youtube_url(notebook_query):
-            return self.scan_channel(notebook_query, limit=limit, progress=progress)
+            return self.scan_channel(notebook_query, limit=limit, tabs=tabs, progress=progress)
 
         if use_mock:
             sources = get_mock_sources()[:limit] if limit else get_mock_sources()
@@ -271,17 +270,16 @@ class NotebookAnalyzer:
         url: str,
         limit: int | None = None,
         *,
-        use_mock: bool = False,
+        tabs: tuple[str, ...] = DEFAULT_TABS,
         progress: ProgressFn | None = None,
     ) -> DryRunReport:
         """Scan a YouTube channel, playlist or video. Raises ChannelScanError on failure."""
-        scan = ChannelScanner().scan(url, limit=limit, use_mock=use_mock)
+        scan = ChannelScanner().scan(url, limit=limit, tabs=tabs)
         videos = [
             VideoSourceSummary(
                 source_id=v.id,
                 title=v.title,
                 url=v.url,
-                source_type="youtube_video",
                 status="ready",
                 duration_seconds=v.duration_seconds,
             )
@@ -294,7 +292,7 @@ class NotebookAnalyzer:
             videos=videos,
             others=[],
             total_sources=len(videos),
-            origin="mock" if not scan.is_live else "youtube",
+            origin="youtube",
             progress=progress,
         )
 
@@ -306,15 +304,21 @@ class NotebookAnalyzer:
         others: list[dict[str, Any]] = []
         for s in sources_raw:
             url = str(s.get("url") or "")
-            stype = str(s.get("type") or s.get("source_type") or "video").lower()
-            is_video = "youtube.com" in url or "youtu.be" in url or "youtube" in stype or "video" in stype
-            if is_video:
+            stype = str(s.get("type") or s.get("source_type") or "").lower()
+            # notebooklm-py reports YouTube sources as type "youtube"; other video types (a Drive
+            # video, an upload) have no captions to fetch, so only a YouTube URL counts otherwise.
+            youtube_id = video_id_from_url(url) if url else ""
+            is_youtube = stype == "youtube" or (bool(url) and not youtube_id.startswith("url_"))
+            if is_youtube:
                 videos.append(
                     VideoSourceSummary(
-                        source_id=str(s.get("id") or s.get("source_id") or ""),
+                        # The YouTube id, so transcripts can be fetched; NotebookLM's own source
+                        # id is not a video id.
+                        source_id=youtube_id
+                        if youtube_id and not youtube_id.startswith("url_")
+                        else str(s.get("id") or s.get("source_id") or ""),
                         title=str(s.get("title") or "Untitled Source"),
                         url=url,
-                        source_type=stype,
                         status=str(s.get("status") or "ready"),
                     )
                 )
@@ -352,7 +356,6 @@ class NotebookAnalyzer:
             total_estimated_tokens=total_tokens,
             estimated_input_cost_usd=round(input_cost, 4),
             estimated_synthesis_output_cost_usd=round(output_cost, 4),
-            domain_topic_clusters={d: [v.title for v in vs] for d, vs in domain_videos.items()},
             domain_videos=domain_videos,
             is_mock=origin == "mock",
             origin=origin,

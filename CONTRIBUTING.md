@@ -7,7 +7,7 @@ By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Set up
 
-Python 3.10 or newer and Git.
+Python 3.11 or newer and Git.
 
 ```bash
 git clone https://github.com/gagexhill/notebook-alchemy.git
@@ -42,5 +42,5 @@ is removed.
 4. Never commit keys, cookies, session files or `.env`.
 5. Update the README when a command or option changes.
 
-Project rules for agents and maintainers are in [AGENTS.md](AGENTS.md); the operations map is in
-[OPERATIONS.md](OPERATIONS.md).
+The rules every change must keep, for people and coding agents alike, are in [AGENTS.md](AGENTS.md);
+the maintainer runbook is [OPERATIONS.md](OPERATIONS.md).

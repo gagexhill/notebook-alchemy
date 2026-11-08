@@ -154,3 +154,8 @@ def test_a_byte_order_mark_does_not_hide_the_first_key(monkeypatch: pytest.Monke
     update_dotenv({"GEMINI_API_KEY": "new_value_123456789"}, env)
     text = env.read_text(encoding="utf-8-sig")
     assert text.count("GEMINI_API_KEY=") == 1 and "old_value" not in text and "OTHER=1" in text
+
+
+def test_caption_languages_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALCHEMY_CAPTION_LANGUAGES", " de, en ,,")
+    assert AlchemyConfig.from_env().caption_languages == ("de", "en")

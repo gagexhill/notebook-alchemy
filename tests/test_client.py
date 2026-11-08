@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import subprocess
 from pathlib import Path
@@ -26,7 +27,7 @@ NOTEBOOKS = json.dumps([{"id": "nb-1", "title": "Alpha"}, {"id": "nb-2", "title"
 
 
 def _client(tmp_path: Path, process: FakeProcess | None = None, **cfg) -> NotebookLMClient:
-    config = AlchemyConfig(vault_path=tmp_path / "v", state_dir=tmp_path / "state", **cfg)
+    config = AlchemyConfig(vault_path=tmp_path / "v", **cfg)
     return NotebookLMClient(config, runner=process)
 
 
@@ -90,6 +91,13 @@ def test_upload_sends_a_file_not_content_and_not_text_flag(tmp_path: Path) -> No
     assert "--text" not in uploaded["cmd"]
     assert big not in uploaded["cmd"]
     assert "--type file" in uploaded["cmd"] and "--title Big Doc" in uploaded["cmd"]
+    assert "--request-timeout 180" in uploaded["cmd"]  # notebooklm's own 30 s default is too short
+
+
+def test_an_upload_without_a_source_id_is_an_error(tmp_path: Path) -> None:
+    client = _client(tmp_path, FakeProcess(("source add", 0, json.dumps({"status": "ok"}), "")))
+    with pytest.raises(NotebookLMError, match="no source id"):
+        client.add_source_document("nb-1", SourceDocument("a", "Doc", "body"))
 
 
 def test_upload_failure_raises_with_cause(tmp_path: Path) -> None:
@@ -211,7 +219,7 @@ def test_profile_comes_from_config_and_an_explicit_profile_wins(tmp_path: Path) 
     process = FakeProcess(("list", 0, "[]", ""))
     _client(tmp_path, process, notebooklm_profile="work").list_notebooks()
     assert process.calls[-1][:3] == ["notebooklm", "--profile", "work"]
-    config = AlchemyConfig(state_dir=tmp_path / "s", notebooklm_profile="work")
+    config = AlchemyConfig(notebooklm_profile="work")
     NotebookLMClient(config, "other", runner=process).list_notebooks()
     assert process.calls[-1][:3] == ["notebooklm", "--profile", "other"]
 
@@ -267,6 +275,22 @@ def test_upload_consent_is_per_profile_and_per_account() -> None:
     assert not upload_confirmed(AccountIdentity("personal", "a@example.test"))
 
 
+def test_the_consent_record_never_holds_the_email() -> None:
+    record_upload_consent(AccountIdentity("work", "Private.Person@example.test"))
+    record_upload_consent(AccountIdentity("home", "other@example.test"))
+    text = consent_file().read_text(encoding="utf-8")
+    assert "example.test" not in text.lower() and "private" not in text.lower()
+    assert upload_confirmed(AccountIdentity("work", "private.person@EXAMPLE.test"))  # case-insensitive
+
+
+def test_a_plain_email_record_from_an_earlier_version_asks_again() -> None:
+    consent_file().parent.mkdir(parents=True, exist_ok=True)
+    consent_file().write_text(json.dumps({"work": {"email": "a@example.test"}}), encoding="utf-8")
+    assert not upload_confirmed(AccountIdentity("work", "a@example.test"))
+    record_upload_consent(AccountIdentity("work", "a@example.test"))  # rewrites it in the new form
+    assert "a@example.test" not in consent_file().read_text(encoding="utf-8")
+
+
 def test_unreadable_consent_record_asks_again() -> None:
     record_upload_consent(AccountIdentity("work", "a@example.test"))
     consent_file().write_text("{not json", encoding="utf-8")
@@ -313,3 +337,29 @@ def test_an_explicit_profile_with_a_session_file_is_refused(tmp_path: Path) -> N
     with pytest.raises(ConfigError, match="ALCHEMY_SESSION_FILE"):
         client.list_notebooks()
     assert process.calls == []  # refused before anything ran
+
+
+def test_cli_version_comes_from_package_metadata_without_a_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = FakeProcess()
+    client = _client(tmp_path, process)
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    assert client.cli_version() is None
+    monkeypatch.setattr("shutil.which", lambda name: "/bin/notebooklm")
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "0.8.6")
+    assert client.cli_version() == "notebooklm-py 0.8.6" and process.calls == []
+
+    def missing(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr("shutil.which", lambda name: "/home/private-person/bin/notebooklm")
+    monkeypatch.setattr("importlib.metadata.version", missing)
+    shown = client.cli_version() or ""
+    assert "not installed in this Python" in shown and "private-person" not in shown
+
+
+def test_a_hand_edited_consent_record_asks_again_instead_of_crashing() -> None:
+    consent_file().parent.mkdir(parents=True, exist_ok=True)
+    consent_file().write_text(json.dumps({"salt": "s", "profiles": {"work": "\u00e9"}}), encoding="utf-8")
+    assert not upload_confirmed(AccountIdentity("work", "a@example.test"))

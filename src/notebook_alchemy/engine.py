@@ -6,6 +6,9 @@ import json
 import logging
 import re
 import shutil
+import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,7 +22,6 @@ from .gemini import GeminiClient
 from .synthesizer import (
     CATALOG_FILENAME,
     INDEX_FILENAME,
-    LEGACY_CATALOG_FILENAME,
     DomainCompendium,
     Synthesizer,
     safe_filename,
@@ -55,10 +57,6 @@ class DistillationReport:
     def total_tokens(self) -> int:
         return sum(c.token_count for c in self.compendiums)
 
-    @property
-    def live_compendiums(self) -> int:
-        return sum(1 for c in self.compendiums if c.is_live_synthesized)
-
 
 @dataclass
 class SyncResult:
@@ -82,6 +80,52 @@ def _dir_size(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
+# `notebooklm` processes run at once during a sync. Each takes seconds to start; notebooklm's own
+# help suggests waiting on sources in parallel. Kept small to stay clear of rate limits.
+SYNC_WORKERS = 3
+
+
+def _run_pool(func: Callable[[Any], Any], items: list[Any]) -> list[Any]:
+    """Map `func` over `items` on SYNC_WORKERS threads, in order.
+
+    On Ctrl+C, calls not yet started are cancelled; the ones already running finish, because a
+    `notebooklm` process cannot be stopped half-way. The interrupt then propagates.
+    """
+    pool = ThreadPoolExecutor(max_workers=SYNC_WORKERS)
+    try:
+        return list(pool.map(func, items))
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    finally:
+        pool.shutdown(wait=True)
+
+
+class _Counter:
+    """Thread-safe progress steps for work that finishes in any order."""
+
+    def __init__(self, progress: ProgressFn | None, label: str, total: int) -> None:
+        self._progress, self._label, self._total = progress, label, total
+        self._done = 0
+        self._lock = threading.Lock()
+
+    def tick(self) -> None:
+        with self._lock:
+            self._done += 1
+            if self._progress:
+                self._progress(self._label, self._done, self._total)
+
+
+def _home_relative(path: Path) -> str:
+    """A path with the home folder shown as ~, so pasted output does not carry the user name."""
+    for home in (Path.home(), Path.home().resolve()):
+        try:
+            return str(Path("~") / path.relative_to(home))
+        except ValueError:
+            continue
+    return str(path)
+
+
 class AlchemyEngine:
     """Discovery, clustering, synthesis and vault output."""
 
@@ -101,7 +145,9 @@ class AlchemyEngine:
         )
         self.analyzer = NotebookAnalyzer(self.config, client=self.client, gemini=self.gemini)
         self.transcripts = TranscriptManager(
-            cache_dir=self.config.cache_dir, max_workers=self.config.max_concurrency
+            cache_dir=self.config.cache_dir,
+            max_workers=self.config.max_concurrency,
+            languages=self.config.caption_languages,
         )
         self.synthesizer = Synthesizer(
             api_key=self.config.gemini_api_key,
@@ -123,11 +169,12 @@ class AlchemyEngine:
             "environment": self.config.env,
             "notebooklm_cli": self.client.cli_version() or "not found (pip install notebooklm-py)",
             "notebooklm_profile": self.client.profile,
-            "session_file": str(session) if session else "none (run: notebook-alchemy login)",
+            "session_file": _home_relative(session) if session else "none (run: notebook-alchemy login)",
             "gemini_api_key": "set" if self.config.has_gemini_key else "unset",
             "gemini_model": self.config.gemini_model,
-            "vault_path": str(self.config.vault_path),
-            "cache_dir": f"{self.config.cache_dir} ({_dir_size(self.config.cache_dir) / 1024:.0f} KB)",
+            "vault_path": _home_relative(self.config.vault_path),
+            "cache_dir": f"{_home_relative(self.config.cache_dir)} "
+            f"({_dir_size(self.config.cache_dir) / 1024:.0f} KB)",
             "max_concurrency": self.config.max_concurrency,
         }
 
@@ -190,6 +237,8 @@ class AlchemyEngine:
             if progress:
                 progress("Building compendiums", done, len(volumes))
 
+        warnings.extend(self._transcript_summary(compendiums))
+
         vault_dir = self.vault.compendium_dir(report.notebook_title)
         index_file: Path | None = None
         if write_to_vault:
@@ -206,6 +255,23 @@ class AlchemyEngine:
             cluster_method=report.cluster_method,
             warnings=warnings,
         )
+
+    def _transcript_summary(self, compendiums: list[DomainCompendium]) -> list[str]:
+        """One line for the whole run, instead of one per volume, about missing transcripts."""
+        lines: list[str] = []
+        title_only = [c for c in compendiums if c.title_only]
+        blocked = self.transcripts.blocked_total
+        if blocked:
+            lines.append(
+                f"YouTube blocked caption requests for {blocked} videos in this run. Run the same command "
+                "later: captions already fetched are cached, so it continues where it stopped."
+            )
+        if title_only:
+            lines.append(
+                f"{len(title_only)} of {len(compendiums)} volumes had no transcripts, so they are offline "
+                "indexes (titles and links, no summary) and used no Gemini request."
+            )
+        return lines
 
     @staticmethod
     def _chunks(items: list[Any], size: int) -> list[list[Any]]:
@@ -264,9 +330,13 @@ class AlchemyEngine:
 
     # -- NotebookLM sync --
 
+    def sync_records_dir(self) -> Path:
+        """Where the per-notebook records of past uploads live (`clean --records` empties it)."""
+        return self.config.cache_dir.parent / "sync"
+
     def _sync_state_path(self, notebook_id: str) -> Path:
         """Per-user record of what the last successful sync uploaded to this notebook."""
-        return self.config.cache_dir.parent / "sync" / f"{safe_filename(notebook_id)}.json"
+        return self.sync_records_dir() / f"{safe_filename(notebook_id)}.json"
 
     def _read_synced_titles(self, notebook_id: str) -> list[str]:
         path = self._sync_state_path(notebook_id)
@@ -283,9 +353,7 @@ class AlchemyEngine:
         path = self._sync_state_path(notebook_id)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps({"notebook_id": notebook_id, "titles": sorted(titles)}), encoding="utf-8"
-            )
+            path.write_text(json.dumps({"titles": sorted(titles)}), encoding="utf-8")
         except OSError as exc:
             logger.warning(
                 "Could not record this sync (%s); stale sources will not be pruned next time.", exc
@@ -319,34 +387,55 @@ class AlchemyEngine:
         before = [] if created else [s for s in self.client.list_sources(nb_id) if s.get("id")]
 
         failed: list[str] = []
-        new_ids: dict[str, str] = {}  # wanted title -> id of the source we just added
-        total_steps = len(files) * 2
-        for done, md_file in enumerate(files, 1):
+        steps = _Counter(progress, "Uploading to NotebookLM", len(files) * 2)
+
+        # Each `notebooklm` call is its own process and takes seconds, so uploads and waits run a
+        # few at a time. Results are gathered in file order, so the outcome does not depend on
+        # which call finishes first; titles are corrected only after every wait has finished.
+        def add(md_file: Path) -> tuple[str, str | None, str | None]:
             title = source_title(md_file.stem)
-            doc = SourceDocument(
-                source_id=md_file.stem,
-                title=title,
-                content=md_file.read_text(encoding="utf-8"),
-                source_type="compendium",
-            )
+            content = md_file.read_text(encoding="utf-8")
             try:
-                new_ids[title] = self.client.add_source_document(nb_id, doc)
+                source_id = self.client.add_source_document(
+                    nb_id, SourceDocument(md_file.stem, title, content)
+                )
+                return title, source_id, None
             except AlchemyError as exc:
-                failed.append(f"{md_file.name}: {exc.message}")
-            if progress:
-                progress("Uploading to NotebookLM", done, total_steps)
+                return title, None, f"{md_file.name}: {exc.message}"
+            except Exception as exc:  # noqa: BLE001 - reported per file, so the rest still reconcile
+                return title, None, f"{md_file.name}: {type(exc).__name__}: {exc}"
+            finally:
+                steps.tick()
+
+        added_results = _run_pool(add, files)
+        new_ids: dict[str, str] = {}  # wanted title -> id of the source we just added
+        for title, source_id, error in added_results:
+            if source_id:
+                new_ids[title] = source_id
+            if error:
+                failed.append(error)
 
         # NotebookLM can reset a title to the file name once processing ends, so wait for every
         # source, then read the titles back and correct any that changed.
-        titles_by_id: dict[str, str] = {}
-        for done, (title, source_id) in enumerate(list(new_ids.items()), 1):
+        def wait(item: tuple[str, str]) -> str | None:
+            title, source_id = item
             try:
                 self.client.wait_for_source(nb_id, source_id)
+                return None
             except AlchemyError as exc:
-                failed.append(f"{title}: processing did not finish: {exc.message}")
+                return f"{title}: processing did not finish: {exc.message}"
+            except Exception as exc:  # noqa: BLE001 - reported per source, like the typed errors
+                return f"{title}: processing did not finish: {type(exc).__name__}: {exc}"
+            finally:
+                steps.tick()
+
+        pending = list(new_ids.items())
+        waited = _run_pool(wait, pending)
+        for (title, _source_id), error in zip(pending, waited, strict=True):
+            if error:
+                failed.append(error)
                 new_ids.pop(title)
-            if progress:
-                progress("Uploading to NotebookLM", len(files) + done, total_steps)
+        titles_by_id: dict[str, str] = {}
         if new_ids:
             titles_by_id = {str(s["id"]): str(s.get("title", "")) for s in self.client.list_sources(nb_id)}
             for title, source_id in list(new_ids.items()):
@@ -420,9 +509,6 @@ class AlchemyEngine:
         """Add videos to the catalog and to the matching domain compendium. Duplicates are skipped."""
         source_dir.mkdir(parents=True, exist_ok=True)
         catalog_file = source_dir / CATALOG_FILENAME
-        legacy_catalog = source_dir / LEGACY_CATALOG_FILENAME
-        if legacy_catalog.is_file() and not catalog_file.exists():
-            legacy_catalog.rename(catalog_file)  # an older vault: keep one catalog, under the new name
         catalog_text = catalog_file.read_text(encoding="utf-8") if catalog_file.exists() else ""
 
         fresh: list[dict[str, Any]] = []

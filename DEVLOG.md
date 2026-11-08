@@ -2,6 +2,36 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## Privacy, cleanup and future-proofing (2026-11-07)
+
+- **The repository and the tool keep nothing that identifies a person.** The license, package metadata
+  and README name the GitHub login; the README's "About the Owner" section is dropped (the README
+  checker expects it; this entry records the deliberate drop). Contributor docs carry no company or
+  maintainer-process references. The upload confirmation stores a random per-install salt and a salted
+  SHA-256 of the account email instead of the email, `setup` saves the vault path as typed, `status`
+  shows home paths as `~`, and `clean --records` removes the upload records. Why: this is open source,
+  and neither the maintainer nor a user should leave personal data in the repository or on disk.
+- **Dead code and the old vault layout are gone.** Write-only fields, unused members, the scanner-side
+  mock path, `ALCHEMY_STATE_DIR` and the `INDEX.md` / `vault/compendiums` layout from before 2026-11-07
+  were removed after a reference search showed nothing used them.
+- **Python 3.11+, bounded dependencies.** yt-dlp 2026.10.26 dropped Python 3.10, and YouTube now needs
+  yt-dlp's JavaScript solver (`yt-dlp[default]`). notebooklm-py (0.x) and youtube-transcript-api are
+  capped below their next major so a breaking release arrives as a reviewed Dependabot pull request.
+- **Prices carry their effective date.** `gemini-3.8-flash` doubles on 2027-01-01; the table lists both
+  prices with dates instead of needing an edit on the day. The build summary also reports the tokens
+  Gemini actually used, thinking included.
+- **Vendor signals over vendor wording.** Quota and retry timing come from Google's structured
+  `QuotaFailure` / `RetryInfo` details; every `CouldNotRetrieveTranscript` reason (including ones a
+  later library adds) is classified; `PoTokenRequired` counts as blocked and stops the run's remaining
+  caption requests.
+- **Channels include live streams.** A channel URL reads the Videos and Live tabs (`--tabs`; Shorts on
+  request). Live streams are long and captioned; Shorts are usually under a minute. A live test showed
+  why: a channel YouTube lists at 1.1K items had 508 videos, 246 streams and 440 Shorts, and the
+  Videos tab alone missed the streams.
+- **Faster where the time goes.** Uploads and waits run three `notebooklm` processes at a time (each
+  takes seconds to start); titles are still corrected only after every wait. yt-dlp loads on first use,
+  so `--help` went from about 1.5 s to 0.6 s.
+
 ## Upload account and setup (#39)
 
 - **Review fixes (2026-11-07).** `run` reads the account again just before uploading and stops if it
@@ -14,12 +44,13 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   `notebooklm --profile <p> auth check --json` reports the account email notebooklm-py 0.8.6 stored on the
   profile, without a network call. A sign-in window records it when the account is unambiguous, and
   `login --browser-cookies <b> --account <email>` picks one; with `--account`, either way, the login
-  reads it back and fails if it differs. Why: the Owner's uploads
-  went to a business account while the Gemini key belonged to a personal one, and nothing said so.
+  reads it back and fails if it differs. Why: uploads can go to a different Google account from the one
+  that owns the Gemini key, and nothing said which.
   `notebooklm profile list` reads the same record; `status` (session context) and `auth inspect` (browser
   accounts) do not identify the profile's account, so they are not used for it.
-- **First upload to a profile asks, per account.** The confirmation is stored as profile to email in
-  `~/.notebook-alchemy/upload_accounts.json`; a different email, or an unreadable record, asks again. An
+- **First upload to a profile asks, per account.** The confirmation is stored per profile in
+  `~/.notebook-alchemy/upload_accounts.json` (since 2026-11-07 as a salted hash, not the email); a
+  different account, or an unreadable record, asks again. An
   unknown account is asked about on every upload and never recorded, because two unknown accounts cannot
   be told apart. `login --account` checks that the browser holds the email before it signs in, so a typo
   cannot overwrite the profile with another account.
@@ -27,7 +58,7 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   upload stops before any work.
 - **`setup` writes `.env` in place.** Other lines are kept, a key is replaced where it stands, and the file
   is swapped in whole. The Gemini key is entered hidden and never printed.
-- **AI Pro does not change API quota.** Google's Google AI plans page (checked 2026-11-07) says plan
+- **A Google AI subscription plan does not change API quota.** Google's Google AI plans page (checked 2026-11-07) says plan
   benefits apply only in the AI Studio web interface and API-key usage is billed separately.
 
 ## Audit remediation (#16)

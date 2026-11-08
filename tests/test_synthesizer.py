@@ -24,7 +24,7 @@ from notebook_alchemy.synthesizer import (
 )
 
 KEY = "K" * 24
-UUID = "00000000-0000-4000-8000-0000000000aa"
+UUID = "00000000-0000-4000-8000-000000000000"
 
 
 def _videos(n: int) -> list[dict]:
@@ -196,6 +196,25 @@ def test_live_failure_falls_back_to_the_offline_index_with_a_warning() -> None:
     assert not comp.is_live_synthesized
     assert "Offline index" in comp.content
     assert any("quota" in w and "offline index" in w for w in comp.warnings)
+
+
+def test_a_volume_without_any_transcript_is_an_index_and_asks_gemini_nothing() -> None:
+    videos = _videos(3)
+    fake = FakeGemini()
+    missing = {str(v["id"]) for v in videos}
+    comp = Synthesizer(
+        api_key=KEY, gemini=fake, transcripts=FakeTranscripts(missing=missing)
+    ).synthesize_cluster("D", videos)
+    assert comp.title_only and not comp.is_live_synthesized and fake.prompts == []
+    assert "Offline index" in comp.content and comp.warnings == []  # reported once per run, by the engine
+
+
+def test_a_volume_with_some_transcripts_is_still_synthesized() -> None:
+    videos = _videos(3)
+    fake = FakeGemini()
+    synth = Synthesizer(api_key=KEY, gemini=fake, transcripts=FakeTranscripts(missing={str(videos[0]["id"])}))
+    comp = synth.synthesize_cluster("D", videos)
+    assert comp.is_live_synthesized and not comp.title_only and len(fake.prompts) == 1
 
 
 def test_fenced_model_output_is_unwrapped() -> None:
