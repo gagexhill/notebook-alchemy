@@ -133,3 +133,67 @@ def test_an_oversized_archive_is_refused(tmp_path: Path, monkeypatch: pytest.Mon
     members = {f"captions/v{i}.json": '{"video_id": "v"}' for i in range(3)}
     with pytest.raises(AlchemyError, match="larger than"):
         import_state(_engine(tmp_path / "b"), _archive(tmp_path / "big.zip", members))
+
+
+# --- review findings ---------------------------------------------------------------------------------
+
+
+def test_a_channel_named_in_any_script_moves_too(tmp_path: Path) -> None:
+    here, there = _engine(tmp_path / "a"), _engine(tmp_path / "b")
+    _put(here.library_cache_path("日本語チャンネル"), {"map": 1})
+    _put(here.library_cache_path("Café Talks"), {"map": 2})
+    summary = export_state(here, tmp_path / "state.zip")
+    assert summary.files == {"library": 2} and not summary.skipped
+    import_state(there, tmp_path / "state.zip")
+    assert json.loads(there.library_cache_path("日本語チャンネル").read_text(encoding="utf-8")) == {"map": 1}
+
+
+def test_export_names_what_it_left_out(tmp_path: Path) -> None:
+    here = _engine(tmp_path / "a")
+    _put(here.knowledge_dir() / "odd name!.json", {"x": 1})
+    (here.knowledge_dir() / "broken.json").write_text("{", encoding="utf-8")
+    summary = export_state(here, tmp_path / "state.zip")
+    assert sorted(summary.skipped) == [
+        "knowledge/broken.json (not readable JSON)",
+        "knowledge/odd name!.json (a name this tool does not write)",
+    ]
+
+
+@pytest.mark.parametrize("name", ["captions/NUL.json", "sync/com1.json"])
+def test_a_device_name_is_refused(tmp_path: Path, name: str) -> None:
+    with pytest.raises(AlchemyError, match="does not write"):
+        import_state(_engine(tmp_path / "b"), _archive(tmp_path / "bad.zip", {name: "{}"}))
+
+
+def test_deeply_nested_json_is_refused_not_a_crash(tmp_path: Path) -> None:
+    deep = "[" * 100_000 + "]" * 100_000
+    with pytest.raises(AlchemyError, match="not a JSON object"):
+        import_state(_engine(tmp_path / "b"), _archive(tmp_path / "deep.zip", {"captions/a.json": deep}))
+
+
+def test_a_member_that_inflates_past_the_cap_is_refused(tmp_path: Path, monkeypatch) -> None:
+    import notebook_alchemy.state as state
+
+    monkeypatch.setattr(state, "MAX_FILE_BYTES", 100)
+    big = json.dumps({"video_id": "v", "text": "word " * 100})
+    with pytest.raises(AlchemyError, match="larger than"):
+        import_state(_engine(tmp_path / "b"), _archive(tmp_path / "big.zip", {"captions/a.json": big}))
+
+
+def test_an_import_leaves_no_temporary_files(tmp_path: Path) -> None:
+    here, there = _engine(tmp_path / "a"), _engine(tmp_path / "b")
+    _seed(here)
+    export_state(here, tmp_path / "state.zip")
+    import_state(there, tmp_path / "state.zip")
+    assert not list(there.home.rglob("*.importing"))
+
+
+def test_a_damaged_or_lying_member_is_a_clear_error(tmp_path: Path) -> None:
+    import notebook_alchemy.state as state
+
+    archive_path = _archive(tmp_path / "lying.zip", {"captions/a.json": json.dumps({"t": "word " * 100})})
+    with zipfile.ZipFile(archive_path) as archive:
+        info = archive.getinfo("captions/a.json")
+        info.file_size = 10  # what a crafted header could claim
+        with pytest.raises(AlchemyError, match="is damaged"):
+            state._read_member(archive, info)

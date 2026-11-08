@@ -38,7 +38,7 @@ def test_windows_registers_reads_back_and_removes_a_task(tmp_path: Path) -> None
 
 def test_a_task_that_cannot_be_read_back_is_an_error(tmp_path: Path) -> None:
     scheduler = FakeScheduler(fail="/Query")
-    with pytest.raises(AlchemyError, match="could not be read back"):
+    with pytest.raises(AlchemyError, match="is not active"):
         KeepAlive("default", tmp_path, runner=scheduler, platform="win32").enable()
 
 
@@ -109,7 +109,9 @@ def test_a_refresh_records_whether_it_worked(tmp_path: Path) -> None:
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     assert refresh("personal", tmp_path, runner=ok)
-    assert seen[0] == [
+    # The same Python runs notebooklm as a module: a scheduler's short PATH cannot hide it.
+    assert seen[0][1:] == [
+        "-m",
         "notebooklm",
         "--profile",
         "personal",
@@ -118,6 +120,7 @@ def test_a_refresh_records_whether_it_worked(tmp_path: Path) -> None:
         "--quiet",
         "--allow-headless",
     ]
+    assert Path(seen[0][0]).stem.lower().startswith("python")
     assert read_status(tmp_path)["personal"]["ok"] is True
 
     def expired(cmd, **kw):
@@ -133,7 +136,7 @@ def test_a_refresh_without_notebooklm_installed_is_recorded_as_failed(tmp_path: 
         raise FileNotFoundError(cmd[0])
 
     assert not refresh("default", tmp_path, runner=missing)
-    assert "not found" in read_status(tmp_path)["default"]["detail"]
+    assert "could not be started" in read_status(tmp_path)["default"]["detail"]
 
 
 def test_status_shows_when_the_last_refresh_ran(tmp_path: Path) -> None:
@@ -160,3 +163,71 @@ def test_ago_reads_like_speech() -> None:
     assert ui.ago("2026-11-08T11:00:00+00:00", now) == "1 hour ago"
     assert ui.ago("2026-11-06T12:00:00+00:00", now) == "2 days ago"
     assert ui.ago("not a time", now) == "not a time"
+
+
+# --- review findings ---------------------------------------------------------------------------------
+
+
+def test_a_systemd_timer_that_does_not_start_leaves_nothing_behind(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(keepalive.shutil, "which", lambda name: f"/usr/bin/{name}")
+    keeper = KeepAlive(
+        "default",
+        tmp_path / "home",
+        runner=FakeScheduler(fail="enable"),
+        platform="linux",
+        user_home=tmp_path,
+    )
+    with pytest.raises(AlchemyError, match="start the systemd timer"):
+        keeper.enable()
+    assert not any((tmp_path / ".config" / "systemd" / "user").iterdir()) and not keeper.state().on
+
+
+def test_launchd_counts_as_on_only_when_launchd_has_the_agent(tmp_path: Path) -> None:
+    scheduler = FakeScheduler(fail="bootstrap")
+    keeper = KeepAlive("default", tmp_path / "home", runner=scheduler, platform="darwin", user_home=tmp_path)
+    with pytest.raises(AlchemyError, match="start the launchd agent"):
+        keeper.enable()
+    assert not (
+        tmp_path / "Library" / "LaunchAgents" / "com.notebook-alchemy.keepalive.default.plist"
+    ).exists()
+    plist = tmp_path / "Library" / "LaunchAgents" / "com.notebook-alchemy.keepalive.default.plist"
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    plist.write_bytes(b"left by hand")  # a file alone is not a running agent
+    assert not keeper.state().on and keeper.disable() and not plist.exists()
+
+
+def test_a_path_a_scheduler_would_rewrite_is_refused(tmp_path: Path) -> None:
+    scheduler = FakeScheduler()
+    with pytest.raises(AlchemyError, match="contains %"):
+        KeepAlive("default", tmp_path / "100%", runner=scheduler, platform="win32").enable()
+    assert not scheduler.tasks
+
+
+def test_the_scheduler_a_linux_entry_was_made_with_is_reused(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(keepalive.shutil, "which", lambda name: None)
+    scheduler = FakeScheduler()
+    keeper = KeepAlive("default", tmp_path / "home", runner=scheduler, platform="linux")
+    assert keeper.enable() == "cron"
+    monkeypatch.setattr(
+        keepalive.shutil, "which", lambda name: f"/usr/bin/{name}"
+    )  # later, a desktop session
+    assert keeper.kind == "cron" and keeper.state().on
+    assert keeper.disable() and not scheduler.crontab.strip()
+
+
+def test_a_refresh_does_not_bring_back_a_cleaned_folder(tmp_path: Path) -> None:
+    def ok(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    assert refresh("default", tmp_path / "gone", runner=ok) and not (tmp_path / "gone").exists()
+
+
+def test_status_calls_a_refresh_that_stopped_running_stale(tmp_path: Path) -> None:
+    from notebook_alchemy.cli import _keepalive_line
+
+    keeper = KeepAlive("default", tmp_path, runner=FakeScheduler(), platform="win32")
+    keeper.enable()
+    at = (dt.datetime.now(dt.UTC) - dt.timedelta(hours=5)).isoformat(timespec="seconds")
+    keepalive._record(tmp_path, "default", at=at, ok=True, detail="")
+    ok, text = _keepalive_line(keeper.state())
+    assert not ok and "has not run since 5 hours ago" in text

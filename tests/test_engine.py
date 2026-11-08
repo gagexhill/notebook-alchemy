@@ -552,6 +552,8 @@ class WatchingGemini:
         answer = self.answers.get(vid, "words")
         if isinstance(answer, Exception):
             raise answer
+        if isinstance(answer, tuple):  # (text, finish reason)
+            return GeminiResult(answer[0], answer[1])
         return GeminiResult(str(answer), "STOP")
 
 
@@ -621,3 +623,98 @@ def test_watch_needs_a_gemini_key(tmp_path: Path, monkeypatch) -> None:
 
     with pytest.raises(AlchemyError, match="--watch needs a Gemini API key"):
         engine.build("@chan", offline=True, watch=1)
+
+
+# --- review findings: unchanged books whose upload was never confirmed ------------------------------
+
+
+def _ids_by_title(fake: FakeNotebookLM) -> dict[str, str]:
+    return {s["title"]: s["id"] for s in fake.sources[fake.notebook_id("Chan")]}
+
+
+def test_a_book_whose_title_was_never_set_is_sent_again(tmp_path: Path) -> None:
+    broken = FakeNotebookLM(reset_titles=True, fail={"rename": "Beta"})
+    engine = _fake_engine(tmp_path, broken)
+    with pytest.raises(SyncError):
+        engine.publish("Chan", _books())
+    assert sorted(_ids_by_title(broken)) == ["Alpha Topics", "Beta_Topics.md"]
+    fixed = FakeNotebookLM(reset_titles=True)
+    fixed.notebooks, fixed.sources = broken.notebooks, broken.sources
+    engine.client = NotebookLMClient(engine.config, runner=fixed)
+    result = engine.publish("Chan", _books())
+    assert (result.uploaded, result.unchanged) == (1, 1)  # Beta's upload was never confirmed
+    assert sorted(_ids_by_title(fixed)) == ["Alpha Topics", "Beta Topics"]
+
+
+def test_an_unchanged_book_whose_title_drifted_is_renamed_not_resent(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    engine.publish("Chan", _books())
+    beta = next(s for s in fake.sources[fake.notebook_id("Chan")] if s["title"] == "Beta Topics")
+    beta["title"] = "Beta_Topics.md"  # NotebookLM reset it after the last read-back
+    result = engine.publish("Chan", _books())
+    assert (result.uploaded, result.unchanged) == (0, 2) and beta["title"] == "Beta Topics"
+
+
+def test_an_old_copy_that_could_not_be_removed_is_removed_next_time(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    engine.publish("Chan", _books())
+    old_beta = _ids_by_title(fake)["Beta Topics"]
+    stubborn = FakeNotebookLM(fail={"delete": old_beta})
+    stubborn.notebooks, stubborn.sources = fake.notebooks, fake.sources
+    engine.client = NotebookLMClient(engine.config, runner=stubborn)
+    alpha, beta = _books()
+    with pytest.raises(SyncError, match="1 problems"):
+        engine.publish("Chan", [alpha, *_edited([beta])])
+    assert [s["title"] for s in fake.sources[fake.notebook_id("Chan")]].count("Beta Topics") == 2
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    result = engine.publish("Chan", [alpha, *_edited([beta])])
+    assert result.uploaded == 0 and sorted(fake.titles("Chan")) == ["Alpha Topics", "Beta Topics"]
+    assert old_beta not in _ids_by_title(fake).values()
+
+
+def test_a_cut_off_watch_is_not_kept(tmp_path: Path, monkeypatch) -> None:
+    engine, _ = _watch_setup(tmp_path, monkeypatch, [600])
+    engine.gemini = WatchingGemini({"vid00000000": ("first we register and", "RECITATION")})  # type: ignore[assignment]
+    report = engine.build("@chan", offline=True, watch=1)
+    assert not report.read and "stopped before the end" in " ".join(report.notices)
+    assert not (tmp_path / "cache" / "vid00000000.json").exists()
+
+
+def test_a_video_that_gave_no_words_is_not_paid_for_again(tmp_path: Path, monkeypatch) -> None:
+    from notebook_alchemy.errors import GeminiError
+
+    engine, _ = _watch_setup(tmp_path, monkeypatch, [600, 600, 600])
+    gemini = WatchingGemini({"vid00000000": "NO_SPEECH", "vid00000001": GeminiError("private", status=403)})
+    engine.gemini = gemini  # type: ignore[assignment]
+    engine.build("@chan", offline=True, watch=2)
+    report = engine.build("@chan", offline=True, watch=2)
+    assert gemini.watched == ["vid00000000", "vid00000001", "vid00000002"]  # the next run moved on
+    assert report.read == {"vid00000002"}
+
+
+def test_a_transient_watch_error_is_tried_again_next_run(tmp_path: Path, monkeypatch) -> None:
+    from notebook_alchemy.errors import GeminiError
+
+    engine, _ = _watch_setup(tmp_path, monkeypatch, [600])
+    gemini = WatchingGemini({"vid00000000": GeminiError("overloaded", status=503)})
+    engine.gemini = gemini  # type: ignore[assignment]
+    engine.build("@chan", offline=True, watch=1)
+    engine.build("@chan", offline=True, watch=1)
+    assert gemini.watched == ["vid00000000", "vid00000000"]
+
+
+def test_watching_waits_for_the_cost_to_be_accepted(tmp_path: Path, monkeypatch) -> None:
+    engine, _ = _watch_setup(tmp_path, monkeypatch, [1800, 1800])
+    gemini = WatchingGemini({})
+    engine.gemini = gemini  # type: ignore[assignment]
+    asked: list[tuple[int, int, float]] = []
+
+    def decline(videos: int, seconds: int, usd: float) -> bool:
+        asked.append((videos, seconds, usd))
+        return False
+
+    report = engine.build("@chan", offline=True, watch=5, confirm_watch=decline)
+    assert gemini.watched == [] and asked[0][:2] == (2, 3600) and asked[0][2] > 0
+    assert "2 unread videos were not watched" in " ".join(report.notices)

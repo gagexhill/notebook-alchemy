@@ -1129,3 +1129,44 @@ def test_the_guided_run_builds_and_uploads_for_real(
 def test_watch_cannot_be_combined_with_offline(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["run", "@my", "--offline", "--watch", "3"])
     assert result.exit_code == 2 and "--watch uses Gemini" in result.output
+
+
+def test_login_still_succeeds_when_the_refresh_cannot_be_set_up(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _signed_in(monkeypatch)
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    isolated_environment.scheduler.fail = "/Create"
+    result = runner.invoke(cli, ["login", "--browser-cookies", "edge"], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "could not be kept fresh" in result.output and "notebook-alchemy keep-signed-in" in result.output
+
+
+def test_keep_signed_in_is_refused_with_a_session_file(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment, tmp_path: Path
+) -> None:
+    session = tmp_path / "storage_state.json"
+    session.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ALCHEMY_SESSION_FILE", str(session))
+    monkeypatch.setattr(NotebookLMClient, "is_authenticated", lambda self: True)
+    result = runner.invoke(cli, ["keep-signed-in"])
+    assert result.exit_code != 0 and "ALCHEMY_SESSION_FILE" in result.output
+    assert not isolated_environment.scheduler.tasks
+
+
+def test_the_watch_cost_is_shown_and_needs_yes_outside_a_terminal(capsys) -> None:
+    assert cli_module._confirm_watch(yes=True)(3, 5400, 0.42)
+    assert not cli_module._confirm_watch(yes=False)(3, 5400, 0.42)  # not a terminal, no --yes
+
+
+def test_the_guided_run_warns_when_the_environment_key_would_win(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _guided(monkeypatch, signed_in=True)
+    _recorded_run(monkeypatch)
+    monkeypatch.setattr(click, "launch", lambda url, **kw: None)
+    monkeypatch.setenv("GEMINI_API_KEY", "your_key_here")  # set, but not a usable key
+    key = "AIzaSyTEST-not-a-real-key-000"
+    result = runner.invoke(cli, [], input=f"n\ny\n{key}\n@kizzyparks\n")
+    assert result.exit_code == 0, result.output
+    assert "also set in your environment" in " ".join(result.output.split())

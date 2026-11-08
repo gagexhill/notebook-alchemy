@@ -478,6 +478,7 @@ def run_pipeline(
             resort=resort,
             use_batch=not now,
             watch=watch or 0,
+            confirm_watch=_confirm_watch(yes),
             progress=reporter,
         )
     _show_build(report, engine)
@@ -517,6 +518,24 @@ def run_pipeline(
             title, report.books, channel_key=None if notebook_name else target, progress=reporter
         )
     _show_sync_result(title, synced)
+
+
+def _confirm_watch(yes: bool) -> Callable[[int, int, float], bool]:
+    """Show what --watch will cost before anything is paid, and ask unless --yes."""
+
+    def confirm(videos: int, seconds: int, usd: float) -> bool:
+        ui.info(
+            f"  Gemini will watch {_plural(videos, 'video')} ({seconds / 3600:.1f} hours of video), "
+            f"for about ${usd:.2f}."
+        )
+        if yes:
+            return True
+        if not _interactive():
+            ui.warn("Not watching: add --yes to accept the cost when not in a terminal.")
+            return False
+        return _ask("Do you want to continue")
+
+    return confirm
 
 
 def _show_build(report: BuildReport, engine: AlchemyEngine) -> None:
@@ -898,7 +917,31 @@ def _keepalive(engine: AlchemyEngine) -> KeepAlive:
 
 
 def _offer_keep_signed_in(engine: AlchemyEngine, keep: bool | None) -> None:
-    """After a sign-in: switch the background refresh on, unless the user says no."""
+    """After a sign-in: switch the background refresh on, unless the user says no.
+
+    When it was only offered (`keep` is None), a problem with it is a warning: the sign-in itself
+    worked, so `login` and the guided run carry on.
+    """
+    if keep is not None:
+        _keep_signed_in(engine, keep)
+        return
+    try:
+        _keep_signed_in(engine, None)
+    except AlchemyError as exc:
+        ui.warn(f"The sign-in works, but it could not be kept fresh in the background: {esc(exc.message)}")
+        ui.next_command("try again later", "notebook-alchemy keep-signed-in")
+
+
+def _keep_signed_in(engine: AlchemyEngine, keep: bool | None) -> None:
+    override = engine.client.storage_override()
+    if override:
+        if keep:
+            raise ConfigError(
+                "ALCHEMY_SESSION_FILE is set, so uploads use that file's sign-in, which the background "
+                "refresh (it works per NotebookLM profile) would not keep fresh.",
+                hint="Remove ALCHEMY_SESSION_FILE from .env and sign in with a profile to use it.",
+            )
+        return
     keeper = _keepalive(engine)
     if keep is None:
         if keeper.state().on:
@@ -922,6 +965,12 @@ def _offer_keep_signed_in(engine: AlchemyEngine, keep: bool | None) -> None:
 def _keepalive_line(state: KeepAliveState) -> tuple[bool, str]:
     if not state.on:
         return False, "The sign-in is not refreshed in the background, so it can expire between runs."
+    if state.stale:
+        when = ui.ago(state.last_at)
+        return False, (
+            f"The background refresh is on but has not run since {when}; the computer may have been off, "
+            "or the task cannot start. Run `notebook-alchemy keep-signed-in` to set it up again."
+        )
     if state.last_ok is None:
         return True, "The sign-in is refreshed in the background (no refresh has run yet)."
     when = ui.ago(state.last_at)
@@ -960,7 +1009,7 @@ def keep_signed_in(off: bool, profile: str | None) -> None:
             "Not signed in to NotebookLM yet, so there is no sign-in to keep.",
             hint="Run `notebook-alchemy login` first.",
         )
-    _offer_keep_signed_in(engine, True)
+    _keep_signed_in(engine, True)
 
 
 def _prompt_for_key() -> str:
@@ -992,6 +1041,8 @@ def guided(ctx: click.Context) -> None:
         "[bold]Notebook Alchemy[/bold] turns a YouTube channel into topic books in a NotebookLM notebook.\n"
         "Three steps; press Ctrl+C at any time to stop.\n"
     )
+    # Read before .env is loaded: a key already in the process environment wins over .env.
+    key_from_process = bool(os.getenv("GEMINI_API_KEY"))
     config = _config()
 
     ui.step(1, 3, "Sign in to NotebookLM")
@@ -1029,6 +1080,11 @@ def guided(ctx: click.Context) -> None:
                 os.environ["GEMINI_API_KEY"] = entered  # this process; .env keeps it for next time
                 config = _config()
                 ui.success("Key saved. AI sorting is on.")
+                if key_from_process:
+                    ui.warn(
+                        "GEMINI_API_KEY is also set in your environment, and that value wins over .env "
+                        "in later runs. Remove it from the environment to use the key you entered."
+                    )
         if not config.has_gemini_key:
             ui.info("  Going on without AI sorting. Run `notebook-alchemy setup` to add a key later.")
 
@@ -1199,6 +1255,8 @@ def export_state_command(file: Path) -> None:
     Sign-ins, the Gemini key and the upload confirmation are not included.
     """
     summary = export_state(AlchemyEngine(_config()), file)
+    for item in summary.skipped:
+        ui.warn(f"Left out {esc(item)}.")
     ui.success(f"Saved {ui.name(file)}.")
     ui.detail(f"  {_state_counts(summary.files)}.")
     ui.next_command("carry on from another computer", f"notebook-alchemy import-state {file.name}")
@@ -1325,6 +1383,8 @@ def clean_pipeline(
             (targets.append(("labels", f)) if isinstance(_json(f), dict) else skipped.append(str(f)))
         if (engine.home / "batch.json").is_file():  # a batch still running at Google is forgotten too
             targets.append(("labels", engine.home / "batch.json"))
+        if engine.watched_path().is_file():  # videos Gemini watched without words: asked again
+            targets.append(("labels", engine.watched_path()))
     if do_records:
         records_dir = engine.sync_records_dir()
         for f in sorted(records_dir.glob("*.json")) if records_dir.is_dir() else []:

@@ -6,8 +6,11 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 import notebook_alchemy.library as library_module
 from notebook_alchemy.cleanup import Chunk
+from notebook_alchemy.errors import GeminiError
 from notebook_alchemy.gemini import GeminiResult
 from notebook_alchemy.knowledge import Segment, VideoLabels
 from notebook_alchemy.library import (
@@ -120,9 +123,13 @@ class SortingGemini:
 
     model = "gemini-test"
 
-    def __init__(self, new_section: str = "Extras", places_x: bool = True) -> None:
+    def __init__(
+        self, new_section: str = "Extras", places_x: bool = True, subsections: list[str] | None = None
+    ) -> None:
         self.prompts: list[str] = []
         self.new_section, self.places_x = new_section, places_x
+        self.subsections = ["Alpha", "Beta"] if subsections is None else subsections
+        self.quota_on: str | None = None  # a prompt phrase that answers with a used-up quota
 
     def asked(self, phrase: str) -> list[str]:
         return [p for p in self.prompts if phrase in p]
@@ -149,8 +156,10 @@ class SortingGemini:
                 ),
                 "STOP",
             )
+        if self.quota_on and self.quota_on in prompt:
+            raise GeminiError("quota", status=429, quota=True)
         if "has grown to" in prompt:
-            return GeminiResult(json.dumps({"subsections": ["Alpha", "Beta"]}), "STOP")
+            return GeminiResult(json.dumps({"subsections": self.subsections}), "STOP")
         if "Place each numbered passage" in prompt:
             points = re.findall(r"^(\d+): Point (\w+):", prompt, re.MULTILINE)
             if "0: Alpha" in prompt:  # subsections: odd-numbered videos go to Beta
@@ -416,3 +425,57 @@ def test_an_extension_that_adds_nothing_asks_nothing_more(tmp_path: Path) -> Non
     builder.build([_passage(i) for i in ["s1:1", "p1:1", *XS]], ["t1"])
     assert len(gemini.asked("Place each numbered passage")) == 1
     assert any("No new topics" in n for n in builder.notices)
+
+
+# --- review findings: answers paid for once ---------------------------------------------------------
+
+
+def test_an_unusable_extension_answer_is_not_paid_for_again(tmp_path: Path) -> None:
+    gemini = SortingGemini(new_section="")  # an answer with no usable section
+    _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
+    _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
+    assert len(gemini.asked("fit none of them")) == 1
+
+
+def test_an_unusable_subsection_answer_is_not_paid_for_again(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(library_module, "SUBSECTION_AT", 3)
+    gemini = SortingGemini(subsections=["Only one"])
+    ids = [f"s{i}:1" for i in range(1, 6)]
+    _build(tmp_path, gemini, ids)
+    _build(tmp_path, gemini, ids)
+    assert len(gemini.asked("has grown to")) == 1
+    _build(tmp_path, gemini, [*ids, "s6:1"])  # the section changed: asked again
+    assert len(gemini.asked("has grown to")) == 2
+
+
+def test_subsection_names_survive_a_quota_stop(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(library_module, "SUBSECTION_AT", 3)
+    gemini = SortingGemini()
+    gemini.quota_on = "0: Alpha"
+    ids = [f"s{i}:1" for i in range(1, 6)]
+    with pytest.raises(GeminiError):
+        _build(tmp_path, gemini, ids)
+    gemini.quota_on = None
+    library = _build(tmp_path, gemini, ids)
+    assert len(gemini.asked("has grown to")) == 1 and "Registration/SAM.gov: Alpha" in _ids(library)
+
+
+def test_resort_forgets_subsections(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(library_module, "SUBSECTION_AT", 3)
+    gemini = SortingGemini()
+    ids = [f"s{i}:1" for i in range(1, 6)]
+    _build(tmp_path, gemini, ids)
+    cache = RequestCache(tmp_path / "library.json")
+    LibraryBuilder(gemini, cache, TODAY, "Kizzy Parks").build([_passage(i) for i in ids], ["t1"], resort=True)
+    assert len(gemini.asked("has grown to")) == 2
+
+
+def test_a_passage_placed_nowhere_is_asked_about_again_with_new_videos(tmp_path: Path) -> None:
+    gemini = SortingGemini()
+    first = _build(tmp_path, gemini, ["s1:1", "x9:1"])  # one unplaced: too few to extend the map
+    assert _ids(first)[f"{MISC}/{MISC}"] == ["x9:1"]
+    _build(tmp_path, gemini, ["s1:1", "x9:1"])
+    assert len(gemini.asked("Place each numbered passage")) == 1  # nothing new: nothing asked
+    _build(tmp_path, gemini, ["s1:1", "x9:1", "s2:1"])
+    again = gemini.asked("Place each numbered passage")[-1]
+    assert "Point s2:1" in again and "Point x9:1" in again and "Point s1:1" not in again

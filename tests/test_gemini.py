@@ -415,3 +415,15 @@ def test_watch_cost_is_about_fifteen_cents_for_half_an_hour() -> None:
 
     cost = watch_cost(30 * 60, "gemini-3.8-flash", datetime.date(2026, 11, 8))
     assert 0.10 < cost < 0.20
+
+
+def test_a_watch_is_tried_once_per_run() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(503, json={"error": {"message": "overloaded"}})
+
+    with pytest.raises(GeminiError):
+        _client(handler).watch("https://www.youtube.com/watch?v=abcdefghijk", "Write it down.")
+    assert len(calls) == 1  # a timed-out or failed watch may still be billed: not retried

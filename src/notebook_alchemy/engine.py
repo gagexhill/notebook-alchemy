@@ -28,7 +28,7 @@ from .cleanup import Chunk, chunk_video, is_punctuated, mark_duplicates
 from .client import NotebookLMClient, SourceDocument, normalize_title
 from .config import CAPTION_BLOCK_PAUSE, AlchemyConfig
 from .errors import AlchemyError, ChannelScanError, GeminiError, SessionError, SyncError
-from .gemini import GeminiClient, price_for
+from .gemini import GeminiClient, price_for, watch_cost
 from .knowledge import KnowledgeStore, Labeler, VideoText, label_key
 from .library import Library, LibraryBuilder, Passage, RequestCache, build_passages
 from .mock_data import MOCK_NOTEBOOK_TITLE, get_mock_sources, sample_transcript
@@ -285,6 +285,7 @@ class AlchemyEngine:
         resort: bool = False,
         use_batch: bool = True,
         watch: int = 0,
+        confirm_watch: Callable[[int, int, float], bool] | None = None,
         progress: ProgressFn | None = None,
     ) -> BuildReport:
         channel, videos = self.scan(source, limit=limit, tabs=tabs, mock=mock)
@@ -317,7 +318,7 @@ class AlchemyEngine:
                 )
         if watch and not mock:
             before = set(texts)
-            notices += self._watch_unread(videos, texts, by_source, watch)
+            notices += self._watch_unread(videos, texts, by_source, watch, confirm_watch)
             watched |= set(texts) - before
         read = set(texts)
 
@@ -403,29 +404,52 @@ class AlchemyEngine:
             used_ai=use_ai,
         )
 
+    def watched_path(self) -> Path:
+        """Videos Gemini watched that gave no words (silence, private, refused), never paid for again."""
+        return self.home / "watched.json"
+
     def _watch_unread(
-        self, videos: list[ChannelVideo], texts: dict[str, str], by_source: dict[str, int], limit: int
+        self,
+        videos: list[ChannelVideo],
+        texts: dict[str, str],
+        by_source: dict[str, int],
+        limit: int,
+        confirm: Callable[[int, int, float], bool] | None = None,
     ) -> list[str]:
         """Gemini watches up to `limit` videos no route could read, and writes down what is said.
 
-        The words are cached like captions (method "gemini-video"), so a video is never paid for
-        twice. Longer than WATCH_MAX_MINUTES, or of unknown length, a video is left for the overview's
-        unread list: its cost cannot be bounded first.
+        - The words are cached like captions (method "gemini-video"), so a video is never paid for
+          twice; a watch that gave no words for good (no speech, a refusal) is recorded in
+          `watched.json`, so the next run moves on to other videos instead of paying again.
+        - Longer than WATCH_MAX_MINUTES, or of unknown length, a video is left in the overview's
+          unread list: its cost cannot be bounded first.
+        - `confirm(videos, seconds, usd)` sees the estimate before anything is paid.
+        - Only a complete answer (finish reason STOP) is kept; a cut-off one is not cached.
         """
         if self.gemini is None:
             raise AlchemyError(
                 "--watch needs a Gemini API key: Gemini watches the videos.",
                 hint="Add a key with `notebook-alchemy setup`, or run without --watch.",
             )
-        unread = [v for v in videos if v.id not in texts]
-        fits = [v for v in unread if 0 < v.duration_seconds <= WATCH_MAX_MINUTES * 60][:limit]
+        done_before = self._read_json(self.watched_path())
+        unread = [v for v in videos if v.id not in texts and v.id not in done_before]
+        bounded = [v for v in unread if 0 < v.duration_seconds <= WATCH_MAX_MINUTES * 60]
+        fits = bounded[:limit]
         notices: list[str] = []
-        too_long = sum(1 for v in unread if not 0 < v.duration_seconds <= WATCH_MAX_MINUTES * 60)
+        too_long = len(unread) - len(bounded)
         if too_long:
             notices.append(
                 f"{too_long} unread videos were not watched: longer than {WATCH_MAX_MINUTES} minutes or "
                 "of unknown length."
             )
+        if not fits:
+            return notices
+        seconds = sum(v.duration_seconds for v in fits)
+        cost = watch_cost(seconds, self.gemini.model)
+        if confirm is not None and not confirm(len(fits), seconds, cost):
+            notices.append(f"{len(fits)} unread videos were not watched.")
+            return notices
+        outcomes: dict[str, Any] = dict(done_before)
         watched = 0
         for v in fits:
             try:
@@ -437,14 +461,25 @@ class AlchemyEngine:
                     )
                     break
                 notices.append(f'Gemini could not watch "{v.title}": {exc.detail}')
+                if exc.status is not None and 400 <= exc.status < 500 and exc.status != 429:
+                    outcomes[v.id] = f"refused: {exc.detail}"[:200]  # private, removed: not paid again
                 continue
             text = answer.text.strip()
+            if answer.finish_reason != "STOP":
+                notices.append(
+                    f'Gemini stopped before the end of "{v.title}" ({answer.finish_reason}); its words '
+                    "were not kept."
+                )
+                continue
             if not text or text.upper().startswith(NO_SPEECH):
                 notices.append(f'Gemini heard no speech in "{v.title}".')
+                outcomes[v.id] = "no speech"
                 continue
             self.transcripts._write_cache(v.id, v.title, text, method=WATCHED)
             texts[v.id] = text
             watched += 1
+        if outcomes != done_before:
+            self._write_json(self.watched_path(), outcomes, "videos Gemini watched without words")
         if watched:
             by_source[WATCHED] = by_source.get(WATCHED, 0) + watched
         return notices
@@ -587,20 +622,31 @@ class AlchemyEngine:
     def _read_record(self, notebook_id: str) -> dict[str, Any]:
         """What this tool uploaded to a notebook.
 
-        {"titles": [...], "ids": {title: source id}, "hashes": {title: hash of the text uploaded}}.
+        {"titles": [...], "ids": {title: source id}, "hashes": {title: hash of the text uploaded},
+        "orphans": [ids of earlier copies a failed run could not remove, removed by the next run]}.
+        A hash is recorded only for a book whose upload was confirmed, title included.
         """
         data = self._read_json(self._sync_state_path(notebook_id))
-        ids, hashes = data.get("ids"), data.get("hashes")
+        ids, hashes, orphans = data.get("ids"), data.get("hashes"), data.get("orphans")
         ids = ids if isinstance(ids, dict) else {}
         hashes = hashes if isinstance(hashes, dict) else {}
+        orphans = orphans if isinstance(orphans, list) else []
         return {
             "titles": [str(t) for t in data.get("titles", [])],
             "ids": {str(k): str(v) for k, v in ids.items()},
             "hashes": {str(k): str(v) for k, v in hashes.items()},
+            "orphans": [str(o) for o in orphans],
         }
 
-    def _write_record(self, notebook_id: str, ids: dict[str, str], hashes: dict[str, str]) -> None:
-        data = {"titles": sorted(ids), "ids": ids, "hashes": {t: h for t, h in hashes.items() if t in ids}}
+    def _write_record(
+        self, notebook_id: str, ids: dict[str, str], hashes: dict[str, str], orphans: list[str] | None = None
+    ) -> None:
+        data = {
+            "titles": sorted(ids),
+            "ids": ids,
+            "hashes": {t: h for t, h in hashes.items() if t in ids},
+            "orphans": sorted(set(orphans or []) - set(ids.values())),
+        }
         self._write_json(self._sync_state_path(notebook_id), data, "this upload")
 
     def notebook_for(self, channel_key: str) -> str | None:
@@ -652,7 +698,8 @@ class AlchemyEngine:
         # a record from version 0.2 (titles only), by those titles. A source of yours with the same
         # title as a book is left alone.
         record = self._read_record(nb_id)
-        mine_ids = set(record["ids"].values())
+        orphans = set(record["orphans"])
+        mine_ids = set(record["ids"].values()) | orphans
         legacy = {normalize_title(t) for t in record["titles"]} if not record["ids"] else set()
         ours = [
             s
@@ -660,13 +707,20 @@ class AlchemyEngine:
             if str(s["id"]) in mine_ids or normalize_title(str(s.get("title", ""))) in legacy
         ]
         book_titles = {normalize_title(b.title) for b in books}
-        present_ids = {str(s["id"]) for s in before}
+        title_by_id = {str(s["id"]): str(s.get("title", "")) for s in before}
         hashes = {b.title: _content_hash(b.content) for b in books}
-        same = {
-            b.title: record["ids"][b.title]
-            for b in books
-            if record["hashes"].get(b.title) == hashes[b.title] and record["ids"].get(b.title) in present_ids
-        }
+        same: dict[str, str] = {}
+        for b in books:
+            old_id = record["ids"].get(b.title)
+            if record["hashes"].get(b.title) != hashes[b.title] or old_id not in title_by_id:
+                continue
+            if title_by_id[old_id] != b.title:
+                # The text is unchanged but NotebookLM shows another title: set it, else send again.
+                try:
+                    self.client.rename_source(nb_id, old_id, b.title)
+                except AlchemyError:
+                    continue
+            same[b.title] = old_id
         keep_ids = set(same.values())
         sending = [b for b in books if b.title not in same]
         final_count = len(before) - len(ours) + len(books)
@@ -740,6 +794,7 @@ class AlchemyEngine:
             if error:
                 failed.append(error)
                 new_ids.pop(title)
+        unconfirmed: set[str] = set()  # uploaded, but the title or the read-back was not confirmed
         if new_ids:
             # NotebookLM can reset a title to the file name once processing ends.
             titles_by_id = {str(s["id"]): str(s.get("title", "")) for s in self.client.list_sources(nb_id)}
@@ -749,6 +804,7 @@ class AlchemyEngine:
                         self.client.rename_source(nb_id, source_id, title)
                     except AlchemyError as exc:
                         failed.append(f"{title}: could not set the title: {exc.message}")
+                        unconfirmed.add(title)
 
         # An old copy goes only when its book's new copy is in, or when this build has no such book.
         # A book that failed to upload keeps its old copy.
@@ -756,11 +812,12 @@ class AlchemyEngine:
         added = set(new_ids.values())
         kept_old: dict[str, str] = {}
         replaced = pruned = 0
+        stuck: list[str] = []  # old copies that could not be removed; the next run removes them
         for old in ours:
             key = normalize_title(str(old.get("title", "")))
             if str(old["id"]) in added or str(old["id"]) in keep_ids:
                 continue
-            if key in book_titles and key not in uploaded:
+            if key in book_titles and key not in uploaded and str(old["id"]) not in orphans:
                 if str(old["id"]) not in freed:
                     kept_old[str(old.get("title", ""))] = str(old["id"])
                 continue
@@ -769,6 +826,7 @@ class AlchemyEngine:
                     self.client.delete_source(nb_id, str(old["id"]))
                 except AlchemyError as exc:
                     failed.append(f"{old.get('title', old['id'])}: old copy not removed: {exc.message}")
+                    stuck.append(str(old["id"]))
                     continue
             replaced += key in uploaded
             pruned += key not in book_titles
@@ -778,24 +836,25 @@ class AlchemyEngine:
                 str(s["id"]): normalize_title(str(s.get("title", "")))
                 for s in self.client.list_sources(nb_id)
             }
-            failed.extend(
-                f"{title}: not found in the notebook after uploading"
-                for title, source_id in new_ids.items()
-                if present.get(source_id) != normalize_title(title)
-            )
+            for title, source_id in new_ids.items():
+                if present.get(source_id) != normalize_title(title):
+                    failed.append(f"{title}: not found in the notebook after uploading")
+                    unconfirmed.add(title)
+        confirmed = {t: hashes[t] for t in [*same, *new_ids] if t not in unconfirmed}
         if failed:
-            # The record keeps the old ids too, so the next run still knows which sources are its own.
-            new_hashes = {t: hashes[t] for t in new_ids}
-            self._write_record(nb_id, {**record["ids"], **new_ids}, {**record["hashes"], **new_hashes})
+            # The record keeps the old ids too, so the next run still knows which sources are its own;
+            # an old copy replaced in the record but still in the notebook is kept as an orphan, and
+            # a book whose upload was not confirmed gets no hash, so the next run sends it again.
+            ids = {**record["ids"], **new_ids}
+            displaced = [record["ids"][t] for t in new_ids if t in record["ids"]]
+            left = [i for i in [*displaced, *stuck, *orphans] if i not in freed]
+            hashes_kept = {t: h for t, h in record["hashes"].items() if t not in new_ids}
+            self._write_record(nb_id, ids, {**hashes_kept, **confirmed}, left)
             raise SyncError(
                 f"{len(failed)} problems while uploading {len(books)} books.",
                 failed=failed,
                 hint="Fix the cause above and run the same command again; it replaces, not duplicates.",
             )
         # A kept old copy keeps its old hash (its text is not this build's), so the next run sends it.
-        self._write_record(
-            nb_id,
-            {**kept_old, **same, **new_ids},
-            {**record["hashes"], **{t: hashes[t] for t in [*same, *new_ids]}},
-        )
+        self._write_record(nb_id, {**kept_old, **same, **new_ids}, {**record["hashes"], **confirmed})
         return SyncResult(nb_id, created, len(new_ids), replaced, pruned, limit, freed_first, len(same))

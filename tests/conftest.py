@@ -84,6 +84,7 @@ class FakeScheduler:
     def __init__(self, *, fail: str = "") -> None:
         self.tasks: dict[str, str] = {}  # schtasks name -> command
         self.crontab = ""
+        self.units: set[str] = set()  # systemd timers enabled, launchd labels loaded
         self.calls: list[list[str]] = []
         self.fail = fail  # a command word ("/Create", "enable", ...) that exits 1
 
@@ -102,6 +103,21 @@ class FakeScheduler:
                 return subprocess.CompletedProcess(
                     cmd, 1, "", "ERROR: The system cannot find the file specified."
                 )
+        elif cmd[:1] == ["systemctl"] and len(cmd) > 3 and cmd[2] in ("enable", "disable", "is-enabled"):
+            unit = cmd[-1]
+            if cmd[2] == "enable":
+                self.units.add(unit)
+            elif cmd[2] == "disable":
+                self.units.discard(unit)
+            elif unit not in self.units:
+                return subprocess.CompletedProcess(cmd, 1, "disabled", "")
+        elif cmd[:1] == ["launchctl"]:
+            if cmd[1] == "bootstrap":
+                self.units.add(Path(cmd[3]).stem)
+            elif cmd[1] == "bootout":
+                self.units.discard(cmd[2].rsplit("/", 1)[-1])
+            elif cmd[1] == "print" and cmd[2].rsplit("/", 1)[-1] not in self.units:
+                return subprocess.CompletedProcess(cmd, 113, "", "Could not find service")
         elif cmd[:2] == ["crontab", "-l"]:
             if not self.crontab:
                 return subprocess.CompletedProcess(cmd, 1, "", "no crontab for user")
