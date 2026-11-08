@@ -7,10 +7,12 @@
 # the desktop, and runs `notebook-alchemy test`. Running it again updates the install in place.
 #
 # It never asks for or stores a password, key or account, and writes only inside your user folders:
-# uv's own folders, the Playwright browser folder, the desktop and the work folder named below.
+# uv's own folders, the Playwright browser folder, the desktop, the work folder named below and
+# %LOCALAPPDATA%\notebook-alchemy (the shortcut's icon).
 #
 # Optional settings, read from the environment:
 #   ALCHEMY_INSTALL_SOURCE        what `uv tool install` installs (default: the source below)
+#   ALCHEMY_INSTALL_ICON_BASE     the folder URL the shortcut icon is downloaded from (default below)
 #   ALCHEMY_INSTALL_WORK_DIR      the folder the shortcut opens in, where settings (.env) and
 #                                 output are kept (default: "Notebook Alchemy" in your home folder)
 #   ALCHEMY_INSTALL_SHORTCUT_DIR  where the shortcut goes (default: your desktop)
@@ -20,6 +22,8 @@
 # The source archive of the main branch on GitHub. An archive, not git+https, so git is not needed.
 # Once the package is on PyPI (issue #33) this becomes 'notebook-alchemy'.
 $NotebookAlchemySource = 'https://github.com/gagexhill/notebook-alchemy/archive/refs/heads/main.tar.gz'
+# The generated icon package (scripts/brand_icons.py writes it from docs/brand/icon.svg).
+$NotebookAlchemyIconBase = 'https://raw.githubusercontent.com/gagexhill/notebook-alchemy/main/docs/brand/icons'
 
 function Install-NotebookAlchemy {
     # Everything runs inside this function so that `irm | iex` changes nothing in the caller's
@@ -67,6 +71,36 @@ function Install-NotebookAlchemy {
 
     function Write-InstallWarning([string]$Message) {
         [Console]::Error.WriteLine("Warning: $Message")
+    }
+
+    # Downloads the shortcut icon and returns its path, or $null with a warning. A missing icon
+    # leaves the default one on the shortcut, so it never stops the install.
+    function Get-ShortcutIcon {
+        $base = $NotebookAlchemyIconBase
+        if ($env:ALCHEMY_INSTALL_ICON_BASE) { $base = $env:ALCHEMY_INSTALL_ICON_BASE }
+        $url = $base.TrimEnd('/') + '/notebook-alchemy.ico'
+        $dir = Join-Path $env:LOCALAPPDATA 'notebook-alchemy'
+        $dest = Join-Path $dir 'notebook-alchemy.ico'
+        $download = "$dest.download"
+        # Windows PowerShell's progress bar makes a download many times slower.
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            $null = New-Item -ItemType Directory -Force -Path $dir
+            Invoke-WebRequest -Uri $url -OutFile $download -UseBasicParsing
+            # An .ico file starts with 00 00 01 00; anything else (an error page) is not used.
+            $head = [System.IO.File]::ReadAllBytes($download) | Select-Object -First 4
+            if (($head -join ',') -ne '0,0,1,0') { throw "[$url] is not an .ico file." }
+            Move-Item -LiteralPath $download -Destination $dest -Force
+            return $dest
+        } catch {
+            if (Test-Path -LiteralPath $download) { Remove-Item -LiteralPath $download }
+            if (Test-Path -LiteralPath $dest -PathType Leaf) {
+                Write-InstallWarning "Could not download the shortcut icon ($($_.Exception.Message)); using the one from the last install."
+                return $dest
+            }
+            Write-InstallWarning "Could not download the shortcut icon ($($_.Exception.Message)); the shortcut uses the PowerShell icon. Run this installer again later to add it."
+            return $null
+        }
     }
 
     function Test-OnPath([string]$Dir) {
@@ -159,6 +193,8 @@ function Install-NotebookAlchemy {
     $link.Arguments = "-NoExit -NoLogo -NoProfile -Command `"& $quotedExe`""
     $link.WorkingDirectory = $workDir
     $link.Description = 'Turn a YouTube channel into NotebookLM sources'
+    $icon = Get-ShortcutIcon
+    if ($icon) { $link.IconLocation = "$icon,0" }
     $link.Save()
     if (-not (Test-Path -LiteralPath $shortcutPath -PathType Leaf)) {
         Fail "The shortcut [$shortcutPath] was not created." 'Check that you can write to that folder, then run this installer again.'
