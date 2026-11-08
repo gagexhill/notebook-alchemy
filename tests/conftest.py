@@ -173,7 +173,8 @@ class FakeNotebookLM:
             return done({"queued": True})
         if verb == "fulltext":
             src = next(s for s in bucket if s["id"] == args[2])
-            return done({"source_id": src["id"], "content": f"words spoken in {src.get('url', '')}"})
+            url = src.get("url") or src.get("title", "")
+            return done({"source_id": src["id"], "content": f"words spoken in {url}"})
         if verb == "wait":
             return subprocess.CompletedProcess(cmd, 0, "ready", "")
         if verb == "rename":

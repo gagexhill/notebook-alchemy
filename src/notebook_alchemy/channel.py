@@ -513,6 +513,7 @@ class TranscriptManager:
         # Per route: the clock time until which it is paused after a block (0 = open).
         self._paused_until: dict[str, float] = {}
         self._pause_lock = threading.Lock()
+        self._route_locks = {"api": threading.Lock(), "subtitles": threading.Lock()}
         self._po_token_demands = 0
         self.blocked_total = 0  # videos this run could not get captions for because YouTube blocked it
         self.by_source: dict[str, int] = {}  # how this run's videos were resolved, for the summary
@@ -632,13 +633,19 @@ class TranscriptManager:
             routes.append(("subtitles", self._via_subtitles))
         outcome: TranscriptResult | None = None
         for route, fetch in routes:
-            if self._is_paused(route):
+            # One remote request per route at a time, and the pause is checked under the lock, so a
+            # route closed by one worker is not called again by another already waiting.
+            with self._route_locks[route]:
+                if self._is_paused(route):
+                    result = None
+                else:
+                    self._pacer.wait()
+                    result = fetch(video_id, title)
+            if result is None:
                 outcome = outcome or TranscriptResult(
                     video_id, "", "blocked", f"YouTube blocked an earlier {route} request in this run"
                 )
                 continue
-            self._pacer.wait()
-            result = fetch(video_id, title)
             if result.text:
                 self._write_cache(
                     video_id, title, result.text, method=result.source, published=result.published

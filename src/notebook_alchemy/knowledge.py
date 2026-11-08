@@ -9,9 +9,11 @@ the transcript, the prompt version and the model, so a video is labelled once.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -20,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .cleanup import Chunk
+from .cleanup import Chunk, is_punctuated
 from .errors import GeminiError
 from .gemini import GeminiResult
 
@@ -30,6 +32,9 @@ PROMPT_VERSION = "1"
 KINDS = ("lasting", "rule", "news", "figure")
 LOW_KEEP_SHARE = 0.2  # below this share of kept chunks a video is labelled once more, keeping when unsure
 WINDOW_WORDS = 70_000  # a very long video is labelled in windows of about this many words
+# When the model also returns punctuated text, its answer is about as long as the window.
+PUNCTUATE_WINDOW_WORDS = 5_000
+PUNCTUATE_MIN_MATCH = 0.98  # share of words that must come back unchanged, else the raw text is used
 NOTE_MAX_WORDS = 25
 HEADLINE_MAX_WORDS = 14
 
@@ -73,6 +78,7 @@ class Segment:
     headline: str = ""
     kind: str = "lasting"
     note: str = ""
+    text: str = ""  # the kept chunks' own words with punctuation added (unpunctuated captions only)
 
 
 @dataclass
@@ -142,8 +148,21 @@ class KnowledgeStore:
             logger.warning("Could not save labels %s: %s", path, exc)
 
 
+PUNCTUATE = (
+    'These captions have no punctuation. For each kept segment also return "text": the exact words '
+    "of its chunks, in order, with punctuation, capital letters and paragraph breaks added. Do not add, "
+    "remove, reorder or change any word.\n"
+)
+
+
 def label_prompt(
-    title: str, published: str, today: str, chunks: list[Chunk], *, keep_when_unsure: bool = False
+    title: str,
+    published: str,
+    today: str,
+    chunks: list[Chunk],
+    *,
+    keep_when_unsure: bool = False,
+    punctuate: bool = False,
 ) -> str:
     """The request for one video (or one window of a long one)."""
     numbered = "\n".join(f"[{c.n}] {c.text}" for c in chunks)
@@ -157,7 +176,7 @@ def label_prompt(
     )
     return (
         f"Video: {title}\nPublished: {published or 'unknown'}\nToday: {today}\n\n"
-        f"{RULES}\n\n{KIND_HELP}\n{stricter}\n"
+        f"{RULES}\n\n{KIND_HELP}\n{stricter}{PUNCTUATE if punctuate else ''}\n"
         f"Group chunks {first} to {last} into consecutive segments that cover every chunk exactly once, "
         "in order. A kept segment is one coherent point (usually 1 to 8 chunks). Use the speaker's "
         "language for headlines and notes.\n"
@@ -166,7 +185,7 @@ def label_prompt(
         f'"headline": "<at most {HEADLINE_MAX_WORDS} words, kept segments only>", '
         '"kind": "lasting|rule|news|figure", '
         f'"note": "<optional, at most {NOTE_MAX_WORDS} words: context the passage needs to '
-        'stand alone>"}]}\n\n'
+        'stand alone>"' + (', "text": "<the punctuated words>"' if punctuate else "") + "}]}\n\n"
         f"Chunks:\n{numbered}"
     )
 
@@ -209,9 +228,25 @@ def parse_labels(text: str, numbers: set[int]) -> tuple[list[Segment], int]:
                 headline=_words(item.get("headline", ""), HEADLINE_MAX_WORDS) if keep else "",
                 kind=kind if kind in KINDS else "lasting",
                 note=_words(item.get("note", ""), NOTE_MAX_WORDS) if keep else "",
+                text=str(item.get("text") or "").strip() if keep else "",
             )
         )
     return segments, invalid
+
+
+_NORM_RE = re.compile(r"[^\w$%']+")
+
+
+def _norm_words(text: str) -> list[str]:
+    return [w for w in _NORM_RE.sub(" ", text.lower()).split() if w]
+
+
+def same_words(original: str, punctuated: str) -> bool:
+    """True when the punctuated text keeps the original's words (punctuation and case aside)."""
+    a, b = _norm_words(original), _norm_words(punctuated)
+    if not a or not b:
+        return False
+    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= PUNCTUATE_MIN_MATCH
 
 
 def windows(chunks: list[Chunk], limit: int = WINDOW_WORDS) -> list[list[Chunk]]:
@@ -337,15 +372,23 @@ class Labeler:
         return label_key(video.video_id, video.transcript, self.gemini.model)
 
     def _requests(self, video: VideoText, *, keep_when_unsure: bool = False) -> list[tuple[str, str]]:
-        """(request key, prompt) for each window of the video."""
+        """(request key, prompt) for each window of the video. Unpunctuated captions come back
+        punctuated too, in smaller windows, because the answer then carries the words."""
+        punctuate = not is_punctuated(video.transcript)
+        size = PUNCTUATE_WINDOW_WORDS if punctuate else WINDOW_WORDS
         return [
             (
                 f"{video.video_id}#{i}",
                 label_prompt(
-                    video.title, video.published, self.today, window, keep_when_unsure=keep_when_unsure
+                    video.title,
+                    video.published,
+                    self.today,
+                    window,
+                    keep_when_unsure=keep_when_unsure,
+                    punctuate=punctuate,
                 ),
             )
-            for i, window in enumerate(windows(video.chunks))
+            for i, window in enumerate(windows(video.chunks, size))
         ]
 
     def _assemble(

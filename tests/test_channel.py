@@ -678,7 +678,8 @@ def test_a_browser_sign_in_yt_dlp_cannot_read_closes_the_route_once_with_a_notic
     subs = Unreadable()
     tm = _manager(tmp_path, _Api(_blocked_api), subtitles=subs, block_pause=0)
     tm.fetch_many([(f"vid{i:08d}", "") for i in range(3)])
-    assert subs.calls == ["vid00000000"] and tm.notices == ["yt-dlp could not read the chrome sign-in"]
+    # Exactly one call, whichever worker got there first.
+    assert len(subs.calls) == 1 and tm.notices == ["yt-dlp could not read the chrome sign-in"]
 
 
 def test_a_cookie_failure_is_a_setup_error_and_a_path_with_age_in_it_is_not_a_missing_video() -> None:
