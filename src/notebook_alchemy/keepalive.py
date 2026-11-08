@@ -64,6 +64,7 @@ class KeepAliveState:
     last_ok: bool | None = None
     last_detail: str = ""
     stale: bool = False  # on, but no refresh recorded for STALE_AFTER_MISSED intervals
+    last_worked_at: str = ""  # the last refresh that worked, so a failure shows how long it has lasted
 
 
 def task_name(profile: str) -> str:
@@ -359,6 +360,7 @@ class KeepAlive:
             last.get("ok") if isinstance(last.get("ok"), bool) else None,
             str(last.get("detail", "")),
             stale=on and _older_than(at, INTERVAL_MINUTES * STALE_AFTER_MISSED),
+            last_worked_at=str(last.get("worked_at", "")),
         )
 
     # -- per-system details --
@@ -492,7 +494,8 @@ def refresh(profile: str, home: Path, *, runner: Runner | None = None) -> bool:
         ok, detail = False, "Python could not be started to run notebooklm"
     except (OSError, subprocess.TimeoutExpired) as exc:
         ok, detail = False, str(exc)[:300]
-    _record(home, profile, at=dt.datetime.now(dt.UTC).isoformat(timespec="seconds"), ok=ok, detail=detail)
+    now = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
+    _record(home, profile, at=now, ok=ok, detail=detail, **({"worked_at": now} if ok else {}))
     return ok
 
 

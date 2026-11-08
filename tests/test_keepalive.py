@@ -231,3 +231,24 @@ def test_status_calls_a_refresh_that_stopped_running_stale(tmp_path: Path) -> No
     keepalive._record(tmp_path, "default", at=at, ok=True, detail="")
     ok, text = _keepalive_line(keeper.state())
     assert not ok and "has not run since 5 hours ago" in text
+
+
+def test_status_says_when_the_refresh_last_worked(tmp_path: Path) -> None:
+    from notebook_alchemy.cli import _keepalive_line
+
+    keeper = KeepAlive("default", tmp_path, runner=FakeScheduler(), platform="win32")
+    keeper.enable()
+
+    def ok(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def signed_out(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
+
+    refresh("default", tmp_path, runner=signed_out)
+    assert "none has worked yet" in _keepalive_line(keeper.state())[1]
+    refresh("default", tmp_path, runner=ok)
+    refresh("default", tmp_path, runner=signed_out)
+    state = keeper.state()
+    assert state.last_worked_at and not state.last_ok
+    assert "the last one that worked was just now" in _keepalive_line(state)[1]
