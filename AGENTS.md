@@ -47,7 +47,9 @@ to propose a change; this file covers what a change must keep true.
   the next run resumes.
 - Upload content goes to `notebooklm` as a file, never on the command line (Windows limits one argument
   to about 32,000 characters). NotebookLM can reset a source title to its file name after processing, so
-  an upload waits, corrects titles, and reads the notebook back before it reports success.
+  an upload waits, corrects titles, and reads the notebook back before it reports success. An upload
+  replaces or removes only sources it recorded as its own (by id); a book that fails to upload keeps its
+  old copy, and nothing is uploaded while videos still wait for Gemini.
 - Text that comes from outside (titles, errors, paths) is passed through `ui.esc` before Rich prints it.
 - Output follows Google's `gcloud` conventions, through the helpers in `ui.py`: everyday words by
   default (topic, book, section, passage; no internal terms), detail such as paths, tokens and models through `ui.detail` (shown with `-v`), names in

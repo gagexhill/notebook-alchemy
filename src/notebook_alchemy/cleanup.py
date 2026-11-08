@@ -37,6 +37,7 @@ UNPUNCTUATED_BELOW = 1.0  # sentence marks per 100 words below which text is tre
 SHINGLE = 8  # words per shingle for duplicate detection
 DUPLICATE_SHARE = 0.8  # share of a chunk's shingles already seen that makes it a duplicate
 REPEAT_RUN_WORDS = 12  # a run this long, already said in another kept chunk, is taken out
+MIN_LEFT_WORDS = 4  # a chunk with fewer of its own words left is a repeat as a whole
 _NORM_RE = re.compile(r"[^a-z0-9$%']+")
 
 
@@ -142,33 +143,32 @@ def _repeated_runs(text: str, owners: dict[str, Chunk], self_chunk: Chunk) -> tu
     original = text.split()
     kept_index = [i for i, w in enumerate(original) if _norm(w)]
     norm = [_norm(original[i]) for i in kept_index]
-    covered = [False] * len(original)
-    sources: list[Chunk] = []
+    covered: list[Chunk | None] = [None] * len(original)  # the kept chunk that already said it
     for i in range(len(norm) - SHINGLE + 1):
         owner = owners.get(_hash(norm[i : i + SHINGLE]))
         if owner is not None and owner is not self_chunk:
-            sources.append(owner)
             for j in range(i, i + SHINGLE):
-                covered[kept_index[j]] = True
+                covered[kept_index[j]] = owner
     out: list[str] = []
-    run: list[str] = []
+    run: list[int] = []
     removed: list[Chunk] = []
+
+    def close_run() -> None:
+        if len(run) < REPEAT_RUN_WORDS:
+            out.extend(original[k] for k in run)  # a short shared phrase is not a repeated passage
+        else:  # only the videos whose words were actually taken out are credited
+            removed.extend(c for k in run if (c := covered[k]) is not None)
+        run.clear()
+
     for i, word in enumerate(original):
-        if covered[i]:
-            run.append(word)
+        if covered[i] is not None:
+            run.append(i)
             continue
         if run:
-            if len(run) < REPEAT_RUN_WORDS:
-                out += run  # a short shared phrase is not a repeated passage
-            else:
-                removed = sources
-            run = []
+            close_run()
         out.append(word)
     if run:
-        if len(run) < REPEAT_RUN_WORDS:
-            out += run
-        else:
-            removed = sources
+        close_run()
     return " ".join(out), removed
 
 
@@ -182,7 +182,12 @@ def mark_duplicates(videos: Iterable[tuple[str, list[Chunk]]]) -> int:
     """
     owners: dict[str, Chunk] = {}  # shingle -> the kept chunk that first had it
     duplicates = 0
-    for _published, chunks in sorted(videos, key=lambda pair: pair[0] or "", reverse=True):
+    # Newest first; equal dates (approximate ones often are) in a fixed order, so the same videos
+    # keep the same copy from run to run.
+    ordered = sorted(
+        videos, key=lambda pair: (pair[0] or "", pair[1][0].video_id if pair[1] else ""), reverse=True
+    )
+    for _published, chunks in ordered:
         for chunk in chunks:
             if chunk.boilerplate:
                 continue
@@ -200,9 +205,13 @@ def mark_duplicates(videos: Iterable[tuple[str, list[Chunk]]]) -> int:
             if seen:
                 text, sources = _repeated_runs(chunk.text, owners, chunk)
                 if sources:
-                    chunk.text = text
                     for keeper in {c.id: c for c in sources}.values():
                         _cite(keeper, chunk.video_id)
+                    if len(text.split()) < MIN_LEFT_WORDS:  # nothing of its own left: a repeat
+                        chunk.duplicate_of = sources[0].id
+                        duplicates += 1
+                        continue
+                    chunk.text = text
             for s in _shingles(chunk.text):
                 owners.setdefault(s, chunk)
     return duplicates

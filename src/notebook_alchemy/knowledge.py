@@ -92,6 +92,12 @@ class VideoLabels:
     segments: list[Segment] = field(default_factory=list)
     invalid: int = 0  # segments the model returned that pointed outside the chunks
     relabelled: bool = False
+    # The chunk numbers the model was shown. A chunk it never saw (hidden as a repeat at the time) is
+    # not covered by a segment, even when a segment's range spans it.
+    seen: list[int] = field(default_factory=list)
+
+    def covers(self, n: int) -> bool:
+        return not self.seen or n in self.seen
 
     def segment_for(self, n: int) -> Segment | None:
         for seg in self.segments:
@@ -140,6 +146,7 @@ class KnowledgeStore:
             segments=[Segment(**s) for s in data.get("segments", [])],
             invalid=int(data.get("invalid", 0)),
             relabelled=bool(data.get("relabelled", False)),
+            seen=[int(n) for n in data.get("seen", [])],
         )
 
     def put(self, labels: VideoLabels) -> None:
@@ -406,7 +413,7 @@ class Labeler:
         size = PUNCTUATE_WINDOW_WORDS if punctuate else WINDOW_WORDS
         return [
             (
-                f"{video.video_id}#{i}",
+                f"{self._key(video)}#{i}",  # tied to the transcript, so a changed one asks again
                 label_prompt(
                     video.title,
                     video.published,
@@ -434,14 +441,19 @@ class Labeler:
             segments += found
             invalid += bad
         labels = VideoLabels(
-            video.video_id, self._key(video), self.gemini.model, segments, invalid, relabelled
+            video.video_id,
+            self._key(video),
+            self.gemini.model,
+            segments,
+            invalid,
+            relabelled,
+            sorted(numbers),
         )
         if not relabelled and labels.kept_share(sorted(numbers)) < LOW_KEEP_SHARE:
             retry = self._direct_texts([p for _k, p in self._requests(video, keep_when_unsure=True)])
-            if retry is not None:
-                again = self._assemble(video, retry, relabelled=True)
-                if again is not None:
-                    return again
+            # A retry that failed (a quota, a bad answer) leaves the video waiting; the low-keep labels
+            # are not saved as if they were final.
+            return self._assemble(video, retry, relabelled=True) if retry is not None else None
         return labels
 
     # -- direct calls --
@@ -507,7 +519,11 @@ class Labeler:
         state = self._load_state()
         job = state.get("job") if state.get("model") == self.gemini.model else None
         if job and not set(state.get("keys", [])) <= set(requests):
-            job = None  # a job for other videos: start again
+            # A job for other videos or changed transcripts: its answers cannot be used. Said once.
+            out.notices.append(
+                "An earlier Gemini batch was for other videos or older transcripts; a new one was started."
+            )
+            job = None
         if not job:
             try:
                 keys = list(requests)

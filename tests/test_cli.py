@@ -942,3 +942,45 @@ def test_run_says_when_the_plan_is_unknown(
     assert "Uploads go to [owner@example.test]." in result.output and uploads == ["Mine"]
     detailed = runner.invoke(cli, [*RUN, "-N", "Mine", "--yes", "-v"])
     assert "NotebookLM plan: unknown" in " ".join(detailed.output.split())  # never guessed
+
+
+def test_nothing_is_uploaded_while_videos_wait_for_gemini(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("a b c d")
+    uploads = _record_uploads(monkeypatch)
+    real = AlchemyEngine.build
+
+    def waiting(self, *a, **kw):
+        report = real(self, *a, **kw)
+        report.waiting = ["vid00000000"]
+        return report
+
+    monkeypatch.setattr(AlchemyEngine, "build", waiting)
+    result = runner.invoke(cli, ["-q", *RUN, "-N", "chan", "--yes"])
+    assert result.exit_code == 0 and uploads == []
+    assert "still wait for Gemini, so nothing was uploaded" in " ".join(result.output.split())  # even with -q
+
+
+@pytest.mark.parametrize("flag", [["-n", "x"], ["--sync"], ["--write"]])
+def test_the_other_removed_run_flags_say_what_replaced_them(runner: CliRunner, flag: list[str]) -> None:
+    result = runner.invoke(cli, ["run", "@my", *flag])
+    assert result.exit_code == 2 and "was removed" in result.output
+
+
+def test_clean_records_keeps_a_running_batch_job(runner: CliRunner, isolated_environment) -> None:
+    home = isolated_environment.home / ".notebook-alchemy"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "batch.json").write_text('{"job": "batches/1"}', encoding="utf-8")
+    (home / "notebooks.json").write_text('{"@chan": "nb-1"}', encoding="utf-8")
+    assert runner.invoke(cli, ["clean", "--records", "--yes"]).exit_code == 0
+    assert (home / "batch.json").exists() and not (home / "notebooks.json").exists()
+
+
+def test_setup_without_a_sign_in_says_so(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, ["setup"], input="\ndefault\nkeep\n")
+    assert result.exit_code == 0, result.output
+    assert "Not signed in to NotebookLM yet" in result.output and "Uploads go to" not in result.output
