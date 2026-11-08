@@ -19,6 +19,7 @@ from notebook_alchemy.cli import cli
 from notebook_alchemy.client import (
     AccountIdentity,
     NotebookLMClient,
+    PlanLimits,
     SessionStatus,
     consent_file,
     record_upload_consent,
@@ -830,3 +831,28 @@ def test_login_writes_the_session_file_every_other_call_reads(
 def test_tabs_option_rejects_unknown_tabs(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["dry-run", "@my", "--tabs", "videos,reels"])
     assert result.exit_code == 2 and "shorts" in result.output
+
+
+def test_run_shows_the_plan_and_stops_before_building_what_cannot_fit(
+    runner: CliRunner, fake_channel, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    fake_channel(*[f"Talk {i}" for i in range(12)])
+    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 3))
+    monkeypatch.setattr(NotebookLMClient, "plan_limits", lambda self: PlanLimits(3, 100, 1))
+    uploads = _record_uploads(monkeypatch)
+    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 3))
+    result = runner.invoke(cli, ["run", "@my", "--offline", "-N", "Mine", "--yes", "--max-per-vol", "1"])
+    assert result.exit_code == 1, result.output
+    flat = " ".join(result.output.split())
+    assert "Standard, up to 3 sources per notebook" in flat and "Nothing was built or uploaded" in flat
+    assert uploads == [] and not (isolated_environment.work / "vault").exists()
+
+
+def test_run_says_when_the_plan_is_unknown(
+    runner: CliRunner, fake_channel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("Build a REST API", "CSS grid tricks")
+    uploads = _record_uploads(monkeypatch)
+    result = runner.invoke(cli, ["run", "@my", "--offline", "-N", "Mine", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "NotebookLM plan: unknown" in " ".join(result.output.split()) and uploads == ["Mine"]
