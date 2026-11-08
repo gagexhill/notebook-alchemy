@@ -979,8 +979,13 @@ def _keepalive_line(state: KeepAliveState) -> tuple[bool, str]:
     when = ui.ago(state.last_at)
     if state.last_ok:
         return True, f"The sign-in is refreshed in the background (last refresh {when}, it worked)."
+    worked = (
+        f"; the last one that worked was {ui.ago(state.last_worked_at)}"
+        if state.last_worked_at
+        else "; none has worked yet"
+    )
     return False, (
-        f"The background refresh is on, but the last one ({when}) failed: {esc(state.last_detail)} "
+        f"The background refresh is on, but the last one ({when}) failed{worked}: {esc(state.last_detail)} "
         "Sign in again with `notebook-alchemy login`."
     )
 
