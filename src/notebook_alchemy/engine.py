@@ -40,6 +40,7 @@ ProgressFn = Callable[[str, int, int], None]
 
 # The working notebook NotebookLM fetches blocked videos' transcripts into, a batch at a time.
 WORKSPACE_TITLE = "Notebook Alchemy workspace"
+WORKSPACE_KEY = "__workspace__"  # its id in notebooks.json, so a notebook of yours with that name is not used
 WORKSPACE_BATCH = 20
 WORKSPACE_WAIT = 300  # seconds NotebookLM gets to read one video
 
@@ -394,19 +395,27 @@ class AlchemyEngine:
         titles = dict(items)
         wanted = list(titles)
         try:
-            nb_id, _created = self.client.create_notebook(WORKSPACE_TITLE)
+            recorded = self.notebook_for(WORKSPACE_KEY)
+            if recorded and any(str(n.get("id")) == recorded for n in self.client.list_notebooks()):
+                nb_id = recorded
+            else:
+                nb_id, _created = self.client.create_notebook(WORKSPACE_TITLE)
+                self.remember_notebook(WORKSPACE_KEY, nb_id)
             existing = self.client.list_sources(nb_id)
         except AlchemyError as exc:
             logger.warning("NotebookLM could not be used to read transcripts: %s", exc.message)
             return {}
-        # Sources left by an interrupted run: read the ones still wanted, remove the rest.
+        # YouTube sources left by an interrupted run: read the ones still wanted, remove the rest.
+        # Anything else in the notebook is not this tool's and is left alone.
         leftovers: list[tuple[str, str]] = []
         for source in existing:
+            if not source.get("id") or not self._is_youtube_source(source):
+                continue
             vid = self._video_of(source, wanted, titles)
-            if vid and source.get("id"):
+            if vid:
                 leftovers.append((str(source["id"]), vid))
-            elif source.get("id"):
-                self._remove_workspace_source(nb_id, str(source["id"]), "an old source")
+            else:
+                self._remove_workspace_source(nb_id, str(source["id"]), "an old video")
         texts = self._read_workspace(nb_id, leftovers)
         started = {vid for _sid, vid in leftovers}
         pending = [v for v in wanted if v not in started]
@@ -460,7 +469,19 @@ class AlchemyEngine:
             if vid in batch:
                 return vid
         title = normalize_title(str(source.get("title") or ""))
-        return next((v for v in batch if title and normalize_title(titles.get(v, "")) == title), "")
+        matches = [v for v in batch if title and normalize_title(titles.get(v, "")) == title]
+        # By title only when one queued video has it: two "Live Q&A" videos must not swap words.
+        return matches[0] if len(matches) == 1 else ""
+
+    @staticmethod
+    def _is_youtube_source(source: dict[str, Any]) -> bool:
+        if str(source.get("type") or "").lower() == "youtube":
+            return True
+        return any(
+            not video_id_from_url(str(source.get(f) or "")).startswith("url_")
+            for f in ("url", "title")
+            if str(source.get(f) or "").startswith("http")
+        )
 
     # -- records --
 
@@ -484,11 +505,19 @@ class AlchemyEngine:
     def _sync_state_path(self, notebook_id: str) -> Path:
         return self.sync_records_dir() / f"{_safe_name(notebook_id)}.json"
 
-    def _read_synced_titles(self, notebook_id: str) -> list[str]:
-        return [str(t) for t in self._read_json(self._sync_state_path(notebook_id)).get("titles", [])]
+    def _read_record(self, notebook_id: str) -> dict[str, Any]:
+        """What this tool uploaded to a notebook: {"titles": [...], "ids": {title: source id}}."""
+        data = self._read_json(self._sync_state_path(notebook_id))
+        ids = data.get("ids") if isinstance(data.get("ids"), dict) else {}
+        return {
+            "titles": [str(t) for t in data.get("titles", [])],
+            "ids": {str(k): str(v) for k, v in ids.items()},
+        }
 
-    def _write_synced_titles(self, notebook_id: str, titles: list[str]) -> None:
-        self._write_json(self._sync_state_path(notebook_id), {"titles": sorted(titles)}, "this upload")
+    def _write_record(self, notebook_id: str, ids: dict[str, str]) -> None:
+        self._write_json(
+            self._sync_state_path(notebook_id), {"titles": sorted(ids), "ids": ids}, "this upload"
+        )
 
     def notebook_for(self, channel_key: str) -> str | None:
         return self._read_json(self.notebooks_path()).get(channel_key)
@@ -532,12 +561,19 @@ class AlchemyEngine:
             self.remember_notebook(channel_key, nb_id)
         before = [] if created else [s for s in self.client.list_sources(nb_id) if s.get("id")]
 
-        wanted_titles = {normalize_title(b.title) for b in books}
-        stale_titles = {normalize_title(t) for t in self._read_synced_titles(nb_id)} - wanted_titles
-        outgoing = [
-            s for s in before if normalize_title(str(s.get("title", ""))) in wanted_titles | stale_titles
+        # Only sources this tool uploaded are ever replaced or removed: by the ids it recorded, or, for
+        # a record from version 0.2 (titles only), by those titles. A source of yours with the same
+        # title as a book is left alone.
+        record = self._read_record(nb_id)
+        mine_ids = set(record["ids"].values())
+        legacy = {normalize_title(t) for t in record["titles"]} if not record["ids"] else set()
+        ours = [
+            s
+            for s in before
+            if str(s["id"]) in mine_ids or normalize_title(str(s.get("title", ""))) in legacy
         ]
-        final_count = len(before) - len(outgoing) + len(books)
+        book_titles = {normalize_title(b.title) for b in books}
+        final_count = len(before) - len(ours) + len(books)
         if limit is not None and final_count > limit:
             plan = limits.plan if limits else "unknown plan"
             raise SyncError(
@@ -552,7 +588,7 @@ class AlchemyEngine:
         if freed_first:
             # Adding everything before removing the old copies would briefly exceed the limit, so
             # the copies this upload replaces go first.
-            for old in outgoing:
+            for old in ours:
                 try:
                     self.client.delete_source(nb_id, str(old["id"]))
                     freed.add(str(old["id"]))
@@ -616,40 +652,46 @@ class AlchemyEngine:
                     except AlchemyError as exc:
                         failed.append(f"{title}: could not set the title: {exc.message}")
 
-        wanted = {normalize_title(t) for t in new_ids}
-        stale = {normalize_title(t) for t in self._read_synced_titles(nb_id)} - wanted
+        # An old copy goes only when its book's new copy is in, or when this build has no such book.
+        # A book that failed to upload keeps its old copy.
+        uploaded = {normalize_title(t) for t in new_ids}
         added = set(new_ids.values())
+        kept_old: dict[str, str] = {}
         replaced = pruned = 0
-        for old in before:
+        for old in ours:
             key = normalize_title(str(old.get("title", "")))
-            if str(old["id"]) in added or (key not in wanted and key not in stale):
+            if str(old["id"]) in added:
                 continue
-            if str(old["id"]) in freed:
-                replaced += key in wanted
-                pruned += key not in wanted
+            if key in book_titles and key not in uploaded:
+                if str(old["id"]) not in freed:
+                    kept_old[str(old.get("title", ""))] = str(old["id"])
                 continue
-            try:
-                self.client.delete_source(nb_id, str(old["id"]))
-                replaced += key in wanted
-                pruned += key not in wanted
-            except AlchemyError as exc:
-                failed.append(f"{old.get('title', old['id'])}: old copy not removed: {exc.message}")
+            if str(old["id"]) not in freed:
+                try:
+                    self.client.delete_source(nb_id, str(old["id"]))
+                except AlchemyError as exc:
+                    failed.append(f"{old.get('title', old['id'])}: old copy not removed: {exc.message}")
+                    continue
+            replaced += key in uploaded
+            pruned += key not in book_titles
 
-        if new_ids:  # final read-back: every title exactly once
-            counts: dict[str, int] = {}
-            for s in self.client.list_sources(nb_id):
-                key = normalize_title(str(s.get("title", "")))
-                counts[key] = counts.get(key, 0) + 1
+        if new_ids:  # final read-back: each uploaded book is there once, under its title
+            present = {
+                str(s["id"]): normalize_title(str(s.get("title", "")))
+                for s in self.client.list_sources(nb_id)
+            }
             failed.extend(
-                f"{title}: appears {counts.get(normalize_title(title), 0)} times in the notebook"
-                for title in new_ids
-                if counts.get(normalize_title(title), 0) != 1
+                f"{title}: not found in the notebook after uploading"
+                for title, source_id in new_ids.items()
+                if present.get(source_id) != normalize_title(title)
             )
         if failed:
+            # The record keeps the old ids too, so the next run still knows which sources are its own.
+            self._write_record(nb_id, {**record["ids"], **new_ids})
             raise SyncError(
                 f"{len(failed)} problems while uploading {len(books)} books.",
                 failed=failed,
                 hint="Fix the cause above and run the same command again; it replaces, not duplicates.",
             )
-        self._write_synced_titles(nb_id, list(new_ids))
+        self._write_record(nb_id, {**kept_old, **new_ids})
         return SyncResult(nb_id, created, len(new_ids), replaced, pruned, limit, freed_first)

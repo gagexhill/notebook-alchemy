@@ -174,7 +174,8 @@ def test_a_finished_batch_labels_without_standard_calls(tmp_path: Path) -> None:
     assert (
         run.labelled_now == 2
         and gemini.calls == []
-        and gemini.batches == [["vid00000001#0", "vid00000002#0"]]
+        and len(gemini.batches) == 1
+        and len(gemini.batches[0]) == 2  # one request per video, one batch
     )
     assert not (tmp_path / "batch.json").read_text(encoding="utf-8").strip("{}")  # job cleared
 
@@ -204,3 +205,28 @@ def test_long_videos_are_labelled_in_windows_with_numbering_carried_on() -> None
     chunks = [Chunk("v", i, "word " * 500) for i in range(1, 400)]
     parts = windows(chunks)
     assert len(parts) == 3 and parts[1][0].n == parts[0][-1].n + 1
+
+
+def test_batch_requests_are_tied_to_the_transcript() -> None:
+    from notebook_alchemy.knowledge import Labeler
+
+    labeler = Labeler(FakeGemini(), KnowledgeStore(Path("unused")), TODAY, state_path=Path("unused"))
+    same = labeler._requests(_video())[0][0]
+    assert same == labeler._requests(_video())[0][0] != labeler._requests(_video(transcript="edited"))[0][0]
+
+
+def test_a_relabel_that_fails_leaves_the_video_waiting_instead_of_saving_poor_labels(tmp_path: Path) -> None:
+    class DropsThenQuota(FakeGemini):
+        def generate(self, prompt: str, **kw) -> GeminiResult:
+            if "almost everything was dropped" in prompt:
+                raise GeminiError("quota", status=429, detail="daily request quota exhausted", quota=True)
+            return super().generate(prompt, **kw)
+
+    gemini = DropsThenQuota(drop_all=True)
+    run = _labeler(tmp_path, gemini).run([_video()])
+    assert run.waiting == ["abcdefghijk"] and not list((tmp_path / "knowledge").glob("*.json"))
+
+
+def test_labels_record_which_chunks_the_model_saw(tmp_path: Path) -> None:
+    labels = _labeler(tmp_path, FakeGemini()).run([_video(n=4)]).labels["abcdefghijk"]
+    assert labels.seen == [1, 2, 3, 4] and labels.covers(3) and not labels.covers(9)

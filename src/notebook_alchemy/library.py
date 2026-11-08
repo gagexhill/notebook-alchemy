@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .cleanup import Chunk
+from .errors import GeminiError
 from .knowledge import VideoLabels, apply_punctuation
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,8 @@ def build_passages(
     out: list[Passage] = []
     covered: set[int] = set()
     for seg in labels.segments if labels else []:
-        span = range(seg.start, seg.end + 1)
+        # Only chunks the model was shown are decided by its segment; one it never saw stays kept.
+        span = [n for n in range(seg.start, seg.end + 1) if labels is not None and labels.covers(n)]
         covered.update(span)
         if not seg.keep:
             continue
@@ -194,7 +196,9 @@ class RequestCache:
         return self.data.get(key)
 
     def put(self, key: str, value: Any) -> None:
+        """Store an answer and save at once: a run stopped part-way (a quota) keeps what it paid for."""
         self.data[key] = value
+        self.save()
 
     def save(self) -> None:
         try:
@@ -329,7 +333,20 @@ def apply_consolidation(text: str, passages: list[Passage]) -> tuple[str, list[P
         if dupes.get(dupes[a]) is not None:
             dupes.pop(a)
     superseded = {int(n) for n in data.get("superseded") or [] if str(n).lstrip("-").isdigit()}
-    superseded = {n for n in superseded if 0 <= n < count and n not in dupes.values()}
+    # Only a time-sensitive passage is replaced, and only when a newer passage in the section stays.
+    superseded = {
+        n
+        for n in superseded
+        if 0 <= n < count
+        and n not in dupes.values()
+        and passages[n].kind in TIME_SENSITIVE
+        and passages[n].published
+        and any(
+            p.published > passages[n].published
+            for i, p in enumerate(passages)
+            if i != n and i not in dupes and i not in superseded
+        )
+    }
     for a, b in dupes.items():
         keeper = passages[b]
         cited = [passages[a].video_id, *passages[a].also_in]
@@ -439,6 +456,13 @@ class LibraryBuilder:
                 mapping = parse_assignments(
                     self._ask(assign_prompt(listing, numbered)), {n for n, _ in numbered}, len(sections)
                 )
+            except GeminiError as exc:
+                if exc.quota:
+                    raise
+                self.notices.append(
+                    f"{len(batch)} passages could not be placed ({exc.detail}); they are retried next run."
+                )
+                continue
             except (ValueError, TypeError) as exc:
                 self.notices.append(
                     f"{len(batch)} passages could not be placed ({exc}); they are retried next run."
@@ -463,14 +487,22 @@ class LibraryBuilder:
             "consolidate",
             topic.name,
             section.name,
-            self.today[:7],
-            [(p.id, p.headline, p.kind, p.published) for p in passages],
+            self.today[:4],
+            # Years, not days: approximate dates move a little every day, and the order does not.
+            [(p.id, p.headline, p.kind, p.published[:4]) for p in passages],
         )
         text = self.cache.get(key)
         if text is None:
             try:
                 text = self._ask(consolidate_prompt(topic.name, section, self.today, passages))
                 apply_consolidation(text, list(passages))  # check it parses before caching
+            except GeminiError as exc:
+                if exc.quota:
+                    raise
+                self.notices.append(
+                    f"'{section.name}' kept its passages in their found order ({exc.detail})."
+                )
+                return
             except (ValueError, TypeError) as exc:
                 self.notices.append(f"'{section.name}' kept its passages in their found order ({exc}).")
                 return

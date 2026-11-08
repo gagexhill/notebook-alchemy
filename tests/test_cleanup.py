@@ -86,3 +86,23 @@ def test_a_short_shared_phrase_is_not_a_repeat() -> None:
     b = [Chunk("b", 1, "In this video we talk about pricing a janitorial bid for a federal building.")]
     mark_duplicates([("2024-01-01", a), ("2025-01-01", b)])
     assert a[0].text.startswith("In this video we talk about")  # shared, but shorter than a passage
+
+
+def test_a_chunk_trimmed_to_almost_nothing_is_a_repeat_and_only_real_sources_are_credited() -> None:
+    a_run = "the uei arrives first and then you request the cage code from the dla office"
+    b_run = "your naics codes decide which set aside contracts you can bid on as a small business"
+    older = [Chunk("old", 1, f"{a_run} {b_run} ok")]
+    first = [Chunk("first", 1, a_run)]
+    second = [Chunk("second", 1, b_run)]
+    mark_duplicates([("2023-01-01", older), ("2025-01-01", first), ("2025-02-01", second)])
+    assert older[0].duplicate_of is not None and not older[0].kept
+    assert first[0].also_in == ["old"] and second[0].also_in == ["old"]
+
+
+def test_equal_dates_keep_the_same_copy_every_run() -> None:
+    def run_once(order):
+        vids = {v: [Chunk(v, 1, FACT)] for v in ("aaa", "bbb")}
+        mark_duplicates([("2024-01-01", vids[v]) for v in order])
+        return [v for v, cs in vids.items() if cs[0].kept]
+
+    assert run_once(["aaa", "bbb"]) == run_once(["bbb", "aaa"])

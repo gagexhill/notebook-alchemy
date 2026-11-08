@@ -50,6 +50,11 @@ def _books(names: tuple[str, ...] = ("Alpha_Topics", "Beta_Topics")) -> list[Boo
     return [Book(n.replace("_", " "), f"# {n.replace('_', ' ')}\n\nwords") for n in names]
 
 
+def _previous_upload(engine: AlchemyEngine, nb_id: str, titles: list[str]) -> None:
+    """A record of an earlier (0.2-style, titles only) upload of these titles to the notebook."""
+    engine._write_json(engine._sync_state_path(nb_id), {"titles": titles}, "test record")
+
+
 # --- sync -----------------------------------------------------------------------------------------
 
 LIST_NBS = json.dumps([{"id": "nb-1", "title": "Chan"}])
@@ -117,8 +122,10 @@ def test_an_unexpected_error_in_one_upload_is_reported_and_the_rest_reconcile(tm
 
 def test_resync_replaces_old_copies_including_filename_titled_ones(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
-    fake.seed("Chan", ["Alpha Topics", "Alpha Topics", "Beta_Topics.md", "My own notes"])
-    result = _fake_engine(tmp_path, fake).publish("Chan", _books())
+    nb = fake.seed("Chan", ["Alpha Topics", "Alpha Topics", "Beta_Topics.md", "My own notes"])
+    engine = _fake_engine(tmp_path, fake)
+    _previous_upload(engine, nb, ["Alpha Topics", "Beta Topics"])
+    result = engine.publish("Chan", _books())
     assert result.replaced == 3  # both exact copies and the filename-titled one
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "My own notes"]  # user's own source kept
 
@@ -135,8 +142,10 @@ def test_titles_the_service_resets_to_file_names_are_corrected(tmp_path: Path) -
 
 def test_sync_adds_before_it_deletes_and_waits_before_renaming(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
-    fake.seed("Chan", ["Alpha Topics"])
-    _fake_engine(tmp_path, fake).publish("Chan", _books())
+    nb = fake.seed("Chan", ["Alpha Topics"])
+    engine = _fake_engine(tmp_path, fake)
+    _previous_upload(engine, nb, ["Alpha Topics"])
+    engine.publish("Chan", _books())
     verbs = [" ".join(c) for c in fake.calls]
     first_add = next(i for i, c in enumerate(verbs) if "source add" in c)
     first_wait = next(i for i, c in enumerate(verbs) if "source wait" in c)
@@ -154,11 +163,12 @@ def test_sync_reports_each_failed_file_and_still_uploads_the_rest(tmp_path: Path
 
 def test_an_old_copy_that_cannot_be_deleted_is_reported(tmp_path: Path) -> None:
     fake = FakeNotebookLM(fail={"delete": "old-"})
-    fake.seed("Chan", ["Alpha Topics"])
+    nb = fake.seed("Chan", ["Alpha Topics"])
+    engine = _fake_engine(tmp_path, fake)
+    _previous_upload(engine, nb, ["Alpha Topics"])
     with pytest.raises(SyncError) as err:
-        _fake_engine(tmp_path, fake).publish("Chan", _books())
+        engine.publish("Chan", _books())
     assert any("old copy not removed" in f for f in err.value.failed)
-    assert any("appears 2 times" in f for f in err.value.failed)  # the read-back catches the duplicate
 
 
 def test_a_source_that_never_finishes_processing_is_reported(tmp_path: Path) -> None:
@@ -236,8 +246,10 @@ def test_a_sync_that_cannot_fit_the_plan_uploads_nothing(tmp_path: Path) -> None
 
 def test_a_tight_notebook_frees_the_replaced_copies_before_uploading(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
-    fake.seed("Chan", ["Alpha Topics", "Beta Topics", "Mine"])
-    result = _limited_engine(tmp_path, fake, 4).publish("Chan", _books())
+    nb = fake.seed("Chan", ["Alpha Topics", "Beta Topics", "Mine"])
+    engine = _limited_engine(tmp_path, fake, 4)
+    _previous_upload(engine, nb, ["Alpha Topics", "Beta Topics"])
+    result = engine.publish("Chan", _books())
     assert result.freed_first and (result.uploaded, result.replaced) == (2, 2)
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "Mine"]
     verbs = [c[c.index("source") + 1] for c in fake.calls if "source" in c]
@@ -246,8 +258,10 @@ def test_a_tight_notebook_frees_the_replaced_copies_before_uploading(tmp_path: P
 
 def test_with_room_the_old_copies_go_only_after_the_new_ones_are_in(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
-    fake.seed("Chan", ["Alpha Topics", "Beta Topics"])
-    result = _limited_engine(tmp_path, fake, 300).publish("Chan", _books())
+    nb = fake.seed("Chan", ["Alpha Topics", "Beta Topics"])
+    engine = _limited_engine(tmp_path, fake, 300)
+    _previous_upload(engine, nb, ["Alpha Topics", "Beta Topics"])
+    result = engine.publish("Chan", _books())
     assert not result.freed_first and result.source_limit == 300
     verbs = [c[c.index("source") + 1] for c in fake.calls if "source" in c]
     assert verbs.index("add") < verbs.index("delete")
@@ -286,7 +300,7 @@ def test_notebooklm_reads_blocked_videos_in_a_working_notebook_and_cleans_up(tmp
     assert len(adds) == 1 and not any(
         "cdefghijklm" in a for a in adds[0]
     )  # the leftover was read, not re-added
-    assert fake.sources[workspace] == []  # every source it added, and the old one, removed
+    assert [s["title"] for s in fake.sources[workspace]] == ["left from an interrupted run"]  # not a video
 
 
 def test_notebooklm_route_needs_a_sign_in(tmp_path: Path) -> None:
@@ -442,3 +456,43 @@ def test_a_used_up_quota_while_sorting_says_how_far_it_got_and_keeps_the_labels(
         engine.build("@chan")
     assert "carries on from here" in (err.value.hint or "")
     assert list((tmp_path / "knowledge").glob("*.json"))  # the label survived for the next run
+
+
+def test_a_source_of_yours_with_a_books_title_is_left_alone(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    fake.seed("Chan", ["Alpha Topics", "My own notes"])  # no record: these are not the tool's
+    result = _fake_engine(tmp_path, fake).publish("Chan", _books())
+    assert result.replaced == 0 and fake.titles("Chan").count("Alpha Topics") == 2
+
+
+def test_a_book_that_fails_to_upload_keeps_its_old_copy(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    engine.publish("Chan", _books())  # first run: both books, recorded by id
+    broken = FakeNotebookLM(fail={"add": "Beta"})
+    broken.notebooks, broken.sources = fake.notebooks, fake.sources
+    engine.client = NotebookLMClient(engine.config, runner=broken)
+    with pytest.raises(SyncError):
+        engine.publish("Chan", _books())
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]  # Beta's old copy is still there
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    engine.publish("Chan", _books())
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]  # and the next run replaces it once
+
+
+def test_the_working_notebook_only_ever_loses_videos_and_titles_must_be_unique(tmp_path: Path) -> None:
+    _session(tmp_path)
+    engine = AlchemyEngine(_config(tmp_path))
+    fake = FakeNotebookLM()
+    ws = fake.seed("Notebook Alchemy workspace", ["My notes"])
+    fake.sources[ws].append(
+        {"id": "yt-old", "title": "Live Q&A", "url": None, "type": "youtube", "status": "ready"}
+    )
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    texts = engine.transcripts_via_notebooklm([("abcdefghijk", "Live Q&A"), ("bcdefghijkl", "Live Q&A")])
+    # The leftover titled "Live Q&A" matches two queued videos, so it is read for neither: each video's
+    # words come from its own URL.
+    assert texts["abcdefghijk"] == "words spoken in https://www.youtube.com/watch?v=abcdefghijk"
+    assert texts["bcdefghijkl"] == "words spoken in https://www.youtube.com/watch?v=bcdefghijkl"
+    assert [s["title"] for s in fake.sources[ws]] == ["My notes"]
+    assert engine.notebook_for("__workspace__") == ws

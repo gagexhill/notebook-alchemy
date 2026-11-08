@@ -372,6 +372,34 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
     expose_value=False,
     callback=_removed("--preview-only was removed: use `notebook-alchemy dry-run`."),
 )
+@click.option(
+    "-n",
+    "--notebook",
+    "old_notebook",
+    hidden=True,
+    expose_value=False,
+    callback=_removed(
+        "-n/--notebook was removed: give the YouTube link as the argument, and name the notebook with -N."
+    ),
+)
+@click.option(
+    "--sync",
+    "old_sync",
+    is_flag=True,
+    hidden=True,
+    expose_value=False,
+    callback=_removed("--sync was removed: `run` uploads by default; --save DIR keeps a local copy instead."),
+)
+@click.option(
+    "--write",
+    "old_write",
+    is_flag=True,
+    hidden=True,
+    expose_value=False,
+    callback=_removed(
+        "--write was removed: `run` uploads by default; --save DIR keeps a local copy instead."
+    ),
+)
 @profile_option
 @verbose_option
 @handle_errors
@@ -444,6 +472,15 @@ def run_pipeline(
         ui.success(f"Saved {_plural(len(paths), 'file')} to {ui.name(_short(save_dir))}.")
         return
 
+    if report.waiting:
+        # Uploading now would replace the notebook's books with ones missing these videos.
+        ui.warn(
+            f"{_plural(len(report.waiting), 'video')} still wait for Gemini, so nothing was uploaded and "
+            "the notebook is unchanged. Run the same command again to finish; the work done is kept.",
+            always=True,
+        )
+        return
+
     ui.step(3, total, "Uploading to NotebookLM")
     if confirmed is None:  # set whenever uploading
         raise AlchemyError("Nothing to upload to.")
@@ -479,7 +516,7 @@ def _show_build(report: BuildReport, engine: AlchemyEngine) -> None:
             f"left out as outdated: {len(lib.removed_outdated)}"
         )
     for note in report.notices:
-        ui.warn(esc(note))
+        ui.warn(esc(note), always=True)
 
 
 def _show_sync_result(name: str, synced) -> None:
@@ -918,7 +955,11 @@ def setup() -> None:
     save("ALCHEMY_NOTEBOOKLM_PROFILE", profile)
 
     ui.success("Setup is complete.")
-    ui.info(f"  Uploads go to {_who(identity)}.")
+    if client.session_file() is None:
+        ui.info("  Not signed in to NotebookLM yet.")
+        ui.next_command("sign in", f"notebook-alchemy login --profile {profile}")
+    else:
+        ui.info(f"  Uploads go to {_who(identity)}.")
     ui.info("  AI sorting is " + ("on." if entered or config.has_gemini_key else "off (no Gemini key)."))
     ui.detail(f"  Saved {esc(', '.join(saved))} to {esc(_short(env_file))}.")
     ui.next_command("preview a channel", "notebook-alchemy dry-run <youtube-url>")
@@ -1046,11 +1087,13 @@ def clean_pipeline(
         library = engine.home / "library"
         for f in sorted(library.glob("*.json")) if library.is_dir() else []:
             (targets.append(("labels", f)) if isinstance(_json(f), dict) else skipped.append(str(f)))
+        if (engine.home / "batch.json").is_file():  # a batch still running at Google is forgotten too
+            targets.append(("labels", engine.home / "batch.json"))
     if do_records:
         records_dir = engine.sync_records_dir()
         for f in sorted(records_dir.glob("*.json")) if records_dir.is_dir() else []:
             (targets.append(("record", f)) if _is_sync_record(f) else skipped.append(str(f)))
-        for f in (consent_file(), engine.notebooks_path(), engine.home / "batch.json"):
+        for f in (consent_file(), engine.notebooks_path()):
             if f.is_file():
                 targets.append(("record", f))
     if do_vaults:

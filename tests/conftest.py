@@ -168,7 +168,13 @@ class FakeNotebookLM:
             for url in [a for a in args[2:] if a.startswith("http")]:
                 vid = url.rsplit("v=", 1)[-1]
                 bucket.append(
-                    {"id": self._new_id("yt"), "title": f"Video {vid}", "url": url, "status": "ready"}
+                    {
+                        "id": self._new_id("yt"),
+                        "title": f"Video {vid}",
+                        "url": url,
+                        "status": "ready",
+                        "type": "youtube",
+                    }
                 )
             return done({"queued": True})
         if verb == "fulltext":

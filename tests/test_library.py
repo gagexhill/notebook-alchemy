@@ -93,6 +93,7 @@ def test_old_news_is_dropped_old_rules_are_marked_and_undated_ones_are_left_alon
 
 def test_consolidation_orders_removes_duplicates_and_superseded_and_loses_nothing_else() -> None:
     ps = [_passage(f"v{i}:1") for i in range(5)]
+    ps[2].kind, ps[2].published = "rule", "2024-01-01"  # an older rule that the others, newer, replace
     answer = json.dumps(
         {"intro": "Start here.", "order": [3, 0, 99, 3], "duplicates": {"1": 0}, "superseded": [2]}
     )
@@ -219,3 +220,27 @@ def test_a_word_the_model_dropped_stays() -> None:
     labels = VideoLabels("v", "k", "m", [Segment(1, 1, True, "C", text=dropped)])
     text = build_passages("v", "T", "", [Chunk("v", 1, raw)], labels)[0].text
     assert "business" in text and text.startswith("The CAGE code") and text.endswith("register.")
+
+
+def test_superseded_only_removes_an_older_time_sensitive_passage() -> None:
+    lasting = [_passage("a:1", "lasting", "2024-01-01"), _passage("b:1", "rule", "2026-01-01")]
+    _i, ordered, _d, removed = apply_consolidation(json.dumps({"superseded": [0]}), lasting)
+    assert removed == [] and len(ordered) == 2  # a principle is never "replaced"
+    newest = [_passage("a:1", "rule", "2026-05-01"), _passage("b:1", "rule", "2024-01-01")]
+    _i, ordered, _d, removed = apply_consolidation(json.dumps({"superseded": [0]}), newest)
+    assert removed == []  # nothing newer stays, so the newest rule is kept
+    _i, ordered, _d, removed = apply_consolidation(json.dumps({"superseded": [1]}), newest)
+    assert [p.id for p in removed] == ["b:1"]
+
+
+def test_a_chunk_the_model_never_saw_is_kept_even_inside_a_dropped_segment() -> None:
+    chunks = [Chunk("v", n, f"chunk {n}") for n in range(1, 6)]
+    labels = VideoLabels("v", "k", "m", [Segment(1, 5, False)], seen=[1, 2, 4, 5])  # 3 was hidden then
+    passages = build_passages("v", "T", "", chunks, labels)
+    assert [p.text for p in passages] == ["chunk 3"]
+
+
+def test_the_library_cache_is_saved_as_each_answer_arrives(tmp_path: Path) -> None:
+    cache = RequestCache(tmp_path / "lib.json")
+    cache.put("k", "v")
+    assert RequestCache(tmp_path / "lib.json").get("k") == "v"
