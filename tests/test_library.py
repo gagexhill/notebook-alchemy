@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path
 
+import notebook_alchemy.library as library_module
 from notebook_alchemy.cleanup import Chunk
 from notebook_alchemy.gemini import GeminiResult
 from notebook_alchemy.knowledge import Segment, VideoLabels
@@ -21,6 +22,8 @@ from notebook_alchemy.library import (
     apply_consolidation,
     apply_date_rules,
     build_passages,
+    merge_map,
+    parse_extension,
 )
 from notebook_alchemy.writer import OVERVIEW_TITLE, SOURCE_WORD_LIMIT, render_library, render_topic
 
@@ -113,14 +116,23 @@ def test_a_duplicate_loop_keeps_one_passage() -> None:
 
 
 class SortingGemini:
+    """Places "p*" videos in Pricing and "s*" in SAM.gov; "x*" fit nowhere until the map is extended."""
+
     model = "gemini-test"
 
-    def __init__(self) -> None:
+    def __init__(self, new_section: str = "Extras", places_x: bool = True) -> None:
         self.prompts: list[str] = []
+        self.new_section, self.places_x = new_section, places_x
+
+    def asked(self, phrase: str) -> list[str]:
+        return [p for p in self.prompts if phrase in p]
 
     def generate(self, prompt: str, **kw) -> GeminiResult:
         assert kw.get("allow_fallback") is False
         self.prompts.append(prompt)
+        if "fit none of them" in prompt:
+            added = {"name": "Bidding", "sections": [{"name": self.new_section, "about": "the rest"}]}
+            return GeminiResult(json.dumps({"topics": [added]}), "STOP")
         if "study library" in prompt:
             return GeminiResult(
                 json.dumps(
@@ -137,13 +149,22 @@ class SortingGemini:
                 ),
                 "STOP",
             )
+        if "has grown to" in prompt:
+            return GeminiResult(json.dumps({"subsections": ["Alpha", "Beta"]}), "STOP")
         if "Place each numbered passage" in prompt:
-            # passages of videos "p*" go to Pricing, "s*" to SAM.gov; "x*" is left unplaced
-            out = {
-                n: 1 if pid.startswith("p") else 0
-                for n, pid in re.findall(r"^(\d+): Point (\w+):", prompt, re.MULTILINE)
-                if not pid.startswith("x")
-            }
+            points = re.findall(r"^(\d+): Point (\w+):", prompt, re.MULTILINE)
+            if "0: Alpha" in prompt:  # subsections: odd-numbered videos go to Beta
+                out = {n: int(pid[1:]) % 2 for n, pid in points}
+                return GeminiResult(json.dumps({"assignments": out}), "STOP")
+            sections = re.findall(r"^(\d+): \w+ / (.+?) —", prompt, re.MULTILINE)
+            index = {name: int(i) for i, name in sections}
+            out = {}
+            for n, pid in points:
+                if pid.startswith("x"):
+                    if self.places_x and "Extras" in index:
+                        out[n] = index["Extras"]
+                else:
+                    out[n] = index["Pricing"] if pid.startswith("p") else index["SAM.gov"]
             return GeminiResult(json.dumps({"assignments": out}), "STOP")
         nums = re.findall(r"^(\d+): \[", prompt, re.MULTILINE)
         return GeminiResult(json.dumps({"intro": "About this.", "order": [int(n) for n in nums]}), "STOP")
@@ -163,6 +184,108 @@ def test_the_builder_sorts_consolidates_and_reuses_every_answer(tmp_path: Path) 
         [_passage(p.id) for p in passages], ["t1", "t2"]
     )
     assert len(gemini.prompts) == asked and len(again.topics) == 3  # a rerun asks nothing
+
+
+def _build(tmp_path: Path, gemini: SortingGemini, ids: list[str]) -> Library:
+    cache = RequestCache(tmp_path / "library.json")
+    return LibraryBuilder(gemini, cache, TODAY, "Kizzy Parks").build([_passage(i) for i in ids], ["t1"])
+
+
+def _ids(library: Library) -> dict[str, list[str]]:
+    return {f"{t.name}/{s.name}": [p.id for p in s.passages] for t in library.topics for s in t.sections}
+
+
+XS = [f"x{i}:1" for i in range(1, 7)]  # more unplaced passages than EXTEND_AT_LEAST
+
+
+def test_passages_that_fit_nowhere_extend_the_map_and_nothing_else_moves(tmp_path: Path) -> None:
+    gemini = SortingGemini()
+    library = _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
+    assert _ids(library) == {
+        "Registration/SAM.gov": ["s1:1"],
+        "Bidding/Pricing": ["p1:1"],
+        "Bidding/Extras": XS,
+    }
+    assert len(gemini.asked("fit none of them")) == 1 and len(gemini.asked("You are organising")) == 1
+    replaced = gemini.asked("Place each numbered passage")[-1]
+    assert "Point s1:1" not in replaced and "Point x1:1" in replaced  # only the unplaced are asked again
+    asked = len(gemini.prompts)
+    _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
+    assert len(gemini.prompts) == asked  # a rerun asks nothing
+
+
+def test_passages_that_still_fit_nowhere_do_not_extend_the_map_again(tmp_path: Path) -> None:
+    gemini = SortingGemini(new_section="Unrelated", places_x=False)
+    library = _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
+    assert _ids(library)[f"{MISC}/{MISC}"] == XS
+    asked = len(gemini.prompts)
+    _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
+    assert len(gemini.prompts) == asked and len(gemini.asked("fit none of them")) == 1
+
+
+def test_a_new_video_is_placed_without_moving_or_re_sorting_the_rest(tmp_path: Path) -> None:
+    gemini = SortingGemini()
+    _build(tmp_path, gemini, ["s1:1", "p1:1"])
+    before = len(gemini.prompts)
+    library = _build(tmp_path, gemini, ["s1:1", "p1:1", "s2:1"])
+    new = gemini.prompts[before:]
+    assert not any("study library" in p for p in new)  # the map is kept
+    placed = [p for p in new if "Place each numbered passage" in p]
+    assert len(placed) == 1 and "Point s2:1" in placed[0] and "Point s1:1" not in placed[0]
+    ordered = [p for p in new if "Place each" not in p]
+    assert len(ordered) == 1 and "Pricing" not in ordered[0]  # only the section that changed
+    assert _ids(library)["Registration/SAM.gov"] == ["s1:1", "s2:1"]
+
+
+def test_resort_rebuilds_the_map(tmp_path: Path) -> None:
+    gemini = SortingGemini()
+    _build(tmp_path, gemini, ["s1:1", "p1:1"])
+    cache = RequestCache(tmp_path / "library.json")
+    LibraryBuilder(gemini, cache, TODAY, "Kizzy Parks").build([_passage("s1:1")], ["t1"], resort=True)
+    assert len(gemini.asked("You are organising")) == 2
+
+
+def test_a_large_section_is_divided_into_subsections_once(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(library_module, "SUBSECTION_AT", 3)
+    gemini = SortingGemini()
+    library = _build(tmp_path, gemini, [f"s{i}:1" for i in range(1, 6)])
+    assert _ids(library) == {
+        "Registration/SAM.gov: Alpha": ["s2:1", "s4:1"],
+        "Registration/SAM.gov: Beta": ["s1:1", "s3:1", "s5:1"],
+    }
+    before = len(gemini.prompts)
+    library = _build(tmp_path, gemini, [f"s{i}:1" for i in range(1, 7)])
+    new = gemini.prompts[before:]
+    assert not any("has grown to" in p for p in new)  # the names are kept
+    assert _ids(library)["Registration/SAM.gov: Alpha"] == ["s2:1", "s4:1", "s6:1"]
+    assert sum("0: Alpha" in p for p in new) == 1 and "Point s1:1" not in next(
+        p for p in new if "0: Alpha" in p
+    )
+
+
+def test_extending_the_map_keeps_every_existing_topic_and_section() -> None:
+    topics = [
+        Topic("Bidding", [Section("Pricing", about="prices")]),
+        Topic("Registration", [Section("SAM.gov")]),
+    ]
+    additions = parse_extension(
+        json.dumps(
+            {
+                "topics": [
+                    {"name": "bidding", "sections": [{"name": "pricing", "about": "x"}, {"name": "Teaming"}]},
+                    {"name": "Hiring", "sections": [{"name": "Recruiters"}]},
+                    {"name": MISC, "sections": [{"name": "Junk"}]},
+                ]
+            }
+        )
+    )
+    merged = merge_map(topics, additions)
+    assert [(t.name, [s.name for s in t.sections]) for t in merged] == [
+        ("Bidding", ["Pricing", "Teaming"]),
+        ("Registration", ["SAM.gov"]),
+        ("Hiring", ["Recruiters"]),
+    ]
+    assert merged[0].sections[0].about == "prices"
 
 
 # --- the books --------------------------------------------------------------------------------------
@@ -244,3 +367,11 @@ def test_the_library_cache_is_saved_as_each_answer_arrives(tmp_path: Path) -> No
     cache = RequestCache(tmp_path / "lib.json")
     cache.put("k", "v")
     assert RequestCache(tmp_path / "lib.json").get("k") == "v"
+
+
+def test_an_extension_that_adds_nothing_asks_nothing_more(tmp_path: Path) -> None:
+    gemini = SortingGemini(new_section="Pricing")  # names only a section that already exists
+    builder = LibraryBuilder(gemini, RequestCache(tmp_path / "library.json"), TODAY, "Kizzy Parks")
+    builder.build([_passage(i) for i in ["s1:1", "p1:1", *XS]], ["t1"])
+    assert len(gemini.asked("Place each numbered passage")) == 1
+    assert any("No new topics" in n for n in builder.notices)
