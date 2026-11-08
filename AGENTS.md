@@ -31,6 +31,12 @@ to propose a change; this file covers what a change must keep true.
   to about 32,000 characters). NotebookLM can reset a source title to its file name after processing, so
   a sync waits, corrects titles, and reads the notebook back before it reports success.
 - Text that comes from outside (titles, errors, paths) is passed through `ui.esc` before Rich prints it.
+- Output follows Google's `gcloud` conventions, through the helpers in `ui.py`: everyday words by
+  default (topic, document, part, documents folder; never domain, compendium, volume or vault outside
+  the code), detail such as paths, tokens and models through `ui.detail` (shown with `-v`), names in
+  `[brackets]` (`ui.name`), `Warning:` and `Error:` on stderr, a next step as a command to run
+  (`ui.next_command`), and yes/no questions as `Do you want to continue (y/N)?`. Say "sign in", not
+  "log in", and do not write "please".
 - Model names live in `config.py`; prices and model capabilities live in `gemini.py`.
 
 ## Validation

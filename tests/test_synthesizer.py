@@ -139,7 +139,7 @@ def test_offline_compendium_is_honest_and_links_real_files() -> None:
         related_domains=[("JS_Basics", "JS Basics")],
     )
     text = comp.content
-    assert "Offline index" in text and "No transcripts were read" in text
+    assert "Video list only" in text and "No captions were read" in text
     assert "notebooklm.google.com" not in text  # synthetic id gets no dead link
     assert SECTION_RELATED in text and "[[JS_Basics|JS Basics]]" in text
     for canned in (
@@ -194,8 +194,8 @@ def test_live_failure_falls_back_to_the_offline_index_with_a_warning() -> None:
     synth = Synthesizer(api_key=KEY, gemini=FakeGemini(GeminiError("quota")), transcripts=FakeTranscripts())
     comp = synth.synthesize_cluster("D", _videos(2))
     assert not comp.is_live_synthesized
-    assert "Offline index" in comp.content
-    assert any("quota" in w and "offline index" in w for w in comp.warnings)
+    assert "Video list only" in comp.content
+    assert any("quota" in w and "titles and links instead" in w for w in comp.warnings)
 
 
 def test_a_volume_without_any_transcript_is_an_index_and_asks_gemini_nothing() -> None:
@@ -206,7 +206,7 @@ def test_a_volume_without_any_transcript_is_an_index_and_asks_gemini_nothing() -
         api_key=KEY, gemini=fake, transcripts=FakeTranscripts(missing=missing)
     ).synthesize_cluster("D", videos)
     assert comp.title_only and not comp.is_live_synthesized and fake.prompts == []
-    assert "Offline index" in comp.content and comp.warnings == []  # reported once per run, by the engine
+    assert "Video list only" in comp.content and comp.warnings == []  # reported once per run, by the engine
 
 
 def test_a_volume_with_some_transcripts_is_still_synthesized() -> None:
@@ -237,8 +237,8 @@ def test_index_and_catalog() -> None:
     synth = Synthesizer(api_key="")
     comps = [synth.synthesize_cluster("Dom A", _videos(2), force_offline=True)]
     index = synth.generate_index(comps, notebook_title='Chan "X"', total_sources=2)
-    assert 'title: "Chan \\"X\\" - Master Compendium Index"' in index
-    assert "offline index" in index and "Dom A" in index
+    assert 'title: "Chan \\"X\\" - Overview"' in index
+    assert "video list" in index and "Dom A" in index
     catalog = synth.generate_master_sources_catalog(
         [{"id": "a", "title": "P|Q", "url": "https://u", "topic": "Dom A"}], notebook_title="Chan"
     )
@@ -256,6 +256,15 @@ def test_append_updates_count_and_keeps_related_section() -> None:
     assert re.search(r"^source_count: 3$", updated, re.MULTILINE)
     assert updated.index("[Added] [New](https://u)") < updated.index(SECTION_RELATED)
     assert synth.append_to_domain_compendium(base, [], domain="Dom") == base
+
+
+def test_append_keeps_the_related_section_of_a_document_written_before_the_rename() -> None:
+    synth = Synthesizer(api_key="")
+    base = synth.synthesize_cluster(
+        "Dom", _videos(2), force_offline=True, related_domains=[("Other", "Other")]
+    ).content.replace(SECTION_RELATED, "## Related Domains")
+    updated = synth.append_to_domain_compendium(base, [{"id": "n1", "title": "New"}], domain="Dom")
+    assert updated.index("[Added] New") < updated.index("## Related Domains")
 
 
 @pytest.mark.parametrize("key", ["", "your_gemini_api_key_here", "short"])

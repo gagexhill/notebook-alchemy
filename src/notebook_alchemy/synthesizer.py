@@ -20,7 +20,8 @@ from .gemini import GeminiClient
 
 logger = logging.getLogger(__name__)
 
-SECTION_RELATED = "## Related Domains"
+SECTION_RELATED = "## Related Topics"
+LEGACY_RELATED = "## Related Domains"  # documents written before 2026-11
 # Prompt budget in characters (about 4 per token): well inside a 1M-token context window.
 MAX_PROMPT_CHARS = 1_600_000
 MAX_CHARS_PER_VIDEO = 60_000
@@ -184,10 +185,10 @@ class Synthesizer:
                 title_only = True
             except GeminiError as exc:
                 if self._gemini is not None:
-                    warnings.extend(f"{domain} (Vol. {volume}): {n}" for n in self._gemini.drain_notices())
+                    warnings.extend(f"{domain} (Part {volume}): {n}" for n in self._gemini.drain_notices())
                 warnings.append(
-                    f"{domain} (Vol. {volume}): live synthesis failed ({exc.message}); "
-                    "wrote the offline index instead."
+                    f"{domain} (Part {volume}): the summary failed ({exc.message}), so this document "
+                    "lists titles and links instead."
                 )
         if not is_live:
             content = self._offline_compendium(
@@ -216,11 +217,12 @@ class Synthesizer:
         notebook_id: str,
         mode: str,
     ) -> str:
-        vol_label = f" (Vol. {volume})" if volume > 1 else ""
+        vol_label = f" (Part {volume})" if volume > 1 else ""
         tag = safe_filename(domain).lower().replace("_", "-")
+        kind = "Topic Summary" if mode.startswith("gemini") else "Video List"
         lines = [
             "---",
-            f"title: {yaml_str(f'{domain}{vol_label} - Domain Compendium')}",
+            f"title: {yaml_str(f'{domain}{vol_label} - {kind}')}",
             f"domain: {yaml_str(domain)}",
             f"volume: {volume}",
             f"notebook_title: {yaml_str(notebook_title)}",
@@ -264,11 +266,11 @@ class Synthesizer:
         warnings: list[str],
         progress: ProgressFn | None,
     ) -> str:
-        label = f"{domain} (Vol. {volume})"
+        label = f"{domain} (Part {volume})"
         items = [(str(v.get("id") or v.get("source_id") or ""), str(v.get("title") or "")) for v in videos]
         results: dict[str, TranscriptResult] = self._transcript_manager().fetch_many(
             items,
-            progress=(lambda d, t: progress(f"Reading transcripts: {label}", d, t)) if progress else None,
+            progress=(lambda d, t: progress(f"Reading captions: {label}", d, t)) if progress else None,
         )
 
         per_video = max(1_000, min(MAX_CHARS_PER_VIDEO, MAX_PROMPT_CHARS // max(len(videos), 1)))
@@ -329,9 +331,9 @@ class Synthesizer:
         if fenced:
             body = fenced.group(1).strip()
 
-        vol_label = f" (Vol. {volume})" if volume > 1 else ""
+        vol_label = f" (Part {volume})" if volume > 1 else ""
         link = notebook_url(notebook_id)
-        header = f"# {domain}{vol_label} — Domain Compendium\n\n"
+        header = f"# {domain}{vol_label} — Topic Summary\n\n"
         if link:
             header += f"> **Source Notebook:** [{notebook_title}]({link}) | **Sources:** {len(videos)}\n\n"
         return (
@@ -360,20 +362,21 @@ class Synthesizer:
         related: list[tuple[str, str]],
     ) -> str:
         """A title-only index. It states plainly that nothing was summarized."""
-        vol_label = f" (Vol. {volume})" if volume > 1 else ""
+        vol_label = f" (Part {volume})" if volume > 1 else ""
         sample = "; ".join(str(v.get("title") or "Untitled") for v in videos[:3])
         more = f" (+{len(videos) - 3} more)" if len(videos) > 3 else ""
         offline_note = (
-            "> **Offline index.** No transcripts were read and no summary was generated. Run without "
-            "`--offline` and with `GEMINI_API_KEY` set to synthesize this volume.\n"
+            "> **Video list only.** No captions were read and no summary was written. A summary needs "
+            "a Gemini API key (`notebook-alchemy setup`) and videos with captions; run the same "
+            "command again without `--offline` to try.\n"
         )
-        body = [f"# {domain}{vol_label} — Domain Compendium (Offline Index)\n", offline_note]
+        body = [f"# {domain}{vol_label} — Video List\n", offline_note]
         link = notebook_url(notebook_id)
         if link:
             body.append(f"> **Source Notebook:** [{notebook_title}]({link})\n")
         body += [
             "## 1. Summary\n",
-            f'This volume indexes {len(videos)} videos grouped under "{domain}": {sample}{more}.\n',
+            f'This document lists {len(videos)} videos about "{domain}": {sample}{more}.\n',
             "## 2. Video Index\n",
         ]
         for i, v in enumerate(videos, 1):
@@ -402,12 +405,12 @@ class Synthesizer:
         """Table of contents for every generated volume."""
         live = sum(1 for c in compendiums if c.is_live_synthesized)
         summary_line = (
-            f"> {total_sources} videos grouped into {len(compendiums)} compendium volumes "
-            f"({live} synthesized with Gemini, {len(compendiums) - live} offline indexes).\n"
+            f"> {total_sources} videos sorted into {len(compendiums)} documents "
+            f"({live} summarized with Gemini, {len(compendiums) - live} video lists).\n"
         )
         lines = [
             "---",
-            f"title: {yaml_str(f'{notebook_title} - Master Compendium Index')}",
+            f"title: {yaml_str(f'{notebook_title} - Overview')}",
             f"notebook_title: {yaml_str(notebook_title)}",
             f"total_compendiums: {len(compendiums)}",
             f"total_sources_distilled: {total_sources}",
@@ -415,15 +418,15 @@ class Synthesizer:
             f"generator: {yaml_str(f'Notebook Alchemy v{__version__}')}",
             "---",
             "",
-            f"# {notebook_title} — Master Compendium Index\n",
+            f"# {notebook_title} — Overview\n",
             summary_line,
-            "## Compendiums\n",
-            "| Compendium | Volume | Videos | Est. Tokens | Mode | File |",
+            "## Documents\n",
+            "| Topic | Part | Videos | Est. Tokens | Contents | File |",
             "| :-- | :-: | :-: | :-: | :-- | :-- |",
         ]
         for c in compendiums:
             filename = c.relative_path.split("/")[-1]
-            mode = "gemini" if c.is_live_synthesized else "offline index"
+            mode = "summary" if c.is_live_synthesized else "video list"
             lines.append(
                 f"| **{c.domain}** | {c.volume} | {len(c.titles)} | ~{c.token_count:,} | {mode} "
                 f"| [{filename}]({filename}) |"
@@ -448,9 +451,9 @@ class Synthesizer:
             "  - master-source-ledger",
             "---",
             "",
-            f"# {notebook_title} — Master Source Catalog (Immutable Ledger)\n",
-            f"> Ledger of all {len(videos)} source videos. Appended entries are marked `+`.\n",
-            "| # | Source ID | Video Title | Domain | URL |",
+            f"# {notebook_title} — Master Source Catalog\n",
+            f"> Every one of the {len(videos)} source videos. Videos added later are marked `+`.\n",
+            "| # | Source ID | Video Title | Topic | URL |",
             "| :-: | :-: | :-- | :-- | :-- |",
         ]
         for i, v in enumerate(videos, 1):
@@ -485,9 +488,10 @@ class Synthesizer:
             heading = f"[{title}]({url})" if url else title
             entries.append(
                 f"\n### [Added] {heading}\n- **Source ID:** `{v.get('id') or f'new_src_{i}'}`\n"
-                f"- **Domain:** {domain}\n"
+                f"- **Topic:** {domain}\n"
             )
         block = "\n".join(entries)
-        if SECTION_RELATED in updated:
-            return updated.replace(SECTION_RELATED, f"{block}\n{SECTION_RELATED}", 1)
+        for heading in (SECTION_RELATED, LEGACY_RELATED):
+            if heading in updated:
+                return updated.replace(heading, f"{block}\n{heading}", 1)
         return updated.rstrip("\n") + "\n" + block

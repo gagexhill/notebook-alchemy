@@ -58,8 +58,9 @@ class VaultManager:
             if had_old and backup.exists() and not final.exists():
                 backup.rename(final)
             raise VaultError(
-                f"Could not write the vault directory {final}: {exc}",
-                hint="Close programs that have files in it open (editors, sync tools) and retry.",
+                f"Could not write the documents folder {final}: {exc}",
+                hint="Close programs that have files in it open (editors, sync tools) and run the command "
+                "again.",
             ) from exc
         if had_old:
             try:

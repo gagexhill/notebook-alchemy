@@ -1,4 +1,9 @@
-"""Command line interface for Notebook Alchemy."""
+"""Command line interface for Notebook Alchemy.
+
+Output follows Google's command-line conventions (gcloud): everyday words by default, detail behind
+-v, "Warning:" and "Error:" prefixes on stderr, resource names in [brackets], next steps written as a
+command to run, and confirmations asked as "Do you want to continue (y/N)?".
+"""
 
 from __future__ import annotations
 
@@ -15,11 +20,10 @@ from pathlib import Path
 from textwrap import shorten
 
 import click
-from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__, ui
-from .analyzer import DryRunReport
+from .analyzer import NO_KEY_NOTE, DryRunReport
 from .channel import CHANNEL_TABS, DEFAULT_TABS, video_id_from_url
 from .client import (
     AccountIdentity,
@@ -38,16 +42,19 @@ from .config import (
 )
 from .engine import AlchemyEngine
 from .errors import AlchemyError, ConfigError, NotebookLMError, SessionError, VaultError
+from .gemini import THINKING_NOTE
 from .synthesizer import (
     CATALOG_FILENAME,
     INDEX_FILENAME,
 )
 from .ui import esc, handle_errors
 
-MOCK_NOTE = (
-    "This run uses the bundled sample catalog, not a real source. Its output is for trying the tool "
-    "and is never uploaded to NotebookLM."
+MOCK_NOTE = "This is sample data for trying the tool. It is never uploaded to NotebookLM."
+NO_KEY_WARNING = (
+    "No Gemini API key is set, so documents list titles and links without summaries. "
+    "Add one with `notebook-alchemy setup`."
 )
+NOTEBOOKLM_URL = "https://notebooklm.google.com"
 
 
 class OrderedGroup(click.Group):
@@ -80,10 +87,49 @@ def _interactive() -> bool:
     return sys.stdin.isatty()
 
 
+def _ask(question: str, *, default: bool = False) -> bool:
+    """A yes/no question in gcloud's form: `Do you want to continue (y/N)?`."""
+    return click.confirm(
+        f"{question} ({'Y/n' if default else 'y/N'})?", default=default, show_default=False, prompt_suffix=" "
+    )
+
+
+def _plural(count: int, word: str) -> str:
+    if count == 1:
+        return f"{count} {word}"
+    if word.endswith("y") and word[-2:-1] not in "aeiou":
+        return f"{count} {word[:-1]}ies"
+    return f"{count} {word}s"
+
+
+def _money(usd: float) -> str:
+    if usd <= 0:
+        return "$0.00"
+    return "less than $0.01" if usd < 0.005 else f"about ${usd:.2f}"
+
+
+def _more_detail(_ctx: click.Context, _param: click.Parameter, value: int) -> int:
+    """`-v` after a command works like `-v` before it: show detail (and -vv debug logs)."""
+    if value:
+        ui.UiState.verbose = max(ui.UiState.verbose, value)
+        if not ui.UiState.quiet:
+            logging.getLogger().setLevel(logging.DEBUG if ui.UiState.verbose > 1 else logging.INFO)
+    return value
+
+
+verbose_option = click.option(
+    "-v",
+    "--verbose",
+    count=True,
+    expose_value=False,
+    callback=_more_detail,
+    help="Show more detail (-vv adds debug logs).",
+)
+
 profile_option = click.option(
     "-p",
     "--profile",
-    help="notebooklm profile (Google account) to use. Default: ALCHEMY_NOTEBOOKLM_PROFILE or 'default'.",
+    help="Name of the signed-in Google account to upload to (see `login`). Default: 'default'.",
 )
 
 
@@ -98,31 +144,38 @@ def _cookie_browser(_ctx: click.Context, _param: click.Parameter, value: str | N
     return f"{base}{sep}{rest}"  # the browser lower-cased, its profile name as typed
 
 
-def _account_text(identity: AccountIdentity) -> str:
-    """Markup-safe description of the upload account. Unknown is said plainly, never guessed."""
-    where = f"session file {identity.storage}" if identity.storage else f"profile {identity.profile}"
+def _who(identity: AccountIdentity) -> str:
+    """The upload account, markup-safe. Unknown is said plainly, never guessed."""
     if identity.email:
-        return f"{esc(identity.email)} [dim]({esc(where)})[/dim]"
-    reason = f"; {identity.detail}" if identity.detail else ""
-    return f"unknown [dim]({esc(where)}{esc(reason)})[/dim]"
+        return ui.name(identity.email)
+    if identity.storage:
+        return "the Google account in the session file"
+    return f"the Google account signed in to profile {ui.name(identity.profile)}"
+
+
+def _where(identity: AccountIdentity) -> str:
+    return f"session file {identity.storage}" if identity.storage else f"profile {identity.profile}"
 
 
 def _show_upload_target(engine: AlchemyEngine) -> AccountIdentity:
     identity = engine.client.upload_account()
-    ui.info(f"  Upload account: {_account_text(identity)}")
     limits = engine.client.plan_limits()
+    extras = []
+    if not identity.storage and identity.profile != "default":
+        extras.append(f"profile {esc(identity.profile)}")
     if limits and limits.source_limit:
-        ui.info(f"  NotebookLM plan: {esc(limits.plan)}, up to {limits.source_limit} sources per notebook")
-    else:
-        ui.info(
-            "  NotebookLM plan: unknown (the source limit could not be read; it is checked again at upload)"
-        )
+        extras.append(f"NotebookLM {esc(limits.plan)}, up to {limits.source_limit} sources per notebook")
+    ui.info(f"Uploads go to {_who(identity)}" + (f" ({'; '.join(extras)})" if extras else "") + ".")
+    ui.detail(f"  Account read from {esc(_where(identity))}.")
+    if not (limits and limits.source_limit):
+        ui.detail("  NotebookLM plan: unknown; the source limit is checked again at upload.")
     if not identity.email:
-        ui.info(
-            "  [dim]Record it with `notebook-alchemy login --account <email> --browser-cookies chrome`"
-            " or `notebook-alchemy setup`.[/dim]"
+        reason = f" ({esc(identity.detail)})" if identity.detail else ""
+        ui.warn(f"The sign-in did not record which Google account it is{reason}.", always=True)
+        ui.next_command(
+            "record it",
+            f"notebook-alchemy login --profile {identity.profile} --browser-cookies chrome --account <email>",
         )
-    ui.info(f"  Gemini API key: {'set' if engine.config.has_gemini_key else 'not set'}")
     return identity
 
 
@@ -133,21 +186,18 @@ def _confirm_first_upload(identity: AccountIdentity, yes: bool) -> None:
     """
     if yes or upload_confirmed(identity):
         return
-    target = f"profile '{identity.profile}' ({identity.display} Google account)"
     first = "an upload" if identity.email is None else "the first upload"
     if not _interactive():
         raise SessionError(
-            f"This is {first} to NotebookLM {target}, and it needs your confirmation.",
+            f"This is {first} to {identity.display} in NotebookLM (profile '{identity.profile}'), "
+            "and it needs your confirmation.",
             hint=(
-                "Run the command in a terminal to confirm, or pass --yes. Record the account with "
-                "`notebook-alchemy login --browser-cookies chrome --account <email>` so it is asked "
-                "only once."
+                "Run the command in a terminal to confirm, or add --yes. To be asked only once, record "
+                "the account: `notebook-alchemy login --browser-cookies chrome --account <email>`."
             ),
         )
-    ui.console.print(
-        f"\n[bold]Upload to NotebookLM {esc(target)}.[/bold] Notebooks will be created in that account."
-    )
-    if not click.confirm("Upload to this account?", default=False):
+    ui.console.print(f"\nNotebooks will be created in {_who(identity)}.")  # shown even with -q
+    if not _ask("Do you want to continue"):
         raise AlchemyError(
             "Cancelled. Nothing was uploaded.",
             hint="Choose another account with --profile, or run `notebook-alchemy setup`.",
@@ -160,23 +210,35 @@ def _same_account_as_confirmed(engine: AlchemyEngine, confirmed: AccountIdentity
     now = engine.client.upload_account()
     if (now.email or "").casefold() != (confirmed.email or "").casefold():
         raise SessionError(
-            f"The upload account changed during the build: it was {confirmed.display}, "
-            f"now it is {now.display}. Nothing was uploaded.",
-            hint="The files are built; check the account with `notebook-alchemy status`, then run "
-            "`notebook-alchemy sync` to upload them.",
+            f"The upload account changed while the documents were being written: it was "
+            f"{confirmed.display}, now it is {now.display}. Nothing was uploaded.",
+            hint="The documents are saved. Check the account with `notebook-alchemy status`, then "
+            "upload them with `notebook-alchemy sync`.",
         )
 
 
-def _gemini_usage_text(engine: AlchemyEngine) -> str:
+def _show_gemini_cost(engine: AlchemyEngine) -> None:
     """What Gemini actually used, as Google reported it, priced at today's listed rates."""
     rows = engine.gemini.usage() if engine.gemini else []
     if not rows:
-        return ""
-    lines = [
-        f"{esc(model)}: {tokens_in:,} input and {tokens_out:,} output tokens (about ${cost:.4f})"
-        for model, tokens_in, tokens_out, cost in rows
-    ]
-    return "\nGemini used " + "; ".join(lines) + " [dim](output includes thinking)[/dim]"
+        return
+    ui.info(f"  Gemini cost: {_money(sum(cost for *_rest, cost in rows))}")
+    for model, tokens_in, tokens_out, cost in rows:
+        ui.detail(
+            f"  {esc(model)}: {tokens_in:,} input and {tokens_out:,} output tokens (${cost:.4f}; "
+            "output includes thinking)"
+        )
+
+
+def _show_notes(notes: list[str]) -> None:
+    """Notes that need the reader's attention are warnings; background notes are detail."""
+    for note in notes:
+        if note == NO_KEY_NOTE:
+            continue  # the missing key is reported once, by the caller, with what to do about it
+        if note == THINKING_NOTE:
+            ui.detail(esc(note))  # the cost line already says "about"
+        else:
+            ui.warn(esc(note))
 
 
 def _parse_tabs(_ctx: click.Context, _param: click.Parameter, value: str) -> tuple[str, ...]:
@@ -203,16 +265,16 @@ def _last_words(text: str, limit: int = 300) -> str:
 
 
 def _check_planned_sources(engine: AlchemyEngine, report: DryRunReport, max_per_vol: int) -> None:
-    """Stop before the build, and before any Gemini spend, when the result cannot fit the plan."""
+    """Stop before writing, and before any Gemini spend, when the result cannot fit the plan."""
     limits = engine.client.plan_limits()
     if not limits or not limits.source_limit:
         return
     planned = sum(-(-len(v) // max_per_vol) for v in report.domain_videos.values()) + 2  # + index, catalog
     if planned > limits.source_limit:
         raise AlchemyError(
-            f"This build makes about {planned} sources, and the upload account's NotebookLM plan "
-            f"({limits.plan}) allows {limits.source_limit} per notebook. Nothing was built or uploaded.",
-            hint="Raise --max-per-vol for fewer, larger compendiums, or add --no-sync to build without "
+            f"This would make about {planned} sources, but a NotebookLM {limits.plan} notebook holds "
+            f"up to {limits.source_limit}. Nothing was built or uploaded.",
+            hint="Raise --max-per-vol for fewer, larger documents, or add --no-sync to build without "
             "uploading.",
         )
 
@@ -224,7 +286,7 @@ def _target(source: str | None, notebook: str | None, mock: bool) -> str:
     if mock:
         return "sample catalog"
     raise click.UsageError(
-        "Give a YouTube channel, playlist or video URL (or an existing notebook), or pass --mock "
+        "Give a YouTube channel, playlist or video URL (or an existing notebook), or add --mock "
         "to try the sample catalog.\n\nExample: notebook-alchemy dry-run https://www.youtube.com/@Hyperplexed"
     )
 
@@ -240,13 +302,13 @@ def _source_dir(engine: AlchemyEngine, notebook: str | None, source_dir: Path | 
     if source_dir:
         return source_dir
     if not notebook:
-        raise click.UsageError("Pass --notebook NAME (the source's name) or --source-dir PATH.")
+        raise click.UsageError("Add --notebook NAME (the source's name) or --source-dir PATH.")
     candidate = engine.vault.compendium_dir(notebook)
     if candidate.is_dir():
         return candidate
     available = [str(p.parent.name) for p in engine.vault.existing_compendium_dirs()]
     raise VaultError(
-        f"No compendiums found for '{notebook}' at {candidate}.",
+        f"No documents found for '{notebook}' at {candidate}.",
         hint=(
             "Available sources: " + ", ".join(available) + ". Use --source-dir with one of them."
             if available
@@ -255,7 +317,7 @@ def _source_dir(engine: AlchemyEngine, notebook: str | None, source_dir: Path | 
     )
 
 
-def _cost_line(report) -> str:
+def _cost_detail(report: DryRunReport) -> str:
     return (
         f"~{report.total_estimated_tokens:,} transcript tokens, estimated "
         f"${report.total_estimated_cost_usd:.4f} with {esc(report.model)}"
@@ -267,26 +329,26 @@ def _cost_line(report) -> str:
     context_settings={"help_option_names": ["-h", "--help"], "max_content_width": 100},
     epilog=(
         "\b\nFirst run:\n"
-        "  notebook-alchemy test                    check the install, no network needed\n"
-        "  notebook-alchemy setup                   Gemini key, NotebookLM account, vault\n"
-        "  notebook-alchemy dry-run <youtube-url>   preview videos, domains and cost\n"
-        "  notebook-alchemy run <youtube-url>       build compendiums (and upload them)\n"
+        "  notebook-alchemy test                    check that everything installed correctly\n"
+        "  notebook-alchemy setup                   add a Gemini key and choose the Google account\n"
+        "  notebook-alchemy dry-run <youtube-url>   preview videos, topics and cost\n"
+        "  notebook-alchemy run <youtube-url>       write the documents and upload them\n"
         "\nDocs: https://github.com/gagexhill/notebook-alchemy"
     ),
 )
 @click.version_option(version=__version__, prog_name="notebook-alchemy")
 @click.option("-q", "--quiet", is_flag=True, help="Only print errors and final results.")
-@click.option("-v", "--verbose", count=True, help="Show log output (-v) or debug detail (-vv).")
-@click.option("--no-color", is_flag=True, help="Disable colour (the NO_COLOR variable also works).")
+@click.option("-v", "--verbose", count=True, help="Show more detail (-vv adds debug logs).")
+@click.option("--no-color", is_flag=True, help="Turn off colour (the NO_COLOR variable also works).")
 @click.option("--debug", is_flag=True, help="Print full tracebacks for unexpected errors.")
 def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
-    """Notebook Alchemy: turn a YouTube channel into NotebookLM-ready domain compendiums.
+    """Notebook Alchemy: turn a YouTube channel into documents for Google NotebookLM.
 
-    It discovers every video, groups them into subject domains, synthesizes one document per
-    domain (with Gemini, or as an offline index), and uploads the set to a NotebookLM notebook so a
-    large archive fits in a few sources.
+    It finds every video, sorts them into topics, writes one document per topic (summarized with
+    Gemini, or as a list of titles and links), and uploads them to a NotebookLM notebook, so a large
+    channel fits in a few sources.
     """
-    ui.configure(quiet=quiet, no_color=no_color or bool(os.getenv("NO_COLOR")), debug=debug)
+    ui.configure(quiet=quiet, no_color=no_color or bool(os.getenv("NO_COLOR")), debug=debug, verbose=verbose)
     # -vv / -v / -q win; otherwise ALCHEMY_LOG_LEVEL (validated in AlchemyConfig) or warnings only.
     env_level = os.getenv("ALCHEMY_LOG_LEVEL", "").strip().upper()
     level = LOG_LEVELS.get(env_level, logging.WARNING)
@@ -308,29 +370,30 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
     epilog=(
         "\b\nExamples:\n"
         "  notebook-alchemy run https://www.youtube.com/@Hyperplexed\n"
-        "  notebook-alchemy run @Hyperplexed --no-sync          build locally, upload nothing\n"
-        '  notebook-alchemy run <url> -N "CSS Course" --yes     name the notebook, skip prompts\n'
+        "  notebook-alchemy run @Hyperplexed --no-sync          write the documents, upload nothing\n"
+        '  notebook-alchemy run <url> -N "CSS Course" --yes     name the notebook, skip questions\n'
         "  notebook-alchemy run --mock --no-sync                try the sample catalog\n"
     ),
 )
 @click.argument("source", required=False)
-@click.option("-n", "--notebook", help="YouTube URL or existing notebook (alternative to SOURCE).")
-@click.option("-N", "--notebook-name", help="Name for the destination NotebookLM notebook.")
-@click.option("--offline", is_flag=True, help="No Gemini calls: keyword clustering, offline indexes.")
+@click.option("-n", "--notebook", help="YouTube URL or existing notebook (instead of SOURCE).")
+@click.option("-N", "--notebook-name", help="Name for the NotebookLM notebook.")
+@click.option("--offline", is_flag=True, help="Don't use Gemini: group by title words, list titles only.")
 @click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real source.")
-@click.option("--limit", type=click.IntRange(min=1), help="Only scan the first N videos.")
+@click.option("--limit", type=click.IntRange(min=1), help="Only look at the first N videos.")
 @tabs_option
 @click.option(
     "--max-per-vol",
     type=click.IntRange(min=1),
     default=DEFAULT_MAX_PER_VOLUME,
     show_default=True,
-    help="Most videos per compendium; a larger domain is split into named subtopics.",
+    help="Most videos per document; a bigger topic is divided into named subtopics.",
 )
-@click.option("--write/--preview-only", default=True, help="Write the vault (default) or preview only.")
-@click.option("--sync/--no-sync", default=True, help="Upload to NotebookLM (default) or build locally.")
-@click.option("-y", "--yes", is_flag=True, help="Accept defaults without prompting.")
+@click.option("--write/--preview-only", default=True, help="Write the documents (default) or only preview.")
+@click.option("--sync/--no-sync", default=True, help="Upload to NotebookLM (default) or only write locally.")
+@click.option("-y", "--yes", is_flag=True, help="Accept defaults without asking.")
 @profile_option
+@verbose_option
 @handle_errors
 def run_pipeline(
     source: str | None,
@@ -346,55 +409,50 @@ def run_pipeline(
     yes: bool,
     profile: str | None,
 ) -> None:
-    """Distill a YouTube channel, playlist or video into domain compendiums."""
+    """Turn a YouTube channel, playlist or video into NotebookLM documents."""
     target = _target(source, notebook, mock)
     engine = _engine(profile)
     console = ui.console
 
-    if mock and sync:
-        sync = False
-        ui.warn("Sample data is never uploaded; continuing with --no-sync.")
-    do_sync = sync and write
-
+    do_sync = sync and write and not mock  # sample data is never uploaded
+    confirmed: AccountIdentity | None = None
     if do_sync:
-        with console.status("Checking your NotebookLM session..."):
+        with console.status("Checking your NotebookLM sign-in..."):
             session = engine.client.check_session()
         if not session.ok:
             raise SessionError(
                 session.detail,
-                hint="Run `notebook-alchemy login`, or add --no-sync to build files without uploading.",
+                hint="Sign in with `notebook-alchemy login`, or add --no-sync to write the documents "
+                "without uploading.",
             )
-        ui.success(f"NotebookLM session is active ({session.notebooks} notebook(s)).")
+        ui.detail(f"Signed in; {_plural(session.notebooks, 'notebook')} visible.")
         confirmed = _show_upload_target(engine)
         _confirm_first_upload(confirmed, yes)
 
     total_steps = 3 if do_sync else 2
     live = engine.config.has_gemini_key and not offline
 
-    ui.step(1, total_steps, "Discover and group videos")
+    ui.step(1, total_steps, "Finding videos")
     with ui.Reporter() as reporter:
         report = engine.analyzer_for(offline).generate_dry_run(
             target, use_mock=mock, limit=limit, tabs=tabs, max_per_section=max_per_vol, progress=reporter
         )
     if report.is_mock:
-        ui.banner("Sample data", MOCK_NOTE)
+        ui.warn(MOCK_NOTE, always=True)
     ui.info(
-        f"  [bold]{esc(report.notebook_title)}[/bold]: {len(report.youtube_videos)} videos in "
-        f"{len(report.domain_videos)} domains ({report.cluster_method} clustering)"
+        f"  {esc(report.notebook_title)}: {_plural(len(report.youtube_videos), 'video')} in "
+        f"{_plural(len(report.domain_videos), 'topic')}"
     )
-    ui.info(f"  {_cost_line(report)}")
-    ui.info(
-        "  Mode: "
-        + (
-            f"Gemini synthesis ({esc(engine.config.gemini_model)})"
-            if live
-            else "offline index (titles only, no summaries)"
-        )
+    if live:
+        ui.info(f"  Estimated cost: {_money(report.total_estimated_cost_usd)}")
+    ui.detail(f"  {_cost_detail(report)}; grouped by {report.cluster_method}")
+    ui.detail(
+        "  Documents: "
+        + (f"summarized with {esc(engine.config.gemini_model)}" if live else "titles and links, no summaries")
     )
     if not live and not offline:
-        ui.warn("GEMINI_API_KEY is not set, so volumes are offline indexes. See `notebook-alchemy status`.")
-    for note in report.notes:
-        ui.warn(esc(note))
+        ui.warn(NO_KEY_WARNING)
+    _show_notes(report.notes)
 
     if do_sync:
         _check_planned_sources(engine, report, max_per_vol)
@@ -402,11 +460,11 @@ def run_pipeline(
     final_name = notebook_name or report.notebook_title
     if do_sync and not notebook_name and not yes and sys.stdin.isatty():
         console.print()
-        final_name = click.prompt("NotebookLM notebook name", default=report.notebook_title).strip() or (
+        final_name = click.prompt("Notebook name", default=report.notebook_title).strip() or (
             report.notebook_title
         )
 
-    ui.step(2, total_steps, "Build compendiums")
+    ui.step(2, total_steps, "Writing documents")
     with ui.Reporter() as reporter:
         result = engine.run_distillation(
             force_offline=offline,
@@ -416,70 +474,77 @@ def run_pipeline(
             progress=reporter,
         )
 
-    table = Table(title="Compendiums", header_style="bold green", title_justify="left")
-    table.add_column("Domain", style="cyan", overflow="fold")
-    table.add_column("Vol", justify="right")
-    table.add_column("Videos", justify="right")
-    table.add_column("Tokens", justify="right")
-    table.add_column("Mode")
-    for c in result.compendiums:
-        table.add_row(
-            esc(c.domain),
-            str(c.volume),
-            str(len(c.titles)),
-            f"~{c.token_count:,}",
-            "gemini" if c.is_live_synthesized else ("index (no transcripts)" if c.title_only else "offline"),
-        )
-    console.print(table)
+    if ui.UiState.verbose:
+        table = Table(title="Documents", header_style="bold green", title_justify="left")
+        table.add_column("Topic", style="cyan", overflow="fold")
+        table.add_column("Part", justify="right")
+        table.add_column("Videos", justify="right")
+        table.add_column("Tokens", justify="right")
+        table.add_column("Contents")
+        for c in result.compendiums:
+            table.add_row(
+                esc(c.domain),
+                str(c.volume),
+                str(len(c.titles)),
+                f"~{c.token_count:,}",
+                "summary" if c.is_live_synthesized else "titles and links",
+            )
+        console.print(table)
+    partial = shortened = 0
     for w in result.warnings:
-        if w not in report.notes:
+        if w in report.notes:
+            continue
+        if "had no transcript" in w or "were shortened" in w:  # per document; summed up after the loop
+            partial += "had no transcript" in w
+            shortened += "were shortened" in w
+            ui.detail(esc(w))
+        else:
             ui.warn(esc(w))
-
-    where = (
-        f"{_short(result.vault_directory)}  (index: {INDEX_FILENAME})"
-        if result.vault_directory
-        else "not written (--preview-only)"
-    )
-    console.print(
-        Panel(
-            f"[bold]{result.total_compendiums}[/bold] compendiums from "
-            f"[bold]{result.total_sources_scanned}[/bold] videos, ~{result.total_tokens:,} tokens\n"
-            f"Saved to: {esc(where)}" + _gemini_usage_text(engine),
-            title="Build complete",
-            border_style="green",
-            padding=(0, 2),
+    if partial:
+        ui.warn(
+            f"{_plural(partial, 'summary')} left out videos that had no captions; their titles and links "
+            "are still listed. Add -v to see which."
         )
+    if shortened:
+        ui.warn(
+            f"Long captions were shortened to fit in {_plural(shortened, 'summary')}. Lower --max-per-vol "
+            "to give each summary fewer videos."
+        )
+
+    count = _plural(result.total_compendiums, "document")
+    if result.vault_directory:
+        ui.success(f"Wrote {count} to {ui.name(_short(result.vault_directory))}.")
+    else:
+        ui.success(f"Prepared {count}; nothing was written (--preview-only).")
+    ui.detail(
+        f"  From {_plural(result.total_sources_scanned, 'video')}, ~{result.total_tokens:,} tokens; "
+        f"the overview is {INDEX_FILENAME}."
     )
+    _show_gemini_cost(engine)
 
     if do_sync:
-        ui.step(3, total_steps, f"Upload to NotebookLM: {final_name}")
-        if result.vault_directory is None:
+        ui.step(3, total_steps, "Uploading to NotebookLM")
+        if result.vault_directory is None or confirmed is None:  # confirmed is set whenever do_sync is
             raise AlchemyError("Nothing was written, so there is nothing to upload.")
         _same_account_as_confirmed(engine, confirmed)
         with ui.Reporter() as reporter:
             synced = engine.sync_to_notebooklm(final_name, result.vault_directory, progress=reporter)
-        action = "Created" if synced.created else "Updated"
-        console.print(
-            Panel(
-                f"{action} notebook [bold]{esc(final_name)}[/bold]\n"
-                f"Uploaded {synced.uploaded} files"
-                + (f", replaced {synced.replaced} existing sources" if synced.replaced else "")
-                + (f", removed {synced.pruned} stale sources from the earlier run" if synced.pruned else "")
-                + (
-                    "\nOld copies were removed first, to stay within the plan's source limit"
-                    if synced.freed_first
-                    else ""
-                )
-                + "\n\nOpen https://notebooklm.google.com to use Audio Overview, Study Guides and Quizzes.",
-                title="Upload complete",
-                border_style="green",
-                padding=(0, 2),
-            )
-        )
+        _show_sync_result(final_name, synced)
     elif write and not report.is_mock:
-        ui.info(
-            "\n[dim]Upload later with:[/dim] notebook-alchemy sync -n " + esc(f'"{report.notebook_title}"')
-        )
+        ui.next_command("upload these documents", f'notebook-alchemy sync -n "{report.notebook_title}"')
+
+
+def _show_sync_result(name: str, synced) -> None:
+    ui.success(f"{'Created' if synced.created else 'Updated'} notebook {ui.name(name)}.")
+    ui.detail(
+        f"  Uploaded {_plural(synced.uploaded, 'file')}"
+        + (f", replaced {synced.replaced} earlier copies" if synced.replaced else "")
+        + (f", removed {synced.pruned} sources from an earlier run" if synced.pruned else "")
+        + "."
+    )
+    if synced.freed_first:
+        ui.detail("  Earlier copies were removed first, to stay within the plan's source limit.")
+    ui.info(f"  Open it at {NOTEBOOKLM_URL}")
 
 
 # --- dry-run -------------------------------------------------------------------------------------
@@ -495,11 +560,12 @@ def run_pipeline(
     ),
 )
 @click.argument("source", required=False)
-@click.option("-n", "--notebook", help="YouTube URL or existing notebook (alternative to SOURCE).")
-@click.option("--limit", type=click.IntRange(min=1), help="Only scan the first N videos.")
+@click.option("-n", "--notebook", help="YouTube URL or existing notebook (instead of SOURCE).")
+@click.option("--limit", type=click.IntRange(min=1), help="Only look at the first N videos.")
 @tabs_option
-@click.option("--offline", is_flag=True, help="No Gemini calls: keyword clustering only.")
+@click.option("--offline", is_flag=True, help="Don't use Gemini: group by title words.")
 @click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real source.")
+@verbose_option
 @handle_errors
 def dry_run(
     source: str | None,
@@ -509,41 +575,47 @@ def dry_run(
     offline: bool,
     mock: bool,
 ) -> None:
-    """Preview videos, domains and cost. Writes and uploads nothing."""
+    """Preview videos, topics and cost. Writes and uploads nothing."""
     target = _target(source, notebook, mock)
     engine = _engine()
     console = ui.console
-    ui.info(f"[bold cyan]Analyzing[/bold cyan] {esc(target)}")
+    ui.info(f"Looking at {esc(target)}...")
     with ui.Reporter() as reporter:
         report = engine.analyzer_for(offline).generate_dry_run(
             target, use_mock=mock, limit=limit, tabs=tabs, progress=reporter
         )
     if report.is_mock:
-        ui.banner("Sample data", MOCK_NOTE)
+        ui.warn(MOCK_NOTE, always=True)
 
-    origin = {"youtube": "YouTube", "notebooklm": "NotebookLM notebook", "mock": "sample catalog"}[
-        report.origin
-    ]
+    origin = {"youtube": "YouTube", "notebooklm": "NotebookLM notebook", "mock": ""}[report.origin]
     total_videos = max(len(report.youtube_videos), 1)
-    summary = (
-        f"[bold]Source:[/bold] {esc(report.notebook_title)}"
-        + ("" if report.is_mock else f" [dim]({origin})[/dim]")
-        + "\n"
-        f"[bold]Videos:[/bold] {len(report.youtube_videos)}"
-        + (f"   [bold]Other sources:[/bold] {len(report.other_sources)}" if report.other_sources else "")
-        + f"\n[bold]Domains:[/bold] {len(report.domain_videos)} ({report.cluster_method} clustering)\n\n"
-        f"[bold]Transcript tokens:[/bold] ~{report.total_estimated_tokens:,}\n"
-        f"[bold]Input cost:[/bold] ${report.estimated_input_cost_usd:.4f}   "
-        f"[bold]Output cost:[/bold] ${report.estimated_synthesis_output_cost_usd:.4f}\n"
-        f"[bold]Gemini requests:[/bold] ~{report.estimated_gemini_requests} "
-        f"[dim](the free tier allows a limited number per day)[/dim]\n"
-        f"[bold green]Estimated total:[/bold green] ${report.total_estimated_cost_usd:.4f} "
-        f"[dim]({esc(report.model)}; an estimate from video length)[/dim]"
+    heading = f"\n[bold]{esc(report.notebook_title)}[/bold]"
+    console.print(heading + (f" [dim]({origin})[/dim]" if origin else ""))
+    console.print(
+        f"  {_plural(len(report.youtube_videos), 'video')} in {_plural(len(report.domain_videos), 'topic')}"
+        + (
+            f", plus {_plural(len(report.other_sources), 'other source')} that are not videos"
+            if report.other_sources
+            else ""
+        )
     )
-    console.print(Panel(summary, title="Dry run", border_style="cyan", padding=(0, 2)))
+    estimate = _money(report.total_estimated_cost_usd)
+    if engine.config.has_gemini_key and not offline:
+        console.print(f"  Estimated Gemini cost: {estimate}")
+    else:
+        console.print(f"  Cost: free without Gemini (titles and links only). With a Gemini key: {estimate}")
+    ui.detail(
+        f"  Transcript tokens: ~{report.total_estimated_tokens:,}; "
+        f"input ${report.estimated_input_cost_usd:.4f}, "
+        f"output ${report.estimated_synthesis_output_cost_usd:.4f} with {esc(report.model)}"
+    )
+    ui.detail(
+        f"  Gemini requests: ~{report.estimated_gemini_requests} (the free tier allows a limited "
+        f"number per day); grouped by {report.cluster_method}"
+    )
 
-    table = Table(title="Domains", header_style="bold green", title_justify="left")
-    table.add_column("Domain", style="cyan", overflow="fold")
+    table = Table(title="\nTopics", header_style="bold green", title_justify="left")
+    table.add_column("Topic", style="cyan", overflow="fold")
     table.add_column("Videos", justify="right")
     table.add_column("Share")
     table.add_column("Examples", style="dim", overflow="fold")
@@ -552,10 +624,11 @@ def dry_run(
         samples = "; ".join(esc(shorten(v.title, 50, placeholder="…")) for v in vids[:2])
         table.add_row(esc(domain), str(len(vids)), f"{'█' * max(1, round(share * 12))} {share:.0%}", samples)
     console.print(table)
-    for note in report.notes:
-        ui.warn(esc(note))
+    if not engine.config.has_gemini_key and not offline:
+        ui.warn(NO_KEY_WARNING)
+    _show_notes(report.notes)
     if not report.is_mock:
-        ui.info(f"\n[dim]Next:[/dim] notebook-alchemy run {esc(target)}")
+        ui.next_command("write the documents and upload them", f"notebook-alchemy run {target}")
 
 
 # --- status / login ------------------------------------------------------------------------------
@@ -563,57 +636,89 @@ def dry_run(
 
 @cli.command(name="status")
 @profile_option
+@verbose_option
 @handle_errors
 def status(profile: str | None) -> None:
-    """Check this install: NotebookLM CLI, upload account, Gemini key, vault and cache."""
+    """Show whether everything is ready: sign-in, Gemini key and where documents are saved."""
     engine = _engine(profile)
     facts = engine.status()
     identity = engine.client.upload_account()
     has_cli = not str(facts["notebooklm_cli"]).startswith("not found")
     has_session = not str(facts["session_file"]).startswith("none")
     has_key = facts["gemini_api_key"] == "set"
+    console = ui.console
 
-    table = Table(title="Notebook Alchemy", header_style="bold magenta", title_justify="left")
-    table.add_column("", width=1)
-    table.add_column("Check", style="bold")
-    table.add_column("Value", overflow="fold")
-    rows = [
-        (has_cli, "notebooklm CLI", esc(facts["notebooklm_cli"])),
-        (None, "NotebookLM profile", esc(facts["notebooklm_profile"])),
-        (has_session, "NotebookLM session file", esc(facts["session_file"])),
-        (bool(identity.email) if has_session else None, "Upload account", _account_text(identity)),
-        (has_key, "Gemini API key", esc(facts["gemini_api_key"])),
-        (None, "Gemini model", esc(facts["gemini_model"])),
-        (None, "Vault", esc(facts["vault_path"])),
-        (None, "Transcript cache", esc(facts["cache_dir"])),
-        (None, "Parallel fetches", esc(facts["max_concurrency"])),
-        (None, "Environment", esc(facts["environment"])),
-    ]
-    for ok, name, value in rows:
-        glyph = "[green]✓[/green]" if ok else "[red]✗[/red]" if ok is False else "[dim]-[/dim]"
-        table.add_row(glyph, name, value)
-    ui.console.print(table)
-    if has_key:
-        ui.console.print(f"[dim]{esc(KEY_BILLING_NOTE)}[/dim]")
+    def line(ok: bool, text: str) -> None:
+        console.print(("[green]✓[/green] " if ok else "[red]✗[/red] ") + text)
 
-    next_steps = []
     if not has_cli:
-        next_steps.append("pip install notebooklm-py")
+        line(False, "The notebooklm tool is not installed.")
     if not has_session:
-        next_steps.append("notebook-alchemy setup (or: notebook-alchemy login)")
+        line(False, "Not signed in to NotebookLM.")
+    else:
+        where = f" (profile {esc(identity.profile)})" if identity.profile != "default" else ""
+        if identity.email:
+            line(True, f"Uploads go to {ui.name(identity.email)}{where}.")
+        else:
+            line(False, f"Signed in to NotebookLM{where}, but the Google account was not recorded.")
+    if has_key:
+        line(True, "AI summaries are on (a Gemini API key is set).")
+    else:
+        line(False, "AI summaries are off (no Gemini API key), so documents list titles and links.")
+    console.print(f"  Documents are saved in {ui.name(facts['vault_path'])}")
+
+    if ui.UiState.verbose:
+        table = Table(title="\nSettings", header_style="bold magenta", title_justify="left")
+        table.add_column("", width=1)
+        table.add_column("Setting", style="bold")
+        table.add_column("Value", overflow="fold")
+        rows = [
+            (has_cli, "notebooklm tool", esc(facts["notebooklm_cli"])),
+            (None, "NotebookLM profile", esc(facts["notebooklm_profile"])),
+            (has_session, "Sign-in file", esc(facts["session_file"])),
+            (bool(identity.email) if has_session else None, "Upload account", _who(identity)),
+            (has_key, "Gemini API key", esc(facts["gemini_api_key"])),
+            (None, "Gemini model", esc(facts["gemini_model"])),
+            (None, "Documents folder", esc(facts["vault_path"])),
+            (None, "Caption cache", esc(facts["cache_dir"])),
+            (None, "Parallel downloads", esc(facts["max_concurrency"])),
+            (None, "Environment", esc(facts["environment"])),
+        ]
+        for ok, setting, value in rows:
+            glyph = "[green]✓[/green]" if ok else "[red]✗[/red]" if ok is False else "[dim]-[/dim]"
+            table.add_row(glyph, setting, value)
+        console.print(table)
+        if has_key:
+            console.print(f"[dim]{esc(KEY_BILLING_NOTE)}[/dim]")
+
+    if not has_cli:
+        ui.next_command("install the notebooklm tool", "pip install notebooklm-py")
+    if not has_session:
+        ui.next_command("sign in", "notebook-alchemy login")
     elif not identity.email:
-        next_steps.append(
-            "record the upload account: notebook-alchemy login --browser-cookies chrome --account <email>"
+        ui.next_command(
+            "record the Google account", "notebook-alchemy login --browser-cookies chrome --account <email>"
         )
     if not has_key:
-        next_steps.append(
-            "set GEMINI_API_KEY with `notebook-alchemy setup` for synthesized compendiums "
-            "(offline indexes work without it)"
-        )
-    if next_steps:
-        ui.console.print("\n[bold]Next:[/bold]\n" + "\n".join(f"  - {esc(s)}" for s in next_steps))
-    else:
-        ui.console.print("\n[green]Ready.[/green] A session file exists. `login --check` confirms it works.")
+        ui.next_command("turn on AI summaries", "notebook-alchemy setup")
+    if not ui.UiState.verbose:
+        ui.info("\n[dim]For every setting, run: notebook-alchemy status -v[/dim]")
+
+
+def _run_login(cmd: list[str], waiting: str, answer: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Run `notebooklm login` with its output captured. Its stdin gets `answer`, or is closed, so a
+    question it asks fails at once instead of waiting unseen behind the spinner."""
+    io: dict[str, object] = {"input": answer} if answer is not None else {"stdin": subprocess.DEVNULL}
+    try:
+        with ui.console.status(waiting):
+            return subprocess.run(  # type: ignore[call-overload]
+                cmd, check=False, capture_output=True, text=True, encoding="utf-8", **io
+            )
+    except FileNotFoundError as exc:
+        raise NotebookLMError(
+            "The notebooklm tool is not installed.",
+            hint="Install it with: pip install notebooklm-py",
+        ) from exc
 
 
 def _sign_in(
@@ -625,7 +730,11 @@ def _sign_in(
     timeout: int = 300,
     fresh: bool = False,
 ) -> AccountIdentity:
-    """Run `notebooklm login` for this profile, then read back which account it recorded."""
+    """Run `notebooklm login` for this profile, then read back which account it recorded.
+
+    notebooklm's own progress lines (profile, cookies, file paths) are captured, not shown: the
+    result is reported in one line, and the captured text explains a failure.
+    """
     if account and browser_cookies:
         # Check before signing in: a login with the wrong account would overwrite the profile.
         try:
@@ -644,29 +753,43 @@ def _sign_in(
                 ),
             )
     cmd = client.login_command()
+    override = client.storage_override()
+    ui.detail(
+        f"Signing in through {esc(f'session file {override}' if override else f'profile {client.profile}')}."
+    )
     if browser_cookies:
         cmd += ["--browser-cookies", browser_cookies]
         if account:
             cmd += ["--account", account]
-        override = client.storage_override()
-        into = f"session file {override}" if override else f"profile '{client.profile}'"
-        ui.info(f"Importing your {esc(browser_cookies)} sign-in into {esc(into)}...")
+        ui.info(f"Using your {esc(browser_cookies.split('::', 1)[0].title())} sign-in...")
+        waiting = "Reading the sign-in..."
     else:
         cmd += ["--browser", browser, "--browser-timeout", str(timeout)]
         if fresh:
             cmd.append("--fresh")
-        ui.info(f"A {browser} window will open. Sign in to Google; this closes by itself when done.")
-    try:
-        proc = subprocess.run(
-            cmd, check=False, capture_output=bool(browser_cookies), text=True, encoding="utf-8"
-        )
-    except FileNotFoundError as exc:
-        raise NotebookLMError(
-            "The `notebooklm` command was not found.",
-            hint="Install it with: pip install notebooklm-py",
-        ) from exc
+        ui.info("A browser window will open. Sign in with the Google account you want to upload to.")
+        waiting = "Waiting for you to finish signing in..."
+    proc = _run_login(cmd, waiting)
+    output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    if proc.returncode != 0 and " already has " in output and "Overwrite it with" in output:
+        # notebooklm asks before replacing a profile's account. Its question is captured (stdin is
+        # closed, so it cannot hang unseen); it is asked here instead, and answered on its behalf.
+        where = f"profile '{client.profile}'" if not override else "the session file"
+        if not _interactive():
+            raise SessionError(
+                f"{where.capitalize()} is already signed in to a different Google account. "
+                "Nothing was changed.",
+                hint="Run the command in a terminal to replace it, or sign in to a new profile with "
+                "--profile <name>.",
+            )
+        ui.console.print(f"{where.capitalize()} is already signed in to a different Google account.")
+        if not _ask("Do you want to replace it"):
+            raise AlchemyError(
+                "Cancelled. Nothing was changed.", hint="Use --profile <name> to keep both accounts."
+            )
+        proc = _run_login(cmd, waiting, answer="y\n")
     if proc.returncode != 0:
-        detail = ((proc.stderr or proc.stdout or "") if browser_cookies else "").strip()
+        detail = (proc.stderr or proc.stdout or "").strip()
         if browser_cookies:
             browser_name = browser_cookies.split("::", 1)[0]
             hint = (
@@ -695,14 +818,14 @@ def _sign_in(
                 f"{(browser_cookies or 'chrome').split('::', 1)[0]}` and sign in again before uploading."
             ),
         )
-    with ui.console.status("Confirming the session works..."):
+    with ui.console.status("Checking the sign-in..."):
         result = client.check_session()
     if not result.ok:
         raise SessionError(
-            f"Sign-in finished but the session check failed: {result.detail}",
+            f"Sign-in finished but the check that it works failed: {result.detail}",
             hint="Run `notebook-alchemy login` again.",
         )
-    ui.success(f"Signed in to NotebookLM. Upload account: {_account_text(identity)}.")
+    ui.success(f"You are now signed in as {_who(identity)}.")
     return identity
 
 
@@ -714,7 +837,7 @@ def _sign_in(
         "  notebook-alchemy login --browser-cookies chrome  reuse a Chrome sign-in, no window\n"
         "  notebook-alchemy login --browser-cookies chrome --account you@example.com --profile personal\n"
         "                                                pick one of several signed-in accounts\n"
-        "  notebook-alchemy login --check                is the stored session still valid?\n"
+        "  notebook-alchemy login --check                is the sign-in still working?\n"
     ),
 )
 @click.option(
@@ -722,7 +845,7 @@ def _sign_in(
     default="chromium",
     show_default=True,
     type=click.Choice(["chromium", "chrome", "msedge"]),
-    help="Browser to open for interactive sign-in.",
+    help="Browser to open for signing in.",
 )
 @click.option(
     "--browser-cookies",
@@ -736,8 +859,8 @@ def _sign_in(
         "it is checked after you sign in."
     ),
 )
-@click.option("--fresh", is_flag=True, help="Start the sign-in window with a clean browser session.")
-@click.option("--check", is_flag=True, help="Verify the stored session without signing in.")
+@click.option("--fresh", is_flag=True, help="Open the sign-in window without earlier browser data.")
+@click.option("--check", is_flag=True, help="Check the saved sign-in without signing in again.")
 @click.option(
     "--timeout",
     type=click.IntRange(min=30),
@@ -746,6 +869,7 @@ def _sign_in(
     help="Seconds to wait for you to finish signing in.",
 )
 @profile_option
+@verbose_option
 @handle_errors
 def login(
     browser: str,
@@ -756,16 +880,16 @@ def login(
     timeout: int,
     profile: str | None,
 ) -> None:
-    """Sign in to Google NotebookLM for one profile (uses the `notebooklm` CLI)."""
+    """Sign in to NotebookLM with the Google account to upload to."""
     client = NotebookLMClient(_config(profile))
     if check:
-        with ui.console.status("Checking your NotebookLM session..."):
+        with ui.console.status("Checking your NotebookLM sign-in..."):
             result = client.check_session()
         if not result.ok:
-            raise SessionError(result.detail, hint="Run `notebook-alchemy login`.")
+            raise SessionError(result.detail, hint="Sign in again with `notebook-alchemy login`.")
         identity = client.upload_account()
-        ui.success(f"Session is active ({result.notebooks} notebook(s) visible).")
-        ui.info(f"  Upload account: {_account_text(identity)}")
+        ui.success(f"You are signed in as {_who(identity)} ({_plural(result.notebooks, 'notebook')}).")
+        ui.detail(f"  Account read from {esc(_where(identity))}.")
         return
     _sign_in(
         client,
@@ -780,14 +904,15 @@ def login(
 @cli.command(
     name="setup",
     epilog=(
-        "\b\nRe-run it any time to change the key, the account or the vault.\n"
+        "\b\nRun it again any time to change the key, the account or the folder.\n"
         "Example:\n"
         "  notebook-alchemy setup\n"
     ),
 )
+@verbose_option
 @handle_errors
 def setup() -> None:
-    """Guided setup: Gemini API key, NotebookLM account and vault folder, saved to .env."""
+    """Guided setup: Gemini API key, Google account and documents folder."""
     if not _interactive():
         raise click.UsageError("setup asks questions, so run it in a terminal.")
     env_file = Path(".env")  # the file AlchemyConfig.from_env reads
@@ -812,13 +937,16 @@ def setup() -> None:
                 "Remove it from the environment to use what you entered here."
             )
 
-    ui.step(1, 3, "Gemini API key")
-    ui.info(f"  Currently: {'set' if config.has_gemini_key else 'not set'} (the key is never shown)")
-    ui.info(f"  [dim]{esc(KEY_BILLING_NOTE)}[/dim]")
-    ui.info("  [dim]Create a key at https://aistudio.google.com/apikey[/dim]")
+    ui.step(1, 3, "AI summaries (optional)")
+    ui.info("  Gemini writes a summary for each document. Without a key, documents list titles and links.")
+    ui.info(
+        "  " + ("A Gemini API key is saved." if config.has_gemini_key else "No Gemini API key is saved yet.")
+    )
+    ui.info("  Get a free key at https://aistudio.google.com/apikey")
+    ui.detail(f"  {esc(KEY_BILLING_NOTE)}")
     while True:
         entered = click.prompt(
-            "  Paste a new key, or press Enter to keep the current one",
+            "  Paste a key, or press Enter to skip",
             default="",
             show_default=False,
             hide_input=True,
@@ -828,19 +956,22 @@ def setup() -> None:
         ui.warn("That does not look like an API key. Try again, or press Enter to skip.")
     if entered:
         save("GEMINI_API_KEY", entered)
-        ui.success(f"Saved the key to {esc(_short(env_file))}.")
-    elif not config.has_gemini_key:
-        ui.warn("No key: compendiums will be offline indexes (titles only).")
+        ui.success("Key saved.")
+        ui.detail(f"  Saved to {esc(_short(env_file))}; the key is never shown.")
 
-    ui.step(2, 3, "NotebookLM account")
+    ui.step(2, 3, "Where to upload")
     ui.info(
-        "  [dim]Uploads go to the Google account of a notebooklm profile. It is independent of the "
-        "account that owns the Gemini key.[/dim]"
+        "  Choose the Google account your notebooks go to. It can differ from the account that made "
+        "the Gemini key."
     )
     while True:
         try:
             profile = validate_profile_name(
-                click.prompt("  Profile name", default=config.notebooklm_profile), source="profile"
+                click.prompt(
+                    "  A short name for this account, like personal or work",
+                    default=config.notebooklm_profile,
+                ),
+                source="profile",
             )
             break
         except ConfigError as exc:
@@ -848,10 +979,11 @@ def setup() -> None:
     config.notebooklm_profile = profile
     client = NotebookLMClient(config)
     identity = client.upload_account()
-    ui.info(f"  Signed in as: {_account_text(identity)}")
+    if identity.email:
+        ui.info(f"  Signed in as {_who(identity)}.")
     choice = click.prompt(
-        "  Sign in: reuse a browser's sign-in (cookies), open a sign-in window (window), or keep",
-        type=click.Choice(["cookies", "window", "keep"]),
+        "  Keep this account (keep), open a sign-in window (window), or reuse a browser's sign-in (cookies)",
+        type=click.Choice(["keep", "window", "cookies"]),
         default="keep" if identity.email else "cookies",
     )
     if choice == "cookies":
@@ -866,35 +998,30 @@ def setup() -> None:
         for email in emails:
             ui.info(f"    - {esc(email)}")
         account = click.prompt(
-            "  Google account email for uploads", default=emails[0] if len(emails) == 1 else None
+            "  Google account to upload to", default=emails[0] if len(emails) == 1 else None
         ).strip()
         identity = _sign_in(client, browser_cookies=browser_cookies, account=account)
     elif choice == "window":
-        _sign_in(client, fresh=click.confirm("  Start with a clean browser session?", default=True))
+        _sign_in(client, fresh=_ask("  Start without earlier browser data", default=True))
         identity = client.upload_account()
     save("ALCHEMY_NOTEBOOKLM_PROFILE", profile)
 
-    ui.step(3, 3, "Vault folder")
+    ui.step(3, 3, "Where to save documents")
     # The default is what .env already says (or "vault"), never the resolved path with the home folder.
     vault = click.prompt(
-        "  Where should compendiums be written?",
+        "  Folder for your documents",
         default=os.getenv("ALCHEMY_VAULT_PATH", "").strip() or "vault",
     )
     vault_path = Path(vault).expanduser().resolve()
     # Saved as typed (relative or ~/...), so .env does not carry the user's home folder name.
     save("ALCHEMY_VAULT_PATH", vault.strip())
 
-    ui.console.print(
-        Panel(
-            f"Gemini API key: {'set' if entered or config.has_gemini_key else 'not set'}\n"
-            f"Upload account: {_account_text(identity)}\n"
-            f"Vault: {esc(vault_path)}\n\n"
-            f"Saved {esc(', '.join(saved))} to {esc(_short(env_file))}.",
-            title="Setup complete",
-            border_style="green",
-            padding=(0, 2),
-        )
-    )
+    ui.success("Setup is complete.")
+    ui.info(f"  Uploads go to {_who(identity)}.")
+    ui.info("  AI summaries are " + ("on." if entered or config.has_gemini_key else "off (no Gemini key)."))
+    ui.info(f"  Documents are saved in {ui.name(vault)}.")
+    ui.detail(f"  {esc(vault_path)}; saved {esc(', '.join(saved))} to {esc(_short(env_file))}.")
+    ui.next_command("preview a channel", "notebook-alchemy dry-run <youtube-url>")
 
 
 # --- sync / append -------------------------------------------------------------------------------
@@ -912,34 +1039,31 @@ def setup() -> None:
 @click.option(
     "-n",
     "--notebook",
-    help="NotebookLM notebook to create or update (also selects the vault folder).",
+    help="NotebookLM notebook to create or update (also picks the documents folder).",
 )
 @click.option(
     "--source-dir",
     type=click.Path(file_okay=False, path_type=Path),
-    help="Folder of compendiums to upload (default: the vault folder named after --notebook).",
+    help="Folder of documents to upload (default: the folder named after --notebook).",
 )
-@click.option("-y", "--yes", is_flag=True, help="Do not ask before the first upload to an account.")
+@click.option("-y", "--yes", is_flag=True, help="Don't ask before the first upload to an account.")
 @profile_option
+@verbose_option
 @handle_errors
 def sync_to_notebooklm(notebook: str | None, source_dir: Path | None, yes: bool, profile: str | None) -> None:
-    """Upload built compendiums to a notebook, replacing same-titled sources."""
+    """Upload written documents to a notebook, replacing earlier copies."""
     engine = _engine(profile)
     directory = _source_dir(engine, notebook, source_dir)
     name = notebook or directory.parent.name
-    with ui.console.status("Checking your NotebookLM session..."):
+    with ui.console.status("Checking your NotebookLM sign-in..."):
         session = engine.client.check_session()
     if not session.ok:
-        raise SessionError(session.detail, hint="Run `notebook-alchemy login`, then sync again.")
+        raise SessionError(session.detail, hint="Sign in with `notebook-alchemy login`, then run sync again.")
     _confirm_first_upload(_show_upload_target(engine), yes)
-    ui.info(f"Uploading {esc(_short(directory))} to notebook [bold]{esc(name)}[/bold]")
+    ui.detail(f"Uploading {esc(_short(directory))}.")
     with ui.Reporter() as reporter:
         result = engine.sync_to_notebooklm(name, directory, progress=reporter)
-    ui.success(
-        f"{'Created' if result.created else 'Updated'} notebook '{esc(name)}': "
-        f"uploaded {result.uploaded}, replaced {result.replaced}"
-        + (f", removed {result.pruned} stale." if result.pruned else ".")
-    )
+    _show_sync_result(name, result)
 
 
 @cli.command(
@@ -950,27 +1074,28 @@ def sync_to_notebooklm(notebook: str | None, source_dir: Path | None, yes: bool,
         "--url https://youtu.be/dQw4w9WgXcQ\n"
     ),
 )
-@click.option("-n", "--notebook", help="Source name; selects the vault folder.")
-@click.option("--source-dir", type=click.Path(file_okay=False, path_type=Path), help="Compendium folder.")
+@click.option("-n", "--notebook", help="Source name; picks the documents folder.")
+@click.option("--source-dir", type=click.Path(file_okay=False, path_type=Path), help="Documents folder.")
 @click.option("--title", required=True, help="Title of the new video.")
 @click.option("--url", required=True, help="URL of the new video.")
-@click.option("--topic", help="Domain to file it under (default: clustered automatically).")
+@click.option("--topic", help="Topic to file it under (default: chosen automatically).")
+@verbose_option
 @handle_errors
 def append_video(
     notebook: str | None, source_dir: Path | None, title: str, url: str, topic: str | None
 ) -> None:
-    """Add one new video to the catalog and its domain compendium without a full rebuild."""
+    """Add one new video to its topic's document without rewriting everything."""
     engine = _engine()
     directory = _source_dir(engine, notebook, source_dir)
+    name = notebook or directory.parent.name
     video = {"id": video_id_from_url(url), "title": title, "url": url}
-    result = engine.append_incremental_sources(
-        [video], directory, domain=topic, notebook_title=notebook or directory.parent.name
-    )
+    result = engine.append_incremental_sources([video], directory, domain=topic, notebook_title=name)
     if result.added:
-        ui.success(f"Added to the catalog and updated: {esc(', '.join(result.updated_files))}")
-        ui.info("[dim]Run `notebook-alchemy sync` to upload the change.[/dim]")
+        ui.success(f"Added {ui.name(title)} and updated {_plural(len(result.updated_files), 'document')}.")
+        ui.detail(f"  Updated: {esc(', '.join(result.updated_files))}")
+        ui.next_command("upload the change", f'notebook-alchemy sync -n "{name}"')
     else:
-        ui.warn("That video is already in the catalog; nothing changed.")
+        ui.info("That video is already in the catalog, so nothing changed.")
 
 
 # --- clean / test --------------------------------------------------------------------------------
@@ -1017,29 +1142,30 @@ def _remove(path: Path) -> int:
     name="clean",
     epilog=(
         "\b\nExamples:\n"
-        "  notebook-alchemy clean                  clear the transcript cache\n"
-        "  notebook-alchemy clean --vaults         delete built compendiums (asks first)\n"
+        "  notebook-alchemy clean                  clear downloaded captions\n"
+        "  notebook-alchemy clean --vaults         delete written documents (asks first)\n"
         "  notebook-alchemy clean --records        forget past uploads and upload confirmations\n"
-        "  notebook-alchemy clean --all --yes      cache, vaults and records, without asking\n"
+        "  notebook-alchemy clean --all --yes      all of the above, without asking\n"
     ),
 )
 @click.option(
-    "--all", "clean_all", is_flag=True, help="Clear the cache, delete built vaults and local records."
+    "--all", "clean_all", is_flag=True, help="Clear captions, delete documents and forget past uploads."
 )
-@click.option("--cache", "clean_cache", is_flag=True, help="Clear the transcript cache.")
-@click.option("--vaults", "clean_vaults", is_flag=True, help="Delete built compendium folders.")
+@click.option("--cache", "clean_cache", is_flag=True, help="Clear downloaded captions.")
+@click.option("--vaults", "clean_vaults", is_flag=True, help="Delete written document folders.")
 @click.option(
     "--records",
     "clean_records",
     is_flag=True,
-    help="Delete the records of past uploads and upload confirmations.",
+    help="Forget past uploads and upload confirmations.",
 )
-@click.option("-y", "--yes", is_flag=True, help="Do not ask before deleting.")
+@click.option("-y", "--yes", is_flag=True, help="Don't ask before deleting.")
+@verbose_option
 @handle_errors
 def clean_pipeline(
     clean_all: bool, clean_cache: bool, clean_vaults: bool, clean_records: bool, yes: bool
 ) -> None:
-    """Remove the transcript cache, built vaults, or this tool's local records."""
+    """Remove downloaded captions, written documents, or this tool's upload records."""
     config = _config()
     engine = AlchemyEngine(config)
     do_vaults = clean_all or clean_vaults
@@ -1086,20 +1212,20 @@ def clean_pipeline(
     if ask:
         if cache_targets and custom_cache:
             ui.console.print(
-                f"[bold]{len(cache_targets)} cache files in a custom cache folder "
-                f"({esc(config.cache_dir)}) will be deleted.[/bold]"
+                f"{_plural(len(cache_targets), 'caption file')} in a custom cache folder "
+                f"{ui.name(config.cache_dir)} will be deleted."
             )
         if vault_targets:
-            ui.console.print("[bold]These built vault folders will be deleted:[/bold]")
+            ui.console.print("These document folders will be deleted:")
             for p in vault_targets:
                 ui.console.print(f"  {esc(p)}")
         if record_targets:
             ui.console.print(
-                f"[bold]{len(record_targets)} local records will be deleted[/bold] (the next sync cannot "
-                "remove sources an earlier sync uploaded, and the next upload asks for confirmation again)."
+                f"{len(record_targets)} local records will be deleted. Later syncs will not remove sources "
+                "that earlier syncs uploaded, and the next upload asks you to confirm the account again."
             )
-        if not click.confirm("Continue?", default=False):
-            ui.warn("Cancelled. Nothing was deleted.")
+        if not _ask("Do you want to continue"):
+            ui.info("Cancelled. Nothing was deleted.")
             return
 
     freed, failed = 0, []
@@ -1114,16 +1240,17 @@ def clean_pipeline(
 
     if failed:
         raise AlchemyError(
-            f"{len(failed)} items could not be deleted: " + "; ".join(failed[:3]),
+            f"{_plural(len(failed), 'item')} could not be deleted: " + "; ".join(failed[:3]),
             hint="Close programs using those files and run the command again.",
         )
-    ui.success(f"Removed {len(targets)} items, freed {ui.human_bytes(freed)}.")
+    ui.success(f"Removed {_plural(len(targets), 'item')} and freed {ui.human_bytes(freed)}.")
 
 
 @cli.command(name="test")
+@verbose_option
 @handle_errors
 def run_automated_test() -> None:
-    """Self-test the whole pipeline on sample data. No network, no credentials, nothing kept."""
+    """Check that everything installed correctly, using sample data. No network, nothing kept."""
     started = time.monotonic()
     cwd_vault = Path.cwd() / "vault"
     existed_before = cwd_vault.exists()
@@ -1151,11 +1278,11 @@ def run_automated_test() -> None:
         try:
             report = engine.analyzer_for(True).generate_dry_run("sample", use_mock=True)
             ok = len(report.youtube_videos) > 0
-            record("Sample catalog loads", ok, f"{len(report.youtube_videos)} sample videos")
+            record("Sample videos load", ok, f"{len(report.youtube_videos)} sample videos")
             domains = len(report.domain_videos)
-            record("Videos group into domains", domains >= 3, f"{domains} domains (keyword method)")
+            record("Videos sort into topics", domains >= 3, f"{domains} topics (title words)")
         except AlchemyError as exc:
-            record("Sample catalog loads", False, exc.message)
+            record("Sample videos load", False, exc.message)
 
         built = None
         if report:
@@ -1163,10 +1290,10 @@ def run_automated_test() -> None:
                 built = engine.run_distillation(force_offline=True, dry_run=report, write_to_vault=True)
                 ok = built.total_compendiums >= 3 and bool(built.index_path and built.index_path.exists())
                 record(
-                    "Compendiums build", ok, f"{built.total_compendiums} compendiums plus {INDEX_FILENAME}"
+                    "Documents are written", ok, f"{built.total_compendiums} documents plus {INDEX_FILENAME}"
                 )
             except AlchemyError as exc:
-                record("Compendiums build", False, exc.message)
+                record("Documents are written", False, exc.message)
 
         if built and built.vault_directory:
             files = [
@@ -1189,30 +1316,28 @@ def run_automated_test() -> None:
                 and report is not None
                 and rows == len(report.youtube_videos)
             )
-            record(
-                "Vault files are valid",
-                ok,
-                f"{valid}/{len(files)} compendiums, {rows} catalog rows",
-            )
+            record("Documents are valid", ok, f"{valid}/{len(files)} documents, {rows} catalog rows")
 
     left_behind = cwd_vault.exists() and not existed_before
     record("Nothing written outside the temp folder", not left_behind, "working directory untouched")
 
-    table = Table(title="Self-test", header_style="bold", title_justify="left")
-    table.add_column("", width=1)
-    table.add_column("Check", style="bold")
-    table.add_column("Result", style="dim", overflow="fold")
-    for name, ok, detail in results:
-        table.add_row("[green]✓[/green]" if ok else "[red]✗[/red]", name, esc(detail))
-    ui.console.print(table)
-
     elapsed = time.monotonic() - started
-    if all(ok for _n, ok, _d in results):
-        ui.success(f"All {len(results)} checks passed in {elapsed:.1f}s.")
+    passed = all(ok for _n, ok, _d in results)
+    if ui.UiState.verbose or not passed:
+        table = Table(title="Self-test", header_style="bold", title_justify="left")
+        table.add_column("", width=1)
+        table.add_column("Check", style="bold")
+        table.add_column("Result", style="dim", overflow="fold")
+        for check, ok, detail in results:
+            table.add_row("[green]✓[/green]" if ok else "[red]✗[/red]", check, esc(detail))
+        ui.console.print(table)
+    if passed:
+        ui.success(f"All {len(results)} checks passed in {elapsed:.1f}s. Notebook Alchemy is ready to use.")
     else:
         failed = sum(1 for _n, ok, _d in results if not ok)
-        ui.console.print(
-            f"\n[bold red]{failed} of {len(results)} checks failed.[/bold red] Run with --debug for detail."
+        ui.err_console.print(
+            f"[bold red]Error:[/bold red] {failed} of {len(results)} checks failed.\n"
+            "[bold]Next:[/bold] Run `notebook-alchemy --debug test` and include the output in a bug report."
         )
         sys.exit(1)
 

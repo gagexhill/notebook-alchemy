@@ -172,7 +172,7 @@ def test_colliding_vault_file_names_are_refused_before_writing(
     engine: AlchemyEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("notebook_alchemy.engine.unique_slugs", lambda ds: {d: "_INDEX" for d in ds})
-    with pytest.raises(VaultError, match="share a name"):
+    with pytest.raises(VaultError, match="share a file name"):
         engine.run_distillation(dry_run=_report_with_domains(engine, {"X": 1}), force_offline=True)
     assert not engine.vault.compendium_dir("Names").exists()
 
@@ -329,7 +329,7 @@ def test_sync_refuses_mock_output(engine: AlchemyEngine, tmp_path: Path) -> None
     engine.run_distillation(use_mock=True, force_offline=True)
     process = FakeProcess(("list", 0, LIST_NBS, ""))
     engine.client = NotebookLMClient(engine.config, runner=process)
-    with pytest.raises(AlchemyError, match="mock sample data"):
+    with pytest.raises(AlchemyError, match="sample data, which is never uploaded"):
         engine.sync_to_notebooklm("Chan", tmp_path / "vault" / MOCK_DIR / "compendiums")
     assert not any("source add" in " ".join(c) for c in process.calls)
 
@@ -459,7 +459,7 @@ def test_missing_transcripts_are_summarised_once_for_the_whole_run(engine: Alche
     ]
     lines = engine._transcript_summary(comps)
     assert len(lines) == 2
-    assert "40 videos" in lines[0] and "2 of 3 volumes" in lines[1]
+    assert "40 videos" in lines[0] and "2 of 3 documents" in lines[1]
     engine.transcripts.blocked_total = 0
     assert engine._transcript_summary(comps[2:]) == []
 
@@ -504,7 +504,7 @@ def test_a_sync_that_cannot_fit_the_plan_uploads_nothing(tmp_path: Path) -> None
     names = ("Alpha_Topics", "Beta_Topics", "Gamma_Topics")
     with pytest.raises(SyncError, match="would hold 5 sources") as err:
         _limited_engine(tmp_path, fake, 4).sync_to_notebooklm("Chan", _real_dir(tmp_path, names))
-    assert "Standard" in err.value.message and "allows 4" in err.value.message
+    assert "Standard" in err.value.message and "holds up to 4" in err.value.message
     assert not any("add" in call for call in fake.calls)
     assert fake.titles("Chan") == ["Another note", "Notes of my own"]
 
