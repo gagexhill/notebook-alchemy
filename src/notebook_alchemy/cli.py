@@ -63,6 +63,7 @@ class OrderedGroup(click.Group):
 
 
 SETUP_KEYS = ("GEMINI_API_KEY", "ALCHEMY_NOTEBOOKLM_PROFILE")
+KEY_URL = "https://aistudio.google.com/apikey"
 KEY_BILLING_NOTE = (
     "The key bills to the Google Cloud project it was created in (see aistudio.google.com/apikey). "
     "A Google AI subscription plan does not change Gemini API quota or billing."
@@ -279,9 +280,11 @@ def _removed(message: str) -> Callable[[click.Context, click.Parameter, Any], An
 
 @click.group(
     cls=OrderedGroup,
+    invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help"], "max_content_width": 100},
     epilog=(
         "\b\nFirst run:\n"
+        "  notebook-alchemy                         a guided first run: sign in, pick a channel, done\n"
         "  notebook-alchemy test                    check that everything installed correctly\n"
         "  notebook-alchemy setup                   add a Gemini key and choose the Google account\n"
         "  notebook-alchemy dry-run <youtube-url>   preview videos, words and cost\n"
@@ -294,11 +297,13 @@ def _removed(message: str) -> Callable[[click.Context, click.Parameter, Any], An
 @click.option("-v", "--verbose", count=True, help="Show more detail (-vv adds debug logs).")
 @click.option("--no-color", is_flag=True, help="Turn off colour (the NO_COLOR variable also works).")
 @click.option("--debug", is_flag=True, help="Print full tracebacks for unexpected errors.")
-def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
+@click.pass_context
+def cli(ctx: click.Context, quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
     """Notebook Alchemy: a YouTube channel's words, as topic books in a NotebookLM notebook.
 
     It reads what every video says, keeps each point once, sorts the points into topics and
     sections with Gemini, drops or marks what is out of date, and uploads one book per topic.
+    Run it with no command for a guided first run.
     """
     ui.configure(quiet=quiet, no_color=no_color or bool(os.getenv("NO_COLOR")), debug=debug, verbose=verbose)
     # -vv / -v / -q win; otherwise ALCHEMY_LOG_LEVEL (validated in AlchemyConfig) or warnings only.
@@ -312,6 +317,11 @@ def cli(quiet: bool, verbose: int, no_color: bool, debug: bool) -> None:
     logging.getLogger().setLevel(level)  # basicConfig is a no-op when handlers already exist
     for noisy in ("httpx", "httpcore", "yt_dlp", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    if ctx.invoked_subcommand is None:
+        if not _interactive():
+            click.echo(ctx.get_help())
+            return
+        ctx.invoke(guided)
 
 
 # --- run -----------------------------------------------------------------------------------------
@@ -939,6 +949,85 @@ def keep_signed_in(off: bool, profile: str | None) -> None:
     _offer_keep_signed_in(engine, True)
 
 
+def _prompt_for_key() -> str:
+    """A Gemini API key typed or pasted (hidden), or "" when skipped."""
+    while True:
+        entered = click.prompt(
+            "  Paste a key, or press Enter to skip", default="", show_default=False, hide_input=True
+        ).strip()
+        if not entered or is_usable_api_key(entered):
+            return entered
+        ui.warn("That does not look like an API key. Try again, or press Enter to skip.")
+
+
+def _looks_like_youtube(text: str) -> bool:
+    lowered = text.lower()
+    return text.startswith("@") or any(
+        host in lowered for host in ("youtube.com/", "youtu.be/", "youtube-nocookie.com/")
+    )
+
+
+@cli.command(name="start", hidden=True)
+@click.pass_context
+@handle_errors
+def guided(ctx: click.Context) -> None:
+    """The guided first run: sign in, choose how to sort, pick a channel, and build the notebook."""
+    if not _interactive():
+        raise click.UsageError("The guided run asks questions, so run it in a terminal.")
+    ui.console.print(
+        "[bold]Notebook Alchemy[/bold] turns a YouTube channel into topic books in a NotebookLM notebook.\n"
+        "Three steps; press Ctrl+C at any time to stop.\n"
+    )
+    config = _config()
+
+    ui.step(1, 3, "Sign in to NotebookLM")
+    client = NotebookLMClient(config)
+    signed_in = False
+    if client.is_authenticated():
+        with ui.console.status("Checking your NotebookLM sign-in..."):
+            signed_in = client.check_session().ok
+    if signed_in:
+        ui.success(f"Signed in as {_who(client.upload_account())}.")
+    else:
+        ui.info("  A browser window opens. Sign in with the Google account your notebooks should go to.")
+        if not _ask("Do you want to sign in now", default=True):
+            raise AlchemyError(
+                "Nothing was done: the notebook is made in your NotebookLM account, so it needs a sign-in.",
+                hint="Run `notebook-alchemy` again when you are ready.",
+            )
+        _sign_in(client)
+    _offer_keep_signed_in(AlchemyEngine(config), None)
+
+    ui.step(2, 3, "Sorting into topics (optional)")
+    if config.has_gemini_key:
+        ui.success("AI sorting is on: Gemini sorts each point into a topic and section.")
+    else:
+        ui.info(
+            "  Without a key, the books hold every video's words, grouped by title. With a free Gemini\n"
+            "  API key, Gemini sorts each point into topics and sections, and drops what is out of date."
+        )
+        if _ask("Do you want to add a free Gemini API key now", default=False):
+            ui.info(f"  Opening {KEY_URL} - sign in, choose Create API key, and copy it.")
+            click.launch(KEY_URL)
+            entered = _prompt_for_key()
+            if entered:
+                update_dotenv({"GEMINI_API_KEY": entered}, Path(".env"))
+                os.environ["GEMINI_API_KEY"] = entered  # this process; .env keeps it for next time
+                config = _config()
+                ui.success("Key saved. AI sorting is on.")
+        if not config.has_gemini_key:
+            ui.info("  Going on without AI sorting. Run `notebook-alchemy setup` to add a key later.")
+
+    ui.step(3, 3, "Choose a channel")
+    while True:
+        source = click.prompt("  Paste a YouTube channel, playlist or video link").strip()
+        if _looks_like_youtube(source):
+            break
+        ui.warn("That does not look like a YouTube link (for example https://www.youtube.com/@name).")
+    ctx.invoke(run_pipeline, source=source, offline=not config.has_gemini_key)
+    ui.next_command("add new videos when the channel posts", f"notebook-alchemy run {source}")
+
+
 @cli.command(
     name="setup",
     epilog=(
@@ -981,18 +1070,9 @@ def setup() -> None:
     ui.info(
         "  " + ("A Gemini API key is saved." if config.has_gemini_key else "No Gemini API key is saved yet.")
     )
-    ui.info("  Get a free key at https://aistudio.google.com/apikey")
+    ui.info(f"  Get a free key at {KEY_URL}")
     ui.detail(f"  {esc(KEY_BILLING_NOTE)}")
-    while True:
-        entered = click.prompt(
-            "  Paste a key, or press Enter to skip",
-            default="",
-            show_default=False,
-            hide_input=True,
-        ).strip()
-        if not entered or is_usable_api_key(entered):
-            break
-        ui.warn("That does not look like an API key. Try again, or press Enter to skip.")
+    entered = _prompt_for_key()
     if entered:
         save("GEMINI_API_KEY", entered)
         ui.success("Key saved.")
