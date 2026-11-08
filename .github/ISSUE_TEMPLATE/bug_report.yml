@@ -57,7 +57,7 @@ body:
     attributes:
       label: "Expected Behavior"
       description: "A clear description of what you expected to happen."
-      placeholder: "Notebook Alchemy should parse transcripts and produce 4 structured domain compendiums without crashing."
+      placeholder: "Notebook Alchemy should read the channel's videos and upload topic books without crashing."
     validations:
       required: true
   - type: textarea

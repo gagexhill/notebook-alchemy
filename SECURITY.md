@@ -14,7 +14,7 @@
 - The NotebookLM session is owned by the `notebooklm` CLI, which keeps it under
   `~/.notebooklm/profiles/<profile>/`. This tool reads the file's location, never its contents.
 - Document content reaches `notebooklm` as a temporary file, not on the command line.
-- `.gitignore` blocks `.env`, session and token files, and the local `vault/`. A pre-push hook scans
+- `.gitignore` blocks `.env`, session and token files, and the `vault/` folder older versions wrote. A pre-push hook scans
   pushed commits with gitleaks, and GitHub secret scanning with push protection is enabled.
 
 ## Reporting a Vulnerability

@@ -7,11 +7,21 @@ to propose a change; this file covers what a change must keep true.
 
 - `README.md` is the user guide. `OPERATIONS.md` is the maintainer runbook. `DEVLOG.md` records
   completed design decisions and why. Open work is a GitHub issue, never a document or an inline comment.
-- Source is `src/notebook_alchemy/`: `cli.py` (commands), `ui.py` (output), `engine.py` (orchestration),
-  `analyzer.py` (discovery, clustering, cost), `channel.py` (YouTube and transcripts), `synthesizer.py`
-  (compendiums), `client.py` (NotebookLM through the `notebooklm` CLI), `gemini.py` (Gemini API),
-  `vault.py` (local output), `config.py` (settings), `errors.py` (typed errors), `mock_data.py` (the
-  sample catalog behind `--mock`).
+- Source is `src/notebook_alchemy/`, in pipeline order:
+  - `channel.py`: YouTube scanning and every route to a video's words.
+  - `cleanup.py`: local cleanup, chunks and dedupe.
+  - `knowledge.py`: Gemini labels, cached per video.
+  - `library.py`: passages, topics, sections, consolidation and dates.
+  - `writer.py`: the topic books and overview.
+  - `engine.py`: the pipeline and the upload.
+  - `cli.py`: commands.
+  - `ui.py`: output.
+  - `client.py`: NotebookLM through the `notebooklm` CLI.
+  - `gemini.py`: the Gemini API, including batch mode.
+  - `offline.py`: the no-key path.
+  - `config.py`: settings.
+  - `errors.py`: typed errors.
+  - `mock_data.py`: the sample catalog behind `--mock`.
 
 ## Invariants
 
@@ -25,15 +35,22 @@ to propose a change; this file covers what a change must keep true.
 - Nothing identifying the user is stored that a feature does not need. The upload confirmation keeps a
   salted hash of the account email, not the email; nothing is sent anywhere except YouTube, the Gemini
   API and NotebookLM. No telemetry.
-- Vault output is written to a staging directory and swapped in whole (`vault.replace_dir`). Output is
-  namespaced `vault/<source-slug>/compendiums/`.
+- The books go only to NotebookLM: they are built in memory, written to a temporary file for each
+  upload, and not kept. A local copy is made only with `run --save DIR`. Working files (captions,
+  labels, sorting answers, upload records) live under `~/.notebook-alchemy/` and `clean` removes them.
+- The books hold the speakers' own words. Gemini labels, sorts and orders passages; it never writes the
+  passages, and punctuation it adds is used only when `knowledge.same_words` confirms the words are
+  unchanged. A kept chunk the model leaves unlabelled is kept, never dropped.
+- Every paid Gemini answer is cached by what the request saw (transcript, prompt version and model;
+  passages and taxonomy; section contents and month), so a rerun pays only for what changed. Labels are
+  never made by the fallback model (`allow_fallback=False`); a used-up daily quota stops the step and
+  the next run resumes.
 - Upload content goes to `notebooklm` as a file, never on the command line (Windows limits one argument
   to about 32,000 characters). NotebookLM can reset a source title to its file name after processing, so
-  a sync waits, corrects titles, and reads the notebook back before it reports success.
+  an upload waits, corrects titles, and reads the notebook back before it reports success.
 - Text that comes from outside (titles, errors, paths) is passed through `ui.esc` before Rich prints it.
 - Output follows Google's `gcloud` conventions, through the helpers in `ui.py`: everyday words by
-  default (topic, document, part, documents folder; never domain, compendium, volume or vault outside
-  the code), detail such as paths, tokens and models through `ui.detail` (shown with `-v`), names in
+  default (topic, book, section, passage; no internal terms), detail such as paths, tokens and models through `ui.detail` (shown with `-v`), names in
   `[brackets]` (`ui.name`), `Warning:` and `Error:` on stderr, a next step as a command to run
   (`ui.next_command`), and yes/no questions as `Do you want to continue (y/N)?`. Say "sign in", not
   "log in", and do not write "please".

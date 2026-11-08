@@ -26,7 +26,7 @@ from .channel import ChannelScanner, ChannelVideo, TranscriptManager, YtDlpSubti
 from .cleanup import Chunk, chunk_video, is_punctuated, mark_duplicates
 from .client import NotebookLMClient, SourceDocument, normalize_title
 from .config import CAPTION_BLOCK_PAUSE, AlchemyConfig
-from .errors import AlchemyError, ChannelScanError, SessionError, SyncError
+from .errors import AlchemyError, ChannelScanError, GeminiError, SessionError, SyncError
 from .gemini import GeminiClient, price_for
 from .knowledge import KnowledgeStore, Labeler, VideoText, label_key
 from .library import Library, LibraryBuilder, Passage, RequestCache, build_passages
@@ -333,7 +333,17 @@ class AlchemyEngine:
             builder = LibraryBuilder(
                 self.gemini, RequestCache(self.library_cache_path(channel)), today, channel
             )
-            library = builder.build(passages, list(titles.values()), resort=resort, progress=progress)
+            try:
+                library = builder.build(passages, list(titles.values()), resort=resort, progress=progress)
+            except GeminiError as exc:
+                if not exc.quota:
+                    raise
+                raise AlchemyError(
+                    f"Gemini's daily request quota is used up. {len(run.labels)} of {len(chunks)} videos are "
+                    "labelled and saved; nothing was uploaded.",
+                    hint="Run the same command again after the quota resets; it carries on from here. Enable "
+                    "billing on the key's Google Cloud project to finish in one run.",
+                ) from exc
             notices += builder.notices
         else:
             for vid, cs in chunks.items():

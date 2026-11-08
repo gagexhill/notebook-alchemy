@@ -3,7 +3,7 @@
 Playwright comes with the `notebooklm-py[browser]` dependency. GitHub has no API for the social
 preview, so the upload is a manual step in the repository settings (Settings, General, Social preview).
 
-Usage: python scripts/social_preview.py [--videos 52 --domains 6 --sources 8 --example @Hyperplexed]
+Usage: python scripts/social_preview.py [--videos 52 --topics 6 --sources 7 --example @Hyperplexed]
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ code{font-family:Consolas,"Cascadia Mono",monospace;color:var(--ink)}
 <div class="sub">Fit a whole YouTube channel in a few NotebookLM sources.</div></div>
 <div class="flow">
  <div class="node"><div class="n">{videos}</div><div class="l">videos</div></div><div class="arrow">&rarr;</div>
- <div class="node"><div class="n">{domains}</div><div class="l">domains</div></div><div class="arrow">&rarr;</div>
+ <div class="node"><div class="n">{domains}</div><div class="l">topic books</div></div><div class="arrow">&rarr;</div>
  <div class="node"><div class="n">{sources}</div><div class="l">sources</div></div>
  <div class="l" style="margin-left:18px;font-size:22px">example: {example}</div>
 </div>
@@ -51,14 +51,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--videos", type=int, default=52)
-    parser.add_argument("--domains", type=int, default=6)
-    parser.add_argument("--sources", type=int, default=8)
+    parser.add_argument("--topics", type=int, default=6)
+    parser.add_argument("--sources", type=int, default=7)  # the topic books plus the overview
     parser.add_argument("--example", default="@Hyperplexed")
     args = parser.parse_args()
 
     html = (
         TEMPLATE.replace("{videos}", str(args.videos))
-        .replace("{domains}", str(args.domains))
+        .replace("{domains}", str(args.topics))
         .replace("{sources}", str(args.sources))
         .replace("{example}", args.example)
     )

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .cleanup import Chunk
-from .knowledge import VideoLabels, same_words
+from .knowledge import VideoLabels, apply_punctuation
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +104,9 @@ def build_passages(
             continue
         also = sorted({v for c in kept for v in c.also_in})
         raw = " ".join(c.text for c in kept)
-        # The model's punctuated version is used only when it kept the speaker's words.
-        text = seg.text if seg.text and same_words(raw, seg.text) else raw
+        # The speaker's words, every one; punctuation and capitals come from the model's version
+        # wherever its words line up with them.
+        text = apply_punctuation(raw, seg.text) if seg.text else raw
         out.append(
             Passage(
                 id=f"{video_id}:{seg.start}",
