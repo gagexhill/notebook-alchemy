@@ -10,10 +10,12 @@
 # the desktop), and runs `notebook-alchemy test`. Running it again updates the install in place.
 #
 # It never asks for or stores a password, key or account, and writes only inside your home folder:
-# uv's own folders, the Playwright browser folder, the shortcut and the work folder named below.
+# uv's own folders, the Playwright browser folder, the shortcut, the work folder named below and
+# the shortcut's icon (~/.local/share/notebook-alchemy, or ~/Library/Application Support on macOS).
 #
 # Optional settings, read from the environment:
 #   ALCHEMY_INSTALL_SOURCE        what `uv tool install` installs (default: the source below)
+#   ALCHEMY_INSTALL_ICON_BASE     the folder URL the shortcut icon is downloaded from (default below)
 #   ALCHEMY_INSTALL_WORK_DIR      the folder the shortcut opens in, where settings (.env) and
 #                                 output are kept (default: "Notebook Alchemy" in your home folder)
 #   ALCHEMY_INSTALL_SHORTCUT_DIR  where the desktop shortcut goes (default: your desktop)
@@ -23,6 +25,8 @@
 # The source archive of the main branch on GitHub. An archive, not git+https, so git is not needed.
 # Once the package is on PyPI (issue #33) this becomes 'notebook-alchemy'.
 NOTEBOOK_ALCHEMY_SOURCE='https://github.com/gagexhill/notebook-alchemy/archive/refs/heads/main.tar.gz'
+# The generated icon package (scripts/brand_icons.py writes it from docs/brand/icon.svg).
+NOTEBOOK_ALCHEMY_ICON_BASE='https://raw.githubusercontent.com/gagexhill/notebook-alchemy/main/docs/brand/icons'
 
 # Everything is in functions and main runs on the last line, so a download cut short runs nothing.
 set -eu
@@ -105,15 +109,46 @@ linux_desktop_dir() {
   fi
 }
 
+# download_icon DEST: download the 512-pixel PNG icon to DEST. A failed download keeps the icon
+# from the last install if there is one; without either, it warns and returns 1, and the shortcut
+# keeps the system's default icon. It never stops the install.
+download_icon() {
+  dest=$1
+  url="${ALCHEMY_INSTALL_ICON_BASE:-$NOTEBOOK_ALCHEMY_ICON_BASE}"
+  url="${url%/}/icon-512.png"
+  part="$dest.download"
+  ok=
+  if command -v curl >/dev/null 2>&1; then
+    curl -fLsS -o "$part" "$url" && ok=1
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$part" "$url" && ok=1
+  fi
+  # A PNG starts with 89 50 4E 47; anything else (an error page) is not used.
+  if [ -n "$ok" ] && [ "$(od -An -tx1 -N4 "$part" | tr -d ' \n')" = 89504e47 ] && mv -f "$part" "$dest"; then
+    return 0
+  fi
+  rm -f "$part"
+  if [ -f "$dest" ]; then
+    warn "Could not download the shortcut icon from [$url]; using the one from the last install."
+    return 0
+  fi
+  warn "Could not download the shortcut icon from [$url]; the shortcut uses the default icon. Run this installer again later to add it."
+  return 1
+}
+
+# write_desktop_entry TARGET LAUNCHER [ICON]
 write_desktop_entry() {
   target=$1
   launcher=$2
+  icon=${3:-}
   {
     printf '[Desktop Entry]\n'
     printf 'Type=Application\n'
     printf 'Name=Notebook Alchemy\n'
     printf 'Comment=Turn a YouTube channel into NotebookLM sources\n'
     printf 'Exec=%s\n' "$(desktop_quote "$launcher")"
+    # Icon is a plain .desktop string, where only \ needs escaping.
+    if [ -n "$icon" ]; then printf 'Icon=%s\n' "$(printf '%s' "$icon" | sed 's/\\/\\\\/g')"; fi
     printf 'Terminal=true\n'
     printf 'Categories=Utility;\n'
   } >"$target" && chmod 755 "$target"
@@ -208,6 +243,18 @@ main() {
     mkdir -p "$shortcut_dir" || fail "Could not create the folder [$shortcut_dir]." 'Check that you can write to it, then run this installer again.'
     shortcut="$shortcut_dir/Notebook Alchemy.command"
     write_launcher "$shortcut" || fail "Could not write [$shortcut]." 'Check that you can write to that folder, then run this installer again.'
+    icon_dir="$HOME/Library/Application Support/notebook-alchemy"
+    if mkdir -p "$icon_dir" && download_icon "$icon_dir/notebook-alchemy.png"; then
+      # Finder shows a custom icon set through AppKit; osascript is part of macOS.
+      result=$(osascript -l JavaScript -e 'function run(argv) {
+          ObjC.import("AppKit");
+          var image = $.NSImage.alloc.initWithContentsOfFile(argv[0]);
+          if (image.isNil()) return "the icon file could not be read";
+          return $.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, argv[1], 0) ? "ok" : "macOS refused it";
+        }' "$icon_dir/notebook-alchemy.png" "$shortcut" 2>&1) || true
+      # The result is checked here, so an osascript failure is reported, not lost.
+      [ "$result" = ok ] || warn "Could not set the shortcut icon ($result); the shortcut uses the default icon."
+    fi
     say "Created [$shortcut]. Double-click it to open Notebook Alchemy in Terminal."
   else
     data_dir=${XDG_DATA_HOME:-$HOME/.local/share}
@@ -215,8 +262,10 @@ main() {
       'Check that you can write to it, then run this installer again.'
     launcher="$data_dir/notebook-alchemy/notebook-alchemy-launch"
     write_launcher "$launcher" || fail "Could not write [$launcher]." 'Check that you can write to that folder, then run this installer again.'
+    icon="$data_dir/notebook-alchemy/notebook-alchemy.png"
+    download_icon "$icon" || icon=
     entry="$data_dir/applications/notebook-alchemy.desktop"
-    write_desktop_entry "$entry" "$launcher" || fail "Could not write [$entry]." 'Check that you can write to that folder, then run this installer again.'
+    write_desktop_entry "$entry" "$launcher" "$icon" || fail "Could not write [$entry]." 'Check that you can write to that folder, then run this installer again.'
     say "Added Notebook Alchemy to your applications menu: [$entry]."
     desktop=$(linux_desktop_dir)
     if [ -d "$desktop" ]; then
