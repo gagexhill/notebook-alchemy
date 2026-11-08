@@ -19,6 +19,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__, ui
+from .analyzer import DryRunReport
 from .channel import CHANNEL_TABS, DEFAULT_TABS, video_id_from_url
 from .client import (
     AccountIdentity,
@@ -109,6 +110,13 @@ def _account_text(identity: AccountIdentity) -> str:
 def _show_upload_target(engine: AlchemyEngine) -> AccountIdentity:
     identity = engine.client.upload_account()
     ui.info(f"  Upload account: {_account_text(identity)}")
+    limits = engine.client.plan_limits()
+    if limits and limits.source_limit:
+        ui.info(f"  NotebookLM plan: {esc(limits.plan)}, up to {limits.source_limit} sources per notebook")
+    else:
+        ui.info(
+            "  NotebookLM plan: unknown (the source limit could not be read; it is checked again at upload)"
+        )
     if not identity.email:
         ui.info(
             "  [dim]Record it with `notebook-alchemy login --account <email> --browser-cookies chrome`"
@@ -192,6 +200,21 @@ def _last_words(text: str, limit: int = 300) -> str:
     """The end of a tool's output on one line: the cause is usually last, after progress notes."""
     flat = " ".join(text.split())
     return flat if len(flat) <= limit else "..." + flat[-limit:].split(" ", 1)[-1]
+
+
+def _check_planned_sources(engine: AlchemyEngine, report: DryRunReport, max_per_vol: int) -> None:
+    """Stop before the build, and before any Gemini spend, when the result cannot fit the plan."""
+    limits = engine.client.plan_limits()
+    if not limits or not limits.source_limit:
+        return
+    planned = sum(-(-len(v) // max_per_vol) for v in report.domain_videos.values()) + 2  # + index, catalog
+    if planned > limits.source_limit:
+        raise AlchemyError(
+            f"This build makes about {planned} sources, and the upload account's NotebookLM plan "
+            f"({limits.plan}) allows {limits.source_limit} per notebook. Nothing was built or uploaded.",
+            hint="Raise --max-per-vol for fewer, larger compendiums, or add --no-sync to build without "
+            "uploading.",
+        )
 
 
 def _target(source: str | None, notebook: str | None, mock: bool) -> str:
@@ -373,6 +396,9 @@ def run_pipeline(
     for note in report.notes:
         ui.warn(esc(note))
 
+    if do_sync:
+        _check_planned_sources(engine, report, max_per_vol)
+
     final_name = notebook_name or report.notebook_title
     if do_sync and not notebook_name and not yes and sys.stdin.isatty():
         console.print()
@@ -439,6 +465,11 @@ def run_pipeline(
                 f"Uploaded {synced.uploaded} files"
                 + (f", replaced {synced.replaced} existing sources" if synced.replaced else "")
                 + (f", removed {synced.pruned} stale sources from the earlier run" if synced.pruned else "")
+                + (
+                    "\nOld copies were removed first, to stay within the plan's source limit"
+                    if synced.freed_first
+                    else ""
+                )
                 + "\n\nOpen https://notebooklm.google.com to use Audio Overview, Study Guides and Quizzes.",
                 title="Upload complete",
                 border_style="green",

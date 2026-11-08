@@ -6,6 +6,7 @@ success for work that did not happen.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import importlib.metadata
@@ -46,6 +47,27 @@ class SourceDocument:
     source_id: str
     title: str
     content: str
+
+
+# NotebookLM's subscription tier ids are opaque enum keys, not a ranking (notebooklm-py
+# `AccountLimits.tier`, per support.google.com/notebooklm/answer/16213268).
+TIER_NAMES = {1: "Standard", 2: "Pro", 3: "Ultra", 4: "Plus", 5: "Expanded", 6: "Ultra"}
+
+
+@dataclass(frozen=True)
+class PlanLimits:
+    """What the upload account's NotebookLM plan allows, as NotebookLM itself reports it."""
+
+    source_limit: int | None
+    notebook_limit: int | None
+    tier: int | None
+
+    @property
+    def plan(self) -> str:
+        return TIER_NAMES.get(self.tier or 0, "unknown plan")
+
+
+LimitsReader = Callable[["NotebookLMClient"], PlanLimits | None]
 
 
 @dataclass
@@ -160,10 +182,12 @@ class NotebookLMClient:
         profile: str | None = None,
         *,
         runner: Runner | None = None,
+        limits_reader: LimitsReader | None = None,
     ) -> None:
         self.config = config
         self.profile = profile or config.notebooklm_profile
         self._runner = runner
+        self._limits_reader = limits_reader
 
     # -- session --
 
@@ -203,6 +227,40 @@ class NotebookLMClient:
         except importlib.metadata.PackageNotFoundError:
             return "on PATH, but not installed in this Python (version unknown)"
         return f"notebooklm-py {version}"
+
+    def plan_limits(self) -> PlanLimits | None:
+        """The account's source and notebook limits, read live from NotebookLM; None when unknown.
+
+        One read-only request through notebooklm-py's Python API (the CLI has no command for it).
+        Unknown is reported as unknown: callers never substitute a guessed plan.
+        """
+        if self._limits_reader is not None:
+            return self._limits_reader(self)
+        if self._runner is not None:
+            return None  # an injected test runner: no live requests from here
+        if os.getenv("NOTEBOOKLM_AUTH_JSON") is None and self.session_file() is None:
+            return None
+        return self._read_plan_limits_live()
+
+    def _read_plan_limits_live(self) -> PlanLimits | None:
+        try:
+            return asyncio.run(self._read_plan_limits())
+        except Exception as exc:  # noqa: BLE001 - the limit is advisory; the reason is logged, not hidden
+            logger.info("Could not read the NotebookLM plan limits: %s", type(exc).__name__)
+            return None
+
+    async def _read_plan_limits(self) -> PlanLimits:
+        from notebooklm import NotebookLMClient as _Library  # imported on use: it is large
+
+        override = self.storage_override()
+        opener = (
+            _Library.from_storage(path=str(override))
+            if override
+            else _Library.from_storage(profile=self.profile)
+        )
+        async with opener as library:
+            got = await library.settings.get_account_limits()
+        return PlanLimits(got.source_limit, got.notebook_limit, got.tier)
 
     def check_session(self) -> SessionStatus:
         """Ask NotebookLM whether the stored session works (one read-only list call)."""

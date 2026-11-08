@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from notebook_alchemy.analyzer import VideoSourceSummary
-from notebook_alchemy.client import NotebookLMClient
+from notebook_alchemy.client import NotebookLMClient, PlanLimits
 from notebook_alchemy.config import AlchemyConfig
 from notebook_alchemy.engine import AlchemyEngine
 from notebook_alchemy.errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
@@ -485,3 +485,50 @@ def test_the_upload_keeps_characters_a_file_name_cannot(tmp_path: Path) -> None:
     )
     _fake_engine(tmp_path, fake).sync_to_notebooklm("Chan", d)
     assert "SAM.gov Registration" in fake.titles("Chan")
+
+
+# --- the account's source limit --------------------------------------------------------------------
+
+
+def _limited_engine(tmp_path: Path, fake: FakeNotebookLM, limit: int | None) -> AlchemyEngine:
+    _session(tmp_path)
+    engine = AlchemyEngine(_config(tmp_path))
+    plan = PlanLimits(limit, 100, 1) if limit is not None else None
+    engine.client = NotebookLMClient(engine.config, runner=fake, limits_reader=lambda client: plan)
+    return engine
+
+
+def test_a_sync_that_cannot_fit_the_plan_uploads_nothing(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    fake.seed("Chan", ["Notes of my own", "Another note"])
+    names = ("Alpha_Topics", "Beta_Topics", "Gamma_Topics")
+    with pytest.raises(SyncError, match="would hold 5 sources") as err:
+        _limited_engine(tmp_path, fake, 4).sync_to_notebooklm("Chan", _real_dir(tmp_path, names))
+    assert "Standard" in err.value.message and "allows 4" in err.value.message
+    assert not any("add" in call for call in fake.calls)
+    assert fake.titles("Chan") == ["Another note", "Notes of my own"]
+
+
+def test_a_tight_notebook_frees_the_replaced_copies_before_uploading(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    fake.seed("Chan", ["Alpha Topics", "Beta Topics", "Mine"])
+    result = _limited_engine(tmp_path, fake, 4).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    assert result.freed_first and (result.uploaded, result.replaced) == (2, 2)
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "Mine"]
+    verbs = [c[c.index("source") + 1] for c in fake.calls if "source" in c]
+    assert verbs.index("delete") < verbs.index("add")  # a slot was freed before the first upload
+
+
+def test_with_room_the_old_copies_go_only_after_the_new_ones_are_in(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    fake.seed("Chan", ["Alpha Topics", "Beta Topics"])
+    result = _limited_engine(tmp_path, fake, 300).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    assert not result.freed_first and result.source_limit == 300
+    verbs = [c[c.index("source") + 1] for c in fake.calls if "source" in c]
+    assert verbs.index("add") < verbs.index("delete")
+
+
+def test_an_unknown_limit_is_not_guessed(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    result = _limited_engine(tmp_path, fake, None).sync_to_notebooklm("Chan", _real_dir(tmp_path))
+    assert result.source_limit is None and not result.freed_first and result.uploaded == 2
