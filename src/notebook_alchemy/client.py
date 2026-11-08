@@ -443,6 +443,15 @@ class NotebookLMClient:
             as_json=False,
         )
 
+    def add_youtube_sources(self, notebook_id: str, urls: list[str]) -> None:
+        """Queue YouTube videos as sources without waiting; NotebookLM fetches their transcripts."""
+        self._run(["source", "add-async", *urls, "-n", notebook_id], timeout=WRITE_TIMEOUT)
+
+    def source_text(self, notebook_id: str, source_id: str) -> str:
+        """The full text NotebookLM holds for a source (for a video, its transcript)."""
+        data = self._run(["source", "fulltext", source_id, "-n", notebook_id], timeout=LIST_TIMEOUT)
+        return str(_first(data, "content", "text") or "")
+
     def rename_source(self, notebook_id: str, source_id: str, title: str) -> None:
         self._run(["source", "rename", source_id, title, "-n", notebook_id], timeout=WRITE_TIMEOUT)
 

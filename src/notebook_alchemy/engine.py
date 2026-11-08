@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .analyzer import DryRunReport, NotebookAnalyzer, ProgressFn
-from .channel import TranscriptManager, YtDlpSubtitles
+from .channel import TranscriptManager, YtDlpSubtitles, video_id_from_url
 from .client import NotebookLMClient, SourceDocument, normalize_title
 from .config import CAPTION_BLOCK_PAUSE, DEFAULT_MAX_PER_VOLUME, AlchemyConfig
 from .errors import AlchemyError, ConfigError, SessionError, SyncError, VaultError
@@ -128,6 +128,12 @@ def _home_relative(path: Path) -> str:
     return str(path)
 
 
+# The working notebook NotebookLM fetches blocked videos' transcripts into, a batch at a time.
+WORKSPACE_TITLE = "Notebook Alchemy workspace"
+WORKSPACE_BATCH = 20
+WORKSPACE_WAIT = 300  # seconds NotebookLM gets to read one video
+
+
 class AlchemyEngine:
     """Discovery, clustering, synthesis and vault output."""
 
@@ -153,6 +159,7 @@ class AlchemyEngine:
             subtitles=YtDlpSubtitles(
                 self.config.caption_languages, cookies_browser=self.config.cookies_browser
             ),
+            bulk=self.transcripts_via_notebooklm,
             spacing=self.config.caption_spacing,
             block_pause=CAPTION_BLOCK_PAUSE,
         )
@@ -163,6 +170,68 @@ class AlchemyEngine:
             gemini=self.gemini,
             transcripts=self.transcripts,
         )
+
+    def transcripts_via_notebooklm(self, items: list[tuple[str, str]]) -> dict[str, str]:
+        """Transcripts NotebookLM fetches on Google's side, for videos YouTube would not give us.
+
+        The videos go into a working notebook in the upload account, a batch at a time; each one's
+        text is read back and its source deleted. Returns {video id: text} for those that worked;
+        without a NotebookLM sign-in it returns nothing and the videos stay for the next run.
+        """
+        if not items or not self.client.is_authenticated():
+            return {}
+        try:
+            nb_id, _created = self.client.create_notebook(WORKSPACE_TITLE)
+            for leftover in self.client.list_sources(nb_id):  # from an interrupted run
+                if leftover.get("id"):
+                    self.client.delete_source(nb_id, str(leftover["id"]))
+        except AlchemyError as exc:
+            logger.warning("NotebookLM could not be used to read transcripts: %s", exc.message)
+            return {}
+        texts: dict[str, str] = {}
+        titles = dict(items)
+        for batch in self._chunks(list(titles), WORKSPACE_BATCH):
+            try:
+                self.client.add_youtube_sources(
+                    nb_id, [f"https://www.youtube.com/watch?v={v}" for v in batch]
+                )
+                queued = [
+                    (str(s["id"]), vid)
+                    for s in self.client.list_sources(nb_id)
+                    if s.get("id") and (vid := self._video_of(s, batch, titles))
+                ]
+            except AlchemyError as exc:
+                logger.warning("NotebookLM did not take %d videos: %s", len(batch), exc.message)
+                continue
+
+            def read(pair: tuple[str, str], nb: str = nb_id) -> tuple[str, str]:
+                source_id, vid = pair
+                text = ""
+                try:
+                    self.client.wait_for_source(nb, source_id, timeout=WORKSPACE_WAIT)
+                    text = self.client.source_text(nb, source_id)
+                except AlchemyError as exc:
+                    logger.info("NotebookLM could not read %s: %s", vid, exc.message)
+                finally:
+                    try:
+                        self.client.delete_source(nb, source_id)
+                    except AlchemyError as exc:  # left for the next run's cleanup, said in the log
+                        logger.warning("Could not remove %s from the working notebook: %s", vid, exc.message)
+                return vid, text
+
+            for vid, text in _run_pool(read, queued):
+                if text.strip():
+                    texts[vid] = text
+        return texts
+
+    @staticmethod
+    def _video_of(source: dict[str, Any], batch: list[str], titles: dict[str, str]) -> str:
+        """Which queued video a working-notebook source is: by its URL, else by its title."""
+        vid = video_id_from_url(str(source.get("url") or ""))
+        if vid in batch:
+            return vid
+        title = normalize_title(str(source.get("title") or ""))
+        return next((v for v in batch if normalize_title(titles.get(v, "")) == title and title), "")
 
     def analyzer_for(self, offline: bool) -> NotebookAnalyzer:
         """The analyzer, set to use Gemini only when `offline` is false."""

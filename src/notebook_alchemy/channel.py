@@ -339,9 +339,23 @@ class SubtitlesUnavailable(Exception):
     """The video has no subtitle track yt-dlp can read, or the video itself cannot be read."""
 
 
+class SubtitlesSetupError(Exception):
+    """yt-dlp cannot run as configured (for example it cannot read the browser's cookies)."""
+
+
 # yt-dlp error text that means "this network is being refused", not "this video has no captions".
 _BLOCK_MARKERS = ("sign in to confirm", "not a bot", "http error 429", "too many requests", "po token")
-_GONE_MARKERS = ("private video", "video unavailable", "has been removed", "members-only", "age")
+_GONE_MARKERS = (
+    "private video",
+    "video unavailable",
+    "has been removed",
+    "members-only",
+    "age-restricted",
+    "confirm your age",
+    "inappropriate for some users",
+)
+# yt-dlp could not read the browser's sign-in: a setup problem for every video, not this one.
+_COOKIE_MARKERS = ("cookie", "dpapi")
 
 
 class YtDlpSubtitles:
@@ -380,6 +394,11 @@ class YtDlpSubtitles:
                 info = ydl.extract_info(url, download=False) or {}
             except Exception as exc:
                 message = (sink.errors[-1] if sink.errors else str(exc)).lower()
+                if self.cookies_browser and any(m in message for m in _COOKIE_MARKERS):
+                    raise SubtitlesSetupError(
+                        f"yt-dlp could not read the {self.cookies_browser} sign-in "
+                        "(on Windows, Chrome and Edge often lock or encrypt it)"
+                    ) from exc
                 if any(m in message for m in _BLOCK_MARKERS):
                     raise SubtitlesBlocked(message[:200]) from exc
                 if any(m in message for m in _GONE_MARKERS):
@@ -471,6 +490,7 @@ class TranscriptManager:
         sleep: Callable[[float], None] = time.sleep,
         languages: tuple[str, ...] = PREFERRED_LANGUAGES,
         subtitles: YtDlpSubtitles | None = None,
+        bulk: Callable[[list[tuple[str, str]]], dict[str, str]] | None = None,
         spacing: tuple[float, float] = (0.0, 0.0),
         block_pause: float = 180.0,
         clock: Callable[[], float] = time.monotonic,
@@ -484,7 +504,11 @@ class TranscriptManager:
         self._clock = clock
         self.languages = tuple(languages) or PREFERRED_LANGUAGES
         self.subtitles = subtitles
+        # A route that reads many videos at once (NotebookLM fetching the transcripts on Google's
+        # side), used for videos the per-video routes could not read.
+        self.bulk = bulk
         self.block_pause = block_pause
+        self.notices: list[str] = []  # route problems to tell the user once
         self._pacer = _Pacer(spacing, sleep, clock, rand)
         # Per route: the clock time until which it is paused after a block (0 = open).
         self._paused_until: dict[str, float] = {}
@@ -690,6 +714,13 @@ class TranscriptManager:
             return TranscriptResult(video_id, "", "blocked", f"YouTube blocked yt-dlp ({exc})")
         except SubtitlesUnavailable as exc:
             return TranscriptResult(video_id, "", "unavailable", f"subtitles: {exc}")
+        except SubtitlesSetupError as exc:
+            # Every video would fail the same way: the route closes for this run, said once.
+            with self._pause_lock:
+                self._paused_until["subtitles"] = float("inf")
+                if str(exc) not in self.notices:
+                    self.notices.append(str(exc))
+            return TranscriptResult(video_id, "", "blocked", "yt-dlp route closed")
         except Exception as exc:  # noqa: BLE001 - yt-dlp raises many kinds; the reason is kept
             logger.debug("yt-dlp subtitles for %s failed: %s", video_id, exc)
             return TranscriptResult(video_id, "", "unavailable", f"subtitles failed: {type(exc).__name__}")
@@ -706,6 +737,13 @@ class TranscriptManager:
             tracks.sort(key=lambda tr: bool(getattr(tr, "is_generated", False)))  # written first
             fetched = tracks[0].fetch()
         return " ".join(" ".join(s.text for s in fetched).split())
+
+    @staticmethod
+    def _worth_another_route(result: TranscriptResult) -> bool:
+        """Blocked, or failed for a reason that is not "this video has no captions"."""
+        if result.text or result.source in ("skipped", "local", "cache"):
+            return False
+        return result.source == "blocked" or result.detail not in _FINAL_REASONS
 
     def fetch_many(
         self,
@@ -728,6 +766,14 @@ class TranscriptManager:
                 done += 1
                 if progress:
                     progress(done, total)
+        missing = [(vid, title) for vid, title in items if self._worth_another_route(results[vid])]
+        if missing and self.bulk is not None:
+            texts = self.bulk(missing)
+            for vid, title in missing:
+                text = " ".join(str(texts.get(vid, "")).split())
+                if text:
+                    self._write_cache(vid, title, text, method="notebooklm")
+                    results[vid] = TranscriptResult(vid, text, "notebooklm")
         retry = [(vid, title) for vid, title in items if results[vid].source == "blocked"]
         wait = self.next_reopening()
         if retry and wait is not None and wait <= self.block_pause:

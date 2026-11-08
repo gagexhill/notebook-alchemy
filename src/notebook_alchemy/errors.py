@@ -34,10 +34,12 @@ class GeminiError(AlchemyError):
         hint: str | None = None,
         status: int | None = None,
         detail: str | None = None,
+        quota: bool = False,
     ) -> None:
         super().__init__(message, hint=hint)
         self.status = status  # HTTP status, or None for a network failure
         self.detail = detail or message  # short cause, used in fallback notices
+        self.quota = quota  # a daily (or longer) quota is used up: waiting seconds will not help
 
 
 class NotebookLMError(AlchemyError):

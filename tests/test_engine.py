@@ -532,3 +532,27 @@ def test_an_unknown_limit_is_not_guessed(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     result = _limited_engine(tmp_path, fake, None).sync_to_notebooklm("Chan", _real_dir(tmp_path))
     assert result.source_limit is None and not result.freed_first and result.uploaded == 2
+
+
+# --- transcripts through NotebookLM ----------------------------------------------------------------
+
+
+def test_notebooklm_reads_blocked_videos_in_a_working_notebook_and_cleans_up(tmp_path: Path) -> None:
+    _session(tmp_path)
+    engine = AlchemyEngine(_config(tmp_path))
+    fake = FakeNotebookLM()
+    leftover_nb = fake.seed("Notebook Alchemy workspace", ["left from an interrupted run"])
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    texts = engine.transcripts_via_notebooklm([("abcdefghijk", "One"), ("bcdefghijkl", "Two")])
+    assert texts == {
+        "abcdefghijk": "words spoken in https://www.youtube.com/watch?v=abcdefghijk",
+        "bcdefghijkl": "words spoken in https://www.youtube.com/watch?v=bcdefghijkl",
+    }
+    assert fake.sources[leftover_nb] == []  # every source it added, and the leftover, removed
+
+
+def test_notebooklm_route_needs_a_sign_in(tmp_path: Path) -> None:
+    engine = AlchemyEngine(_config(tmp_path))
+    fake = FakeNotebookLM()
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    assert engine.transcripts_via_notebooklm([("abcdefghijk", "One")]) == {} and fake.calls == []

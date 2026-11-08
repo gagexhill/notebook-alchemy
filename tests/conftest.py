@@ -164,6 +164,16 @@ class FakeNotebookLM:
             stored = pathlib.Path(path).name if self.reset_titles else option("--title")
             bucket.append({"id": source_id, "title": stored, "status": "ready"})
             return done({"source": {"id": source_id, "title": option("--title")}})
+        if verb == "add-async":
+            for url in [a for a in args[2:] if a.startswith("http")]:
+                vid = url.rsplit("v=", 1)[-1]
+                bucket.append(
+                    {"id": self._new_id("yt"), "title": f"Video {vid}", "url": url, "status": "ready"}
+                )
+            return done({"queued": True})
+        if verb == "fulltext":
+            src = next(s for s in bucket if s["id"] == args[2])
+            return done({"source_id": src["id"], "content": f"words spoken in {src.get('url', '')}"})
         if verb == "wait":
             return subprocess.CompletedProcess(cmd, 0, "ready", "")
         if verb == "rename":
