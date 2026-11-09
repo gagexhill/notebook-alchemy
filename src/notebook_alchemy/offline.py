@@ -163,7 +163,9 @@ def group_by_words(domain: str, titles: list[str], limit: int) -> dict[str, list
     skipped. Titles no distinctive word claims are kept together as OTHER_VIDEOS.
     """
     ignore = {_stem(w) for w in _WORD_RE.findall(domain.lower())} | _STOP_WORDS
-    shown: dict[str, str] = {}  # stem -> the first spelling seen in a title, for the name
+    # stem -> how often each spelling appears; the most common names the group, so one new video
+    # does not rename a book (a renamed book is uploaded again as a new source).
+    spellings: dict[str, dict[str, int]] = {}
     words: list[set[str]] = []
     for title in titles:
         stems = set()
@@ -172,8 +174,10 @@ def group_by_words(domain: str, titles: list[str], limit: int) -> dict[str, list
             s = _stem(w)
             if s not in ignore and w not in _STOP_WORDS:
                 stems.add(s)
-                shown.setdefault(s, original)
+                seen = spellings.setdefault(s, {})
+                seen[original] = seen.get(original, 0) + 1
         words.append(stems)
+    shown = {s: max(c.items(), key=lambda kv: (kv[1], kv[0]))[0] for s, c in spellings.items()}
     counts: dict[str, int] = {}
     for ws in words:
         for w in ws:
