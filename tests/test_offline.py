@@ -31,3 +31,12 @@ def test_a_small_channel_is_one_book_with_sections() -> None:
     library = library_without_ai("Chan", [_video(i, t, 500) for i, t in enumerate(titles)])
     assert [t.name for t in library.topics] == ["Videos on Teaming, Pricing"]  # in section order
     assert [s.name for s in library.topics[0].sections] == ["Teaming", "Pricing", OTHER_VIDEOS]
+
+
+def test_a_new_video_does_not_rename_a_group() -> None:
+    titles = ["Beginner course", "Beginner basics", "Pricing math", "Pricing talk", "Teaming deals", "Odd"]
+    before = set(group_by_words("Chan", titles, 80))
+    after = set(group_by_words("Chan", ["Beginners start here", *titles], 80))
+    assert "Beginner, Basics" in before or any(n.startswith("Beginner") for n in before)
+    beginner_after = [n for n in after if n.lower().startswith("beginner")]
+    assert beginner_after and beginner_after[0].split(",")[0] == "Beginner"  # the common spelling wins
