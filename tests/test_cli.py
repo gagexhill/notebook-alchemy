@@ -1255,11 +1255,11 @@ def test_the_guided_run_builds_and_uploads_for_real(
     _guided(monkeypatch, signed_in=True)
     fake_channel("Build a REST API", "CSS grid tricks")
     uploads = _record_uploads(monkeypatch)
-    result = runner.invoke(
-        cli, [], input="n\nn\n@my\ny\n\n"
-    )  # y: the upload account; Enter: the notebook name
+    # n: no Gemini key; the channel; y: the upload account; Enter: the notebook name
+    result = runner.invoke(cli, [], input="n\n@my\ny\n\n")
     assert result.exit_code == 0, result.output
     assert len(uploads) == 1 and "Created notebook" in result.output
+    assert "does not look like a YouTube link" not in result.output  # every answer went where meant
 
 
 def test_watch_cannot_be_combined_with_offline(runner: CliRunner) -> None:
