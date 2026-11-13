@@ -60,7 +60,13 @@ to propose a change; this file covers what a change must keep true.
   it). A hash is recorded only for an upload confirmed with its title; a book that fails to upload keeps
   its old copy and old hash; an old copy that could not be removed stays recorded as the tool's own and
   is removed by the next run; and nothing is uploaded while videos still wait for Gemini.
-- `keep-signed-in` registers one per-user scheduler entry per profile (Task Scheduler, launchd, a
+- In a terminal, an ended NotebookLM sign-in never fails a run: `run` and the guided run offer the
+  sign-in inline and carry on, check it again before uploading, and upload nothing unless the account
+  is the one confirmed (signing in again keeps a known account, and an unrecorded one is asked about
+  again). Outside a terminal they stop with the sign-in command. Only a missing or ended sign-in is
+  offered; a network or tool fault is reported as it is. A sign-in that ends
+  mid-read stops the NotebookLM transcript route at once instead of failing every remaining video.
+- `keep-signed-in` is opt-in and never offered. It registers one per-user scheduler entry per profile (Task Scheduler, launchd, a
   systemd user timer or cron), reads back that the scheduler has it active (not only that its files
   exist) before reporting success, removes what it wrote when that fails, and records each refresh's
   outcome so `status` reports whether it works, not only whether it is registered. The task runs

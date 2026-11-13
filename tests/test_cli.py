@@ -614,25 +614,6 @@ def _signed_in(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 1))
 
 
-def test_login_offers_to_keep_the_sign_in_fresh(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
-) -> None:
-    _signed_in(monkeypatch)
-    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
-    scheduler = isolated_environment.scheduler
-    declined = runner.invoke(cli, ["login", "--browser-cookies", "edge"], input="n\n")
-    assert declined.exit_code == 0, declined.output
-    assert "Do you want to keep this sign-in fresh (Y/n)?" in declined.output and not scheduler.tasks
-    accepted = runner.invoke(cli, ["login", "--browser-cookies", "edge"], input="\n")  # Enter means yes
-    assert accepted.exit_code == 0, accepted.output
-    assert "refreshed in the background" in accepted.output
-    [(name, command)] = scheduler.tasks.items()
-    assert name == "Notebook Alchemy keep signed in (default)"
-    assert "-m notebook_alchemy.keepalive --profile default --home" in command
-    again = runner.invoke(cli, ["login", "--browser-cookies", "edge"])  # already on: nothing asked
-    assert again.exit_code == 0 and "keep this sign-in fresh" not in again.output
-
-
 def test_keep_signed_in_on_and_off(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
 ) -> None:
@@ -948,19 +929,170 @@ def test_quiet_first_upload_question_still_names_the_account(
     assert "Notebooks will be created in [owner@example.test]." in result.output
 
 
-def test_run_checks_the_session_before_asking(
+def _session_sequence(monkeypatch: pytest.MonkeyPatch, *states: bool) -> list[str]:
+    """check_session answers these states in turn (then the last one); returns the sign-ins run."""
+    answers = iter(states)
+    last = [states[-1]]
+
+    def check(self):
+        ok = next(answers, last[0])
+        return SessionStatus(ok, "ok" if ok else "Authentication expired or invalid.", 1, signed_out=not ok)
+
+    monkeypatch.setattr(NotebookLMClient, "check_session", check)
+    monkeypatch.setattr(NotebookLMClient, "is_authenticated", lambda self: True)
+    signed: list[str] = []
+
+    def sign_in(client, **kw):
+        signed.append(kw.get("account") or client.profile)
+
+    monkeypatch.setattr(cli_module, "_sign_in", sign_in)
+    return signed
+
+
+def test_an_ended_sign_in_outside_a_terminal_stops_with_the_sign_in_command(
     runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_channel("a b c d")
     uploads = _record_uploads(monkeypatch)
+    signed = _session_sequence(monkeypatch, False)
+    result = runner.invoke(cli, [*RUN, "-N", "chan"])
+    assert result.exit_code == 1 and "Authentication expired" in result.output
+    assert "notebook-alchemy login" in result.output and uploads == [] and signed == []
+
+
+def test_an_ended_sign_in_in_a_terminal_is_offered_and_the_run_carries_on(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("a b c d")
+    uploads = _record_uploads(monkeypatch)
+    signed = _session_sequence(monkeypatch, False, True)
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    # Enter: sign in now; y: the first upload to this account
+    result = runner.invoke(cli, [*RUN, "-N", "chan"], input="\ny\n")
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "Your NotebookLM sign-in has ended" in flat and "Do you want to sign in now (Y/n)?" in flat
+    assert signed == ["default"] and uploads == ["chan"]
+
+
+def test_with_yes_an_ended_sign_in_goes_straight_to_signing_in(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("a b c d")
+    uploads = _record_uploads(monkeypatch)
+    signed = _session_sequence(monkeypatch, False, True)
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, [*RUN, "-N", "chan", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Do you want to sign in now" not in result.output and signed == ["default"] and uploads == ["chan"]
+
+
+def test_a_network_fault_is_not_mistaken_for_an_ended_sign_in(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("a b c d")
+    uploads = _record_uploads(monkeypatch)
+    signed = _session_sequence(monkeypatch, True)
     monkeypatch.setattr(
-        NotebookLMClient, "check_session", lambda self: SessionStatus(False, "No NotebookLM session found.")
+        NotebookLMClient, "check_session", lambda self: SessionStatus(False, "`notebooklm list` timed out.")
     )
     monkeypatch.setattr(cli_module, "_interactive", lambda: True)
-    result = runner.invoke(cli, [*RUN, "-N", "chan"])
-    assert result.exit_code == 1 and "No NotebookLM session" in result.output
-    assert "notebook-alchemy login" in result.output and "Do you want to continue" not in result.output
+    result = runner.invoke(cli, [*RUN, "-N", "chan", "--yes"])
+    assert result.exit_code == 1 and "could not be reached" in result.output
+    assert "sign in now" not in result.output and signed == [] and uploads == []
+
+
+def test_save_never_asks_for_a_sign_in(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    fake_channel("a b c d")
+    signed = _session_sequence(monkeypatch, False)
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, [*RUN, "--save", "books"])
+    assert result.exit_code == 0, result.output and signed == []
+
+
+def test_declining_the_sign_in_uploads_nothing(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("a b c d")
+    uploads = _record_uploads(monkeypatch)
+    signed = _session_sequence(monkeypatch, False)
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, [*RUN, "-N", "chan"], input="n\n")
+    assert result.exit_code == 1 and "Nothing was uploaded" in result.output
+    assert uploads == [] and signed == []
+
+
+def test_a_sign_in_that_ends_during_the_build_is_offered_again_before_uploading(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("a b c d")
+    uploads = _record_uploads(monkeypatch)
+    signed = _session_sequence(monkeypatch, True, False, True)  # fine at the start, ended at upload
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, [*RUN, "-N", "chan", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "before uploading" in " ".join(result.output.split())
+    assert signed == [ACCOUNT] and uploads == ["chan"]  # signed in again to the confirmed account
+
+
+def test_an_unrecorded_account_is_asked_about_again_after_signing_in_again(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("a b c d")
+    uploads = _record_uploads(monkeypatch)
+    _session_sequence(monkeypatch, True, False, True)
+    monkeypatch.setattr(NotebookLMClient, "upload_account", lambda self: AccountIdentity(self.profile, None))
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    # y: upload to the unknown account; Enter: sign in again; n: not to the account signed in now
+    result = runner.invoke(cli, [*RUN, "-N", "chan"], input="y\n\nn\n")
+    assert result.exit_code == 1 and "After signing in again, uploads go to" in " ".join(
+        result.output.split()
+    )
     assert uploads == []
+
+
+def test_signing_in_again_to_another_account_uploads_nothing(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("a b c d")
+    uploads = _record_uploads(monkeypatch)
+    _session_sequence(monkeypatch, True, False, True)
+    accounts = iter([ACCOUNT, "other@example.test"])
+    monkeypatch.setattr(
+        NotebookLMClient, "upload_account", lambda self: AccountIdentity(self.profile, next(accounts))
+    )
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, [*RUN, "-N", "chan", "--yes"])
+    assert result.exit_code == 1 and "upload account changed" in " ".join(result.output.split())
+    assert uploads == []
+
+
+def test_login_asks_nothing_about_the_background_refresh(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _signed_in(monkeypatch)
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    result = runner.invoke(cli, ["login", "--browser-cookies", "edge"])
+    assert result.exit_code == 0, result.output
+    assert "keep this sign-in fresh" not in result.output and not isolated_environment.scheduler.tasks
+    opted = runner.invoke(cli, ["login", "--browser-cookies", "edge", "--keep-signed-in"])
+    assert opted.exit_code == 0 and list(isolated_environment.scheduler.tasks) == [
+        "Notebook Alchemy keep signed in (default)"
+    ]
+
+
+def test_status_says_nothing_about_a_background_refresh_that_is_off(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    monkeypatch.setattr(NotebookLMClient, "session_file", lambda self: Path("storage_state.json"))
+    result = runner.invoke(cli, ["status"])
+    assert "background" not in result.output
+    from notebook_alchemy.cli import _keepalive_line
+    from notebook_alchemy.keepalive import KeepAliveState
+
+    assert _keepalive_line(KeepAliveState(False, "")) is None
 
 
 def test_run_stops_if_the_account_changes_during_the_build(
@@ -1071,7 +1203,11 @@ def _recorded_run(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
 def _guided(monkeypatch: pytest.MonkeyPatch, *, signed_in: bool) -> None:
     monkeypatch.setattr(cli_module, "_interactive", lambda: True)
     monkeypatch.setattr(NotebookLMClient, "is_authenticated", lambda self: signed_in)
-    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(signed_in, "ok", 1))
+    monkeypatch.setattr(
+        NotebookLMClient,
+        "check_session",
+        lambda self: SessionStatus(signed_in, "ok", 1, signed_out=not signed_in),
+    )
 
 
 def test_the_guided_run_needs_only_a_channel_link_when_signed_in(
@@ -1079,14 +1215,14 @@ def test_the_guided_run_needs_only_a_channel_link_when_signed_in(
 ) -> None:
     _guided(monkeypatch, signed_in=True)
     runs = _recorded_run(monkeypatch)
-    # keep signed in: Enter (yes); key: Enter (no); a wrong link, then a channel
-    result = runner.invoke(cli, [], input="\n\nnot a link\n@example-channel\n")
+    # key: Enter (no); a wrong link, then a channel
+    result = runner.invoke(cli, [], input="\nnot a link\n@example-channel\n")
     assert result.exit_code == 0, result.output
     flat = " ".join(result.output.split())
     assert f"Signed in as [{ACCOUNT}]" in flat and "does not look like a YouTube link" in flat
     assert runs == [{"source": "@example-channel", "offline": True}]  # no key: every word, sorted by title
     assert "notebook-alchemy run @example-channel" in flat
-    assert list(isolated_environment.scheduler.tasks) == ["Notebook Alchemy keep signed in (default)"]
+    assert "keep this sign-in fresh" not in flat and not isolated_environment.scheduler.tasks
 
 
 def test_the_guided_run_can_add_a_gemini_key(
@@ -1097,7 +1233,7 @@ def test_the_guided_run_can_add_a_gemini_key(
     opened: list[str] = []
     monkeypatch.setattr(click, "launch", lambda url, **kw: opened.append(url))
     key = "AIzaSyTEST-not-a-real-key-000"
-    result = runner.invoke(cli, [], input=f"n\ny\n{key}\nhttps://www.youtube.com/@example-channel\n")
+    result = runner.invoke(cli, [], input=f"y\n{key}\nhttps://www.youtube.com/@example-channel\n")
     assert result.exit_code == 0, result.output
     assert opened == ["https://aistudio.google.com/apikey"] and key not in result.output
     assert f"GEMINI_API_KEY={key}" in (isolated_environment.work / ".env").read_text(encoding="utf-8")
@@ -1110,7 +1246,7 @@ def test_the_guided_run_stops_cleanly_without_a_sign_in(
     _guided(monkeypatch, signed_in=False)
     runs = _recorded_run(monkeypatch)
     result = runner.invoke(cli, [], input="n\n")
-    assert result.exit_code == 1 and "Nothing was done" in result.output and runs == []
+    assert result.exit_code == 1 and "no NotebookLM sign-in" in result.output and runs == []
 
 
 def test_the_guided_run_builds_and_uploads_for_real(
@@ -1129,17 +1265,6 @@ def test_the_guided_run_builds_and_uploads_for_real(
 def test_watch_cannot_be_combined_with_offline(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["run", "@my", "--offline", "--watch", "3"])
     assert result.exit_code == 2 and "--watch uses Gemini" in result.output
-
-
-def test_login_still_succeeds_when_the_refresh_cannot_be_set_up(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
-) -> None:
-    _signed_in(monkeypatch)
-    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
-    isolated_environment.scheduler.fail = "/Create"
-    result = runner.invoke(cli, ["login", "--browser-cookies", "edge"], input="y\n")
-    assert result.exit_code == 0, result.output
-    assert "could not be kept fresh" in result.output and "notebook-alchemy keep-signed-in" in result.output
 
 
 def test_keep_signed_in_is_refused_with_a_session_file(
@@ -1167,6 +1292,6 @@ def test_the_guided_run_warns_when_the_environment_key_would_win(
     monkeypatch.setattr(click, "launch", lambda url, **kw: None)
     monkeypatch.setenv("GEMINI_API_KEY", "your_key_here")  # set, but not a usable key
     key = "AIzaSyTEST-not-a-real-key-000"
-    result = runner.invoke(cli, [], input=f"n\ny\n{key}\n@example-channel\n")
+    result = runner.invoke(cli, [], input=f"y\n{key}\n@example-channel\n")
     assert result.exit_code == 0, result.output
     assert "also set in your environment" in " ".join(result.output.split())

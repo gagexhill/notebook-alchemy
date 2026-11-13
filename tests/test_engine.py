@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -731,3 +732,165 @@ def test_books_a_0_2_upload_recorded_under_its_own_file_name_are_replaced(tmp_pa
     result = engine.publish("Chan", _books())
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "My own notes"]  # yours stays
     assert result.pruned == 2 and not legacy.exists()
+
+
+def test_the_transcript_route_stops_when_notebooklm_ends_the_sign_in(tmp_path: Path) -> None:
+    _session(tmp_path)
+    engine = AlchemyEngine(_config(tmp_path))
+    fake = FakeNotebookLM(fail={"add-async": "watch"})  # every add: refused as signed out
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+
+    real = fake._handle
+
+    def signed_out(cmd):
+        result = real(cmd)
+        if result.returncode == 2 and "add-async" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
+        return result
+
+    fake._handle = signed_out  # type: ignore[method-assign]
+    _really_signed_out(engine)
+    videos = [(f"vid{i:08d}", f"Video {i}") for i in range(60)]  # three batches
+    texts = engine.transcripts_via_notebooklm(videos)
+    adds = [c for c in fake.calls if "add-async" in c]
+    assert texts == {} and len(adds) == 1  # the first refusal stops the route
+    assert engine.route_notices == [
+        "The NotebookLM sign-in ended while reading videos; 60 videos wait for the next run."
+    ]
+
+
+def test_the_transcript_route_stops_when_the_sign_in_ends_while_reading(tmp_path: Path) -> None:
+    _session(tmp_path)
+    engine = AlchemyEngine(_config(tmp_path))
+    fake = FakeNotebookLM(fail={"fulltext": "-"})  # every read: refused as signed out
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    real = fake._handle
+
+    def signed_out(cmd):
+        result = real(cmd)
+        if result.returncode == 2 and "fulltext" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
+        return result
+
+    fake._handle = signed_out  # type: ignore[method-assign]
+    _really_signed_out(engine)
+    texts = engine.transcripts_via_notebooklm([(f"vid{i:08d}", f"Video {i}") for i in range(60)])
+    assert texts == {} and len([c for c in fake.calls if "add-async" in c]) == 1  # no second batch
+    assert "60 videos wait" in engine.route_notices[0]
+    reads = [c for c in fake.calls if "fulltext" in c]
+    assert len(reads) <= 3  # the reads already under way at most; the rest of the batch is skipped
+    assert not [c for c in fake.calls if "delete" in c]  # nothing more is sent once signed out
+    # The next run, signed in again, reads the videos left in the working notebook.
+    fake._handle = real  # type: ignore[method-assign]
+    fake.fail = {}
+    again = engine.transcripts_via_notebooklm([(f"vid{i:08d}", f"Video {i}") for i in range(20)])
+    assert len(again) == 20
+
+
+def _really_signed_out(engine: AlchemyEngine) -> None:
+    from notebook_alchemy.client import SessionStatus
+
+    engine.client.check_session = lambda: SessionStatus(False, "signed out", signed_out=True)  # type: ignore[method-assign]
+
+
+def test_one_video_whose_error_mentions_signing_in_does_not_stop_the_route(tmp_path: Path) -> None:
+    from notebook_alchemy.client import SessionStatus
+
+    _session(tmp_path)
+    engine = AlchemyEngine(_config(tmp_path))
+    fake = FakeNotebookLM()
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    real = fake._handle
+    reads = iter(range(1000))
+
+    def odd(cmd):
+        if "fulltext" in cmd and next(reads) == 3:  # the fourth read: one video's own odd message
+            return subprocess.CompletedProcess(cmd, 1, "", "This video requires login to view.")
+        return real(cmd)
+
+    fake._handle = odd  # type: ignore[method-assign]
+    engine.client.check_session = lambda: SessionStatus(True, "Session is active.", 1)  # type: ignore[method-assign]
+    texts = engine.transcripts_via_notebooklm([(f"vid{i:08d}", f"Video {i}") for i in range(40)])
+    assert len(texts) == 39 and engine.route_notices == []  # one video waits; the rest are read
+
+
+def test_a_sign_in_that_ended_before_the_route_starts_is_said_once(tmp_path: Path) -> None:
+    _session(tmp_path)
+    engine = AlchemyEngine(_config(tmp_path))
+    fake = FakeNotebookLM()
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+
+    def refused(cmd):
+        return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
+
+    fake._handle = refused  # type: ignore[method-assign]
+    assert engine.transcripts_via_notebooklm([("vid00000001", "One"), ("vid00000002", "Two")]) == {}
+    assert engine.route_notices == [
+        "The NotebookLM sign-in ended while reading videos; 2 videos wait for the next run."
+    ]
+
+
+def test_one_batch_refused_with_a_sign_in_message_does_not_stop_the_route(tmp_path: Path) -> None:
+    from notebook_alchemy.client import SessionStatus
+
+    _session(tmp_path)
+    engine = AlchemyEngine(_config(tmp_path))
+    fake = FakeNotebookLM()
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    real = fake._handle
+    adds = iter(range(1000))
+
+    def odd(cmd):
+        if "add-async" in cmd and next(adds) == 0:  # the first batch: an odd message, still signed in
+            return subprocess.CompletedProcess(cmd, 1, "", "A video in this batch requires login.")
+        return real(cmd)
+
+    fake._handle = odd  # type: ignore[method-assign]
+    engine.client.check_session = lambda: SessionStatus(True, "Session is active.", 1)  # type: ignore[method-assign]
+    texts = engine.transcripts_via_notebooklm([(f"vid{i:08d}", f"Video {i}") for i in range(40)])
+    assert len(texts) == 20 and engine.route_notices == []  # the second batch was still read
+
+
+def test_a_delete_refused_as_signed_out_stops_the_route(tmp_path: Path) -> None:
+    _session(tmp_path)
+    engine = AlchemyEngine(_config(tmp_path))
+    fake = FakeNotebookLM()
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    real = fake._handle
+
+    deletes: list[list[str]] = []
+
+    def refuse_deletes(cmd):
+        if "delete" in cmd:
+            deletes.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
+        return real(cmd)
+
+    fake._handle = refuse_deletes  # type: ignore[method-assign]
+    engine.transcripts_via_notebooklm([(f"vid{i:08d}", f"Video {i}") for i in range(60)])
+    assert 1 <= len(deletes) <= 3 and len([c for c in fake.calls if "add-async" in c]) == 1
+    assert "videos wait for the next run" in engine.route_notices[0]
+
+
+def test_old_videos_are_not_deleted_one_by_one_after_a_sign_out(tmp_path: Path) -> None:
+    _session(tmp_path)
+    engine = AlchemyEngine(_config(tmp_path))
+    fake = FakeNotebookLM()
+    ws = fake.seed("Notebook Alchemy workspace", [])
+    for i in range(5):  # videos an interrupted run left behind that are no longer wanted
+        fake.sources[ws].append(
+            {"id": f"yt-old-{i}", "title": f"Old {i}", "url": None, "type": "youtube", "status": "ready"}
+        )
+    engine.client = NotebookLMClient(engine.config, runner=fake)
+    real = fake._handle
+    refused: list[list[str]] = []
+
+    def refuse_deletes(cmd):
+        if "delete" in cmd:
+            refused.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
+        return real(cmd)
+
+    fake._handle = refuse_deletes  # type: ignore[method-assign]
+    engine.transcripts_via_notebooklm([("vid00000001", "One")])
+    assert len(refused) == 1  # the first refusal; the other four wait for the next run

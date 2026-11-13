@@ -73,6 +73,9 @@ def test_check_session_states(tmp_path: Path) -> None:
     )
     result = expired.check_session()
     assert not result.ok and "expired" in result.detail.lower()
+    assert missing.signed_out  # no sign-in at all
+    _profile_session(expired)
+    assert expired.check_session().signed_out  # an ended sign-in
 
 
 def test_upload_sends_a_file_not_content_and_not_text_flag(tmp_path: Path) -> None:
@@ -194,6 +197,7 @@ def test_check_session_reports_any_cli_failure_instead_of_raising(tmp_path: Path
     _profile_session(client)
     status = client.check_session()
     assert not status.ok and "something unexpected broke" in status.detail
+    assert not status.signed_out  # a fault, not a sign-out: signing in again would not help
 
 
 def test_an_old_unprefixed_title_counts_as_a_copy_of_the_new_one() -> None:

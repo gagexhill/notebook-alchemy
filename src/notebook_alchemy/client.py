@@ -84,6 +84,7 @@ class SessionStatus:
     ok: bool
     detail: str
     notebooks: int = 0
+    signed_out: bool = False  # not ok because there is no working sign-in (not a network or tool fault)
 
 
 @dataclass
@@ -274,9 +275,11 @@ class NotebookLMClient:
     def check_session(self) -> SessionStatus:
         """Ask NotebookLM whether the stored session works (one read-only list call)."""
         if not self.is_authenticated():
-            return SessionStatus(False, "No NotebookLM session found.")
+            return SessionStatus(False, "No NotebookLM session found.", signed_out=True)
         try:
             notebooks = self.list_notebooks()
+        except SessionError as exc:
+            return SessionStatus(False, exc.message, signed_out=True)
         except NotebookLMError as exc:
             return SessionStatus(False, exc.message)
         return SessionStatus(True, "Session is active.", len(notebooks))
