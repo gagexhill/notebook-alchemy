@@ -106,7 +106,7 @@ link       yt-dlp   captions,  filler,   Gemini,   topics,  order, dupes,    pla
 | Without AI | `notebook-alchemy run <url> --offline` | YouTube, NotebookLM | One notebook | You want every word, sorted by title, at no API cost |
 | Try it | `notebook-alchemy run --mock --save books` | Nothing | `books/` | You want to see the output before pointing it at a channel |
 | Self-test | `notebook-alchemy test` | Nothing | A temporary folder | You want to check that everything installed correctly |
-| Stay signed in | `notebook-alchemy keep-signed-in` (`--off` to stop) | NotebookLM, every 20 minutes | A scheduled task for your user | You run it now and then and do not want to sign in again each time |
+| Keep a sign-in fresh (optional) | `notebook-alchemy keep-signed-in` (`--off` to stop) | NotebookLM, every 20 minutes | A scheduled task for your user | Your computer keeps a refreshed sign-in alive (`status` shows whether it does) |
 | Move computers | `notebook-alchemy export-state FILE`, then `import-state FILE` | Nothing | A zip, then `~/.notebook-alchemy/` | You want to carry on from another computer without paying again |
 | Set up | `notebook-alchemy setup` | `notebooklm` login, only if you sign in | `.env` | You want to set the Gemini key or the upload account; run it again to change either |
 
@@ -260,7 +260,7 @@ notebook-alchemy test
 
 ### Set up and run
 
-The quickest start is the guided run: type `notebook-alchemy` with nothing after it. It signs you in to NotebookLM (a browser window), offers to keep that sign-in fresh, offers a free Gemini key for topic sorting, asks for a channel link, and builds the notebook. Every question has a default, so Enter is enough.
+The quickest start is the guided run: type `notebook-alchemy` with nothing after it. It signs you in to NotebookLM (a browser window), offers a free Gemini key for topic sorting, asks for a channel link, and builds the notebook. Every question has a default, so Enter is enough.
 
 ```bash
 notebook-alchemy
@@ -289,7 +289,9 @@ notebook-alchemy login --browser-cookies chrome --account you@example.com --prof
 
 `notebook-alchemy login` on its own opens a sign-in window instead; it needs a browser for Playwright, installed once with `python -m playwright install chromium`.
 
-Google ends a sign-in that sits idle for a few hours. After signing in, `login` offers to refresh it in the background every 20 minutes (a Task Scheduler task on Windows, a launchd agent on macOS, a systemd user timer or cron on Linux), so the next run still works. `notebook-alchemy keep-signed-in --off` removes it, and `status` shows when it last ran and whether it worked.
+Google ends a sign-in that sits idle for a few hours. When yours has ended, `run` and the guided run say so, ask you to sign in again (one browser window), and carry on; the work already done is kept. A long run checks again before it uploads. Outside a terminal, the run stops with the sign-in command instead.
+
+`notebook-alchemy keep-signed-in` is optional: it refreshes the sign-in every 20 minutes in the background (a Task Scheduler task on Windows, a launchd agent on macOS, a systemd user timer or cron on Linux). It keeps a sign-in alive only while Google accepts the refresh, and on some computers Google still ends it within hours; `status` shows when it last worked. `keep-signed-in --off` removes it. Notebook Alchemy never stores a long-lived Google token for you.
 
 Then preview and build:
 

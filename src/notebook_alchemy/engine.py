@@ -180,6 +180,7 @@ class AlchemyEngine:
             if self.config.has_gemini_key
             else None
         )
+        self.route_notices: list[str] = []  # said once per build by the NotebookLM transcript route
         self.transcripts = TranscriptManager(
             cache_dir=self.config.cache_dir,
             max_workers=self.config.max_concurrency,
@@ -289,6 +290,7 @@ class AlchemyEngine:
         confirm_watch: Callable[[int, int, float], bool] | None = None,
         progress: ProgressFn | None = None,
     ) -> BuildReport:
+        self.route_notices = []
         channel, videos = self.scan(source, limit=limit, tabs=tabs, mock=mock)
         today = dt.datetime.now(dt.UTC).date().isoformat()
         notices: list[str] = []
@@ -311,7 +313,7 @@ class AlchemyEngine:
                 if results.get(v.id) and results[v.id].published:
                     v.published = results[v.id].published
             by_source = dict(self.transcripts.by_source)
-            notices += self.transcripts.notices
+            notices += self.transcripts.notices + self.route_notices
             if self.transcripts.blocked_total:
                 notices.append(
                     f"YouTube wouldn't share words for {self.transcripts.blocked_total} videos this time. "
@@ -509,6 +511,7 @@ class AlchemyEngine:
             return {}
         titles = dict(items)
         wanted = list(titles)
+        signed_out = threading.Event()  # set when NotebookLM ends the sign-in: the route stops
         try:
             recorded = self.notebook_for(WORKSPACE_KEY)
             if recorded and any(str(n.get("id")) == recorded for n in self.client.list_notebooks()):
@@ -517,6 +520,9 @@ class AlchemyEngine:
                 nb_id, _created = self.client.create_notebook(WORKSPACE_TITLE)
                 self.remember_notebook(WORKSPACE_KEY, nb_id)
             existing = self.client.list_sources(nb_id)
+        except SessionError:
+            self._route_signed_out(len(wanted))
+            return {}
         except AlchemyError as exc:
             logger.warning("NotebookLM could not be used to read transcripts: %s", exc.message)
             return {}
@@ -530,11 +536,13 @@ class AlchemyEngine:
             if vid:
                 leftovers.append((str(source["id"]), vid))
             else:
-                self._remove_workspace_source(nb_id, str(source["id"]), "an old video")
-        texts = self._read_workspace(nb_id, leftovers)
+                self._remove_workspace_source(nb_id, str(source["id"]), "an old video", signed_out)
+        texts = self._read_workspace(nb_id, leftovers, signed_out)
         started = {vid for _sid, vid in leftovers}
         pending = [v for v in wanted if v not in started]
         for batch in [pending[i : i + WORKSPACE_BATCH] for i in range(0, len(pending), WORKSPACE_BATCH)]:
+            if signed_out.is_set():
+                break
             try:
                 self.client.add_youtube_sources(
                     nb_id, [f"https://www.youtube.com/watch?v={v}" for v in batch]
@@ -544,32 +552,72 @@ class AlchemyEngine:
                     for s in self.client.list_sources(nb_id)
                     if s.get("id") and (vid := self._video_of(s, batch, titles))
                 ]
+            except SessionError:
+                if self._really_signed_out():
+                    signed_out.set()
+                    break
+                logger.warning("NotebookLM did not take %d videos (it said the sign-in failed).", len(batch))
+                continue
             except AlchemyError as exc:
                 logger.warning("NotebookLM did not take %d videos: %s", len(batch), exc.message)
                 continue
-            texts.update(self._read_workspace(nb_id, queued))
+            texts.update(self._read_workspace(nb_id, queued, signed_out))
+        if signed_out.is_set():
+            # One notice, not a failure per video: every further request would be refused too, and
+            # hundreds of refused requests look like abuse to Google.
+            self._route_signed_out(len([v for v in wanted if v not in texts]))
         return texts
 
-    def _read_workspace(self, nb_id: str, pairs: list[tuple[str, str]]) -> dict[str, str]:
-        """Wait for each (source id, video id), read its text, and remove the source."""
+    def _route_signed_out(self, waiting: int) -> None:
+        self.route_notices.append(
+            f"The NotebookLM sign-in ended while reading videos; {waiting} videos wait for the next run."
+        )
+
+    def _really_signed_out(self) -> bool:
+        """Whether a sign-in error from one request is the sign-in itself (asked once more), not a
+        message about one video that happens to mention signing in."""
+        return self.client.check_session().signed_out
+
+    def _read_workspace(
+        self, nb_id: str, pairs: list[tuple[str, str]], signed_out: threading.Event | None = None
+    ) -> dict[str, str]:
+        """Wait for each (source id, video id), read its text, and remove the source.
+
+        When NotebookLM ends the sign-in, `signed_out` is set and the remaining reads are skipped;
+        their sources stay in the working notebook and the next run reads them as leftovers.
+        """
+        signed_out = signed_out or threading.Event()
 
         def read(pair: tuple[str, str]) -> tuple[str, str]:
             source_id, vid = pair
+            if signed_out.is_set():
+                return vid, ""
             text = ""
             try:
                 self.client.wait_for_source(nb_id, source_id, timeout=WORKSPACE_WAIT)
                 text = self.client.source_text(nb_id, source_id)
+            except SessionError as exc:
+                if self._really_signed_out():
+                    signed_out.set()
+                    return vid, ""  # the source stays; the next run reads it as a leftover
+                logger.info("NotebookLM could not read %s: %s", vid, exc.message)
             except AlchemyError as exc:  # no transcript NotebookLM can read: the video waits
                 logger.info("NotebookLM could not read %s: %s", vid, exc.message)
-            finally:
-                self._remove_workspace_source(nb_id, source_id, vid)
+            self._remove_workspace_source(nb_id, source_id, vid, signed_out)
             return vid, text
 
         return {vid: text for vid, text in _run_pool(read, pairs) if text.strip()}
 
-    def _remove_workspace_source(self, nb_id: str, source_id: str, what: str) -> None:
+    def _remove_workspace_source(
+        self, nb_id: str, source_id: str, what: str, signed_out: threading.Event | None = None
+    ) -> None:
+        if signed_out is not None and signed_out.is_set():
+            return  # every request would be refused; the next run removes it
         try:
             self.client.delete_source(nb_id, source_id)
+        except SessionError:
+            if signed_out is not None:
+                signed_out.set()
         except AlchemyError as exc:  # the next run removes it; said in the log
             logger.warning("Could not remove %s from the working notebook: %s", what, exc.message)
 

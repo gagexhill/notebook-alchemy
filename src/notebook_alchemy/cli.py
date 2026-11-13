@@ -28,6 +28,7 @@ from .channel import CHANNEL_TABS, DEFAULT_TABS
 from .client import (
     AccountIdentity,
     NotebookLMClient,
+    SessionStatus,
     consent_file,
     record_upload_consent,
     upload_confirmed,
@@ -201,6 +202,50 @@ def _confirm_first_upload(identity: AccountIdentity, yes: bool) -> None:
             hint="Choose another account with --profile, or run `notebook-alchemy setup`.",
         )
     record_upload_consent(identity)
+
+
+def _ensure_signed_in(
+    engine: AlchemyEngine, *, before: str, yes: bool = False, account: str | None = None
+) -> tuple[SessionStatus, bool]:
+    """A working NotebookLM sign-in, and whether this call signed in again; else a typed error.
+
+    Google ends idle sign-ins after a few hours, so an ended sign-in is the normal case between
+    runs: in a terminal the run offers the sign-in (signs straight in with --yes) and carries on.
+    Only a missing or ended sign-in is offered; a network or tool fault is reported as it is,
+    since signing in again would not fix it. `account`, when known, is the Google account the
+    sign-in must keep. `before` names what waits on it ("reading the videos", "uploading").
+    """
+    with ui.console.status("Checking your NotebookLM sign-in..."):
+        session = engine.client.check_session()
+    if session.ok:
+        return session, False
+    if not session.signed_out:
+        raise NotebookLMError(
+            f"NotebookLM could not be reached: {session.detail}",
+            hint="Check your connection and run the same command again; the work already done is kept.",
+        )
+    if not _interactive():
+        raise SessionError(
+            session.detail,
+            hint="Sign in with `notebook-alchemy login`, or add --save DIR to keep the books locally.",
+        )
+    if engine.client.is_authenticated():
+        reason = "Your NotebookLM sign-in has ended (Google ends idle sign-ins after a few hours)."
+    else:
+        reason = "You are not signed in to NotebookLM yet."
+    ui.console.print(f"\n{reason} Sign in before {before}.")
+    ui.detail(f"  {esc(session.detail)}")
+    if not yes and not _ask("Do you want to sign in now", default=True):
+        raise AlchemyError(
+            "Nothing was uploaded: there is no NotebookLM sign-in.",
+            hint="Run the same command again when you are ready; the work already done is kept.",
+        )
+    _sign_in(engine.client, account=account)  # with `account`, a different account is refused
+    with ui.console.status("Checking your NotebookLM sign-in..."):
+        session = engine.client.check_session()
+    if not session.ok:
+        raise SessionError(session.detail, hint="Sign in with `notebook-alchemy login`, then run again.")
+    return session, True
 
 
 def _same_account_as_confirmed(engine: AlchemyEngine, confirmed: AccountIdentity) -> None:
@@ -451,13 +496,7 @@ def run_pipeline(
 
     confirmed: AccountIdentity | None = None
     if upload:
-        with ui.console.status("Checking your NotebookLM sign-in..."):
-            session = engine.client.check_session()
-        if not session.ok:
-            raise SessionError(
-                session.detail,
-                hint="Sign in with `notebook-alchemy login`, or add --save DIR to keep the books locally.",
-            )
+        session, _again = _ensure_signed_in(engine, before="reading the videos", yes=yes)
         ui.detail(f"Signed in; {_plural(session.notebooks, 'notebook')} visible.")
         confirmed = _show_upload_target(engine)
         _confirm_first_upload(confirmed, yes)
@@ -512,6 +551,17 @@ def run_pipeline(
     if not notebook_name and not yes and _interactive():
         ui.console.print()
         title = click.prompt("Notebook name", default=title).strip() or title
+    # A long build can outlive a sign-in; the books are in memory, so signing in again costs nothing.
+    _session, again = _ensure_signed_in(engine, before="uploading", yes=yes, account=confirmed.email)
+    if again and confirmed.email is None:
+        # The account was never recorded, so it cannot be compared: ask about it again.
+        confirmed = engine.client.upload_account()
+        ui.console.print(f"\nAfter signing in again, uploads go to {_who(confirmed)}.")
+        if not _ask("Do you want to continue"):
+            raise AlchemyError(
+                "Cancelled. Nothing was uploaded.",
+                hint="Run the same command again; the work already done is kept.",
+            )
     _same_account_as_confirmed(engine, confirmed)
     with ui.Reporter() as reporter:
         synced = engine.publish(
@@ -657,7 +707,9 @@ def status(profile: str | None) -> None:
         else:
             line(False, f"Signed in to NotebookLM{where}, but the Google account was not recorded.")
         try:
-            line(*_keepalive_line(_keepalive(engine).state()))
+            refresh_line = _keepalive_line(_keepalive(engine).state())
+            if refresh_line:
+                line(*refresh_line)
         except AlchemyError as exc:
             line(
                 False,
@@ -871,7 +923,7 @@ def _sign_in(
     "--keep-signed-in/--no-keep-signed-in",
     "keep",
     default=None,
-    help="Refresh the sign-in in the background so it does not expire between runs (asked if not given).",
+    help="Also turn the optional background refresh on or off (see `keep-signed-in`).",
 )
 @click.option(
     "--timeout",
@@ -912,51 +964,23 @@ def login(
         timeout=timeout,
         fresh=fresh,
     )
-    _offer_keep_signed_in(_engine(profile), keep)
+    if keep is not None:
+        _keep_signed_in(_engine(profile), keep)
 
 
 def _keepalive(engine: AlchemyEngine) -> KeepAlive:
     return KeepAlive(engine.client.profile, engine.home)
 
 
-def _offer_keep_signed_in(engine: AlchemyEngine, keep: bool | None) -> None:
-    """After a sign-in: switch the background refresh on, unless the user says no.
-
-    When it was only offered (`keep` is None), a problem with it is a warning: the sign-in itself
-    worked, so `login` and the guided run carry on.
-    """
-    if keep is not None:
-        _keep_signed_in(engine, keep)
-        return
-    try:
-        _keep_signed_in(engine, None)
-    except AlchemyError as exc:
-        ui.warn(f"The sign-in works, but it could not be kept fresh in the background: {esc(exc.message)}")
-        ui.next_command("try again later", "notebook-alchemy keep-signed-in")
-
-
-def _keep_signed_in(engine: AlchemyEngine, keep: bool | None) -> None:
-    override = engine.client.storage_override()
-    if override:
-        if keep:
-            raise ConfigError(
-                "ALCHEMY_SESSION_FILE is set, so uploads use that file's sign-in, which the background "
-                "refresh (it works per NotebookLM profile) would not keep fresh.",
-                hint="Remove ALCHEMY_SESSION_FILE from .env and sign in with a profile to use it.",
-            )
-        return
-    keeper = _keepalive(engine)
-    if keep is None:
-        if keeper.state().on:
-            return  # already on for this profile; nothing to ask
-        if not _interactive():
-            ui.next_command("keep this sign-in from expiring between runs", "notebook-alchemy keep-signed-in")
-            return
-        ui.console.print(
-            "Google ends an idle sign-in within hours. Notebook Alchemy can refresh it every "
-            f"{INTERVAL_MINUTES} minutes in the background, so later runs work without signing in again."
+def _keep_signed_in(engine: AlchemyEngine, keep: bool) -> None:
+    """Turn the optional background refresh on or off. It is never offered: it is asked for."""
+    if keep and engine.client.storage_override():
+        raise ConfigError(
+            "ALCHEMY_SESSION_FILE is set, so uploads use that file's sign-in, which the background "
+            "refresh (it works per NotebookLM profile) would not keep fresh.",
+            hint="Remove ALCHEMY_SESSION_FILE from .env and sign in with a profile to use it.",
         )
-        keep = _ask("Do you want to keep this sign-in fresh", default=True)
+    keeper = _keepalive(engine)
     if keep:
         kind = keeper.enable()
         ui.success("The sign-in is refreshed in the background.")
@@ -965,9 +989,10 @@ def _keep_signed_in(engine: AlchemyEngine, keep: bool | None) -> None:
         ui.success("The background refresh is off.")
 
 
-def _keepalive_line(state: KeepAliveState) -> tuple[bool, str]:
+def _keepalive_line(state: KeepAliveState) -> tuple[bool, str] | None:
+    """The status line for the optional background refresh; None when it is off (the normal case)."""
     if not state.on:
-        return False, "The sign-in is not refreshed in the background, so it can expire between runs."
+        return None
     if state.stale:
         when = ui.ago(state.last_at)
         return False, (
@@ -1004,7 +1029,12 @@ def _keepalive_line(state: KeepAliveState) -> tuple[bool, str]:
 @verbose_option
 @handle_errors
 def keep_signed_in(off: bool, profile: str | None) -> None:
-    """Refresh the NotebookLM sign-in in the background so it does not expire between runs."""
+    """Optional: refresh the NotebookLM sign-in in the background every 20 minutes.
+
+    It keeps a sign-in alive only while Google accepts the refresh; on some computers Google still
+    ends the sign-in within hours. `status` shows whether it is working. Without it, `run` asks you
+    to sign in again when the sign-in has ended.
+    """
     engine = _engine(profile)
     if off:
         if _keepalive(engine).disable():
@@ -1054,25 +1084,13 @@ def guided(ctx: click.Context) -> None:
     config = _config()
 
     ui.step(1, 3, "Sign in to NotebookLM")
-    client = NotebookLMClient(config)
-    signed_in = False
-    if client.is_authenticated():
-        with ui.console.status("Checking your NotebookLM sign-in..."):
-            signed_in = client.check_session().ok
-    if signed_in:
-        ui.success(f"Signed in as {_who(client.upload_account())}.")
-    else:
-        ui.info(
-            "  If Google needs you to sign in, a browser window opens: use the Google account your "
-            "notebooks should go to."
-        )
-        if not _ask("Do you want to sign in now", default=True):
-            raise AlchemyError(
-                "Nothing was done: the notebook is made in your NotebookLM account, so it needs a sign-in.",
-                hint="Run `notebook-alchemy` again when you are ready.",
-            )
-        _sign_in(client)
-    _offer_keep_signed_in(AlchemyEngine(config), None)
+    engine = AlchemyEngine(config)
+    ui.info(
+        "  If Google needs you to sign in, a browser window opens: use the Google account your "
+        "notebooks should go to."
+    )
+    _ensure_signed_in(engine, before="choosing a channel")
+    ui.success(f"Signed in as {_who(engine.client.upload_account())}.")
 
     ui.step(2, 3, "Sorting into topics (optional)")
     if config.has_gemini_key:
