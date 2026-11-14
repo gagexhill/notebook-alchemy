@@ -379,18 +379,16 @@ def test_plan_limits_name_the_plan_and_are_never_guessed(tmp_path: Path) -> None
     assert NotebookLMClient(AlchemyConfig()).plan_limits() is None  # no session: unknown, not a guess
 
 
-def test_notebooklm_may_renew_stale_cookies_from_its_own_sign_in_profile(
+def test_notebooklm_is_not_told_to_renew_sessions_through_a_hidden_browser(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seen: list[dict[str, str]] = []
+    # The headless renewal made a signed-out check take minutes; an ended sign-in is offered instead.
+    seen: list[object] = []
 
     def runner(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        seen.append(dict(kwargs["env"]))  # type: ignore[arg-type]
+        seen.append(kwargs.get("env"))
         return subprocess.CompletedProcess(cmd, 0, json.dumps({"notebooks": []}), "")
 
-    client = _client(tmp_path, runner)  # type: ignore[arg-type]
-    client.list_notebooks()
-    assert seen[-1]["NOTEBOOKLM_HEADLESS_REAUTH"] == "1"
-    monkeypatch.setenv("NOTEBOOKLM_HEADLESS_REAUTH", "0")  # the user's own choice is kept
-    client.list_notebooks()
-    assert seen[-1]["NOTEBOOKLM_HEADLESS_REAUTH"] == "0"
+    monkeypatch.delenv("NOTEBOOKLM_HEADLESS_REAUTH", raising=False)
+    _client(tmp_path, runner).list_notebooks()  # type: ignore[arg-type]
+    assert seen == [None]  # the user's own environment, unchanged

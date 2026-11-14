@@ -1295,3 +1295,43 @@ def test_the_guided_run_warns_when_the_environment_key_would_win(
     result = runner.invoke(cli, [], input=f"y\n{key}\n@kizzyparks\n")
     assert result.exit_code == 0, result.output
     assert "also set in your environment" in " ".join(result.output.split())
+
+
+def _login_runs(monkeypatch: pytest.MonkeyPatch, *checks: bool) -> list[list[str]]:
+    """`notebooklm login` always succeeds; check_session answers `checks` in turn."""
+    logins: list[list[str]] = []
+
+    def run(cmd, **kw):
+        logins.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    answers = iter(checks)
+
+    def check(self):
+        ok = next(answers, checks[-1])
+        return SessionStatus(ok, "ok" if ok else "Authentication expired or invalid.", 1, signed_out=not ok)
+
+    monkeypatch.setattr(NotebookLMClient, "check_session", check)
+    return logins
+
+
+def test_a_sign_in_that_reused_a_stale_browser_opens_a_clean_window(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    logins = _login_runs(monkeypatch, False, True)  # the reused browser did not work; the clean one did
+    result = runner.invoke(cli, ["login"])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert f"Sign in as [{ACCOUNT}]" in flat and "https://notebooklm.google.com" in flat
+    assert "a clean sign-in window opens" in flat
+    assert ["--fresh" in cmd for cmd in logins] == [False, True]
+
+
+def test_a_clean_window_that_still_fails_is_reported_not_retried_again(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    logins = _login_runs(monkeypatch, False)
+    result = runner.invoke(cli, ["login"])
+    assert result.exit_code == 1 and "the check that it works failed" in result.output
+    assert len(logins) == 2  # the first sign-in and one clean retry

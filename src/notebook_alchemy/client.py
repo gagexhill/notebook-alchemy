@@ -31,13 +31,6 @@ logger = logging.getLogger(__name__)
 NOTEBOOKLM_BIN = "notebooklm"
 
 
-def _notebooklm_env() -> dict[str, str]:
-    """The environment for `notebooklm`: when the saved cookies have gone stale, let it renew them
-    from its own sign-in browser profile (still signed in to Google) instead of failing the run. The
-    renewal is local, headless, and only ever uses that profile; a value already set is kept."""
-    return {**os.environ, "NOTEBOOKLM_HEADLESS_REAUTH": os.environ.get("NOTEBOOKLM_HEADLESS_REAUTH", "1")}
-
-
 LIST_TIMEOUT = 60.0
 WRITE_TIMEOUT = 120.0
 UPLOAD_TIMEOUT = 300.0
@@ -362,7 +355,6 @@ class NotebookLMClient:
                 text=True,
                 encoding="utf-8",
                 timeout=timeout,
-                env=_notebooklm_env(),
             )
         except FileNotFoundError as exc:
             raise NotebookLMError(

@@ -822,9 +822,13 @@ def _sign_in(
         cmd += ["--browser", browser, "--browser-timeout", str(timeout)]
         if fresh:
             cmd.append("--fresh")
+        # Said the way Google's own command-line tools say it: what opens, and as whom to sign in.
+        expected = account or client.upload_account().email
+        ui.info(f"Opening a browser window to sign in to NotebookLM ({NOTEBOOKLM_URL}).")
         ui.info(
-            "Signing in. If Google needs you to sign in again, a browser window opens: use the Google "
-            "account you want to upload to."
+            f"Sign in as {ui.name(expected)}."
+            if expected
+            else "Sign in with the Google account your notebooks should go to."
         )
         waiting = "Waiting for you to finish signing in..."
     proc = _run_login(cmd, waiting)
@@ -878,6 +882,11 @@ def _sign_in(
         )
     with ui.console.status("Checking the sign-in..."):
         result = client.check_session()
+    if not result.ok and result.signed_out and not browser_cookies and not fresh:
+        # notebooklm reused its saved browser, which still looked signed in to Google, without
+        # showing a window, and the session it saved does not work: sign in from a clean browser.
+        ui.info("The saved browser sign-in no longer works, so a clean sign-in window opens.")
+        return _sign_in(client, browser=browser, account=account, timeout=timeout, fresh=True)
     if not result.ok:
         raise SessionError(
             f"Sign-in finished but the check that it works failed: {result.detail}",
