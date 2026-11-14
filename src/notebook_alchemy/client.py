@@ -72,9 +72,20 @@ def default_api(profile: str | None, path: str | None) -> Any:
     # The library's usual wait for an answer is short for a large book, so both steps of an upload
     # get a longer one. allow_headless stays off: renewing an ended sign-in through a hidden browser
     # made a signed-out check take minutes; an ended sign-in is offered to the user instead.
+    _quiet_library_logging()
     window = TimeoutOptions(connect=10.0, read=UPLOAD_HTTP_TIMEOUT, write=UPLOAD_HTTP_TIMEOUT, pool=10.0)
     config = ClientConfig(transfers=TransferOptions(start_timeout=window, finalize_timeout=window))
     return _Library.from_storage(path=path, profile=profile, allow_headless=False, config=config)
+
+
+def _quiet_library_logging() -> None:
+    """The library prints its own warnings (with ids, in its own terms) and also hands them to
+    this tool's logging, so each showed twice. They are printed once, by the library's own
+    handler, which hides credentials, and only with -v; errors are always shown."""
+    library = logging.getLogger("notebooklm")
+    library.propagate = False
+    if logging.getLogger().getEffectiveLevel() > logging.INFO:
+        library.setLevel(logging.ERROR)
 
 
 class _NoSignIn(Exception):
@@ -783,7 +794,7 @@ class NotebookLMClient:
         """Block until NotebookLM has finished processing a source; raise if it failed or timed out."""
         # The library does the waiting and reports the timeout; ours is only a later backstop.
         self._call(
-            f"waited {timeout}s for a source",
+            f"waiting up to {timeout}s for a source",
             lambda lib: lib.sources.wait_until_ready(notebook_id, source_id, timeout=float(timeout)),
             timeout=timeout + 30,
         )

@@ -684,3 +684,23 @@ def test_a_client_whose_session_was_closed_elsewhere_opens_a_new_one(tmp_path: P
     close_all()  # what the end of every command does
     assert not client.session_is_open
     assert len(client.list_notebooks()) == 2 and len(fake.opened) == 2
+
+
+def test_the_librarys_own_warnings_are_shown_once_and_only_with_v(monkeypatch: pytest.MonkeyPatch) -> None:
+    import logging
+
+    import notebooklm
+
+    from .conftest import real_default_api
+
+    library, root = logging.getLogger("notebooklm"), logging.getLogger()
+    monkeypatch.setattr(library, "propagate", True)
+    monkeypatch.setattr(library, "level", logging.WARNING)
+    monkeypatch.setattr(root, "level", logging.WARNING)
+    monkeypatch.setattr(notebooklm.NotebookLMClient, "from_storage", classmethod(lambda cls, **kw: None))
+    real_default_api()("work", None)
+    assert library.propagate is False and library.level == logging.ERROR  # quiet by default, never twice
+    monkeypatch.setattr(library, "level", logging.WARNING)
+    monkeypatch.setattr(root, "level", logging.INFO)  # -v
+    real_default_api()("work", None)
+    assert library.level == logging.WARNING
