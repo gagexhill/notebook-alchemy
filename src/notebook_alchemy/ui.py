@@ -79,9 +79,13 @@ def step(number: int, total: int, label: str) -> None:
         console.print(f"\n[bold]Step {number} of {total}:[/bold] {esc(label)}")
 
 
-def success(message: str) -> None:
-    """A result. Printed even with -q, which keeps errors and final results."""
-    console.print(f"[green]✓[/green] {message}")
+def success(message: str, *, whole: bool = False) -> None:
+    """A result. Printed even with -q, which keeps errors and final results.
+
+    `whole` keeps the line unwrapped, for a line that ends in a path: a path cut in the middle of a
+    folder name cannot be copied.
+    """
+    console.print(f"[green]✓[/green] {message}", soft_wrap=whole)
 
 
 def warn(message: str, *, always: bool = False) -> None:
@@ -182,7 +186,7 @@ class Reporter:
             return
         if done >= total and stage not in self._seen:  # not a terminal: one line per finished stage
             self._seen.add(stage)
-            detail(f"  {esc(stage)}: {done}/{total}")
+            info(f"  {esc(stage)}: {done}/{total}")
 
 
 def human_bytes(n: int) -> str:

@@ -326,12 +326,14 @@ def _removed(message: str) -> Callable[[click.Context, click.Parameter, Any], An
     context_settings={"help_option_names": ["-h", "--help"], "max_content_width": 100},
     epilog=(
         "\b\nFirst run:\n"
-        "  notebook-alchemy                         a guided first run: sign in, pick a channel, done\n"
-        "  notebook-alchemy test                    check that everything installed correctly\n"
-        "  notebook-alchemy setup                   add a Claude API key and choose the Google account\n"
-        "  notebook-alchemy dry-run <youtube-url>   preview videos, words and cost\n"
-        "  notebook-alchemy run <youtube-url>       build the topic books and upload them\n"
-        "\nDocs: https://github.com/gagexhill/notebook-alchemy"
+        "  notebook-alchemy                   a guided first run\n"
+        "  notebook-alchemy test              check the install\n"
+        "  notebook-alchemy setup             add a Claude API key, choose the account\n"
+        "  notebook-alchemy dry-run <url>     preview videos, words and cost\n"
+        "  notebook-alchemy run <url>         build the topic books and upload them\n"
+        "\nExit codes: 0 done; 1 a failure the message explains; 2 a wrong option or\n"
+        "setting; 70 an unexpected error; 130 stopped with Ctrl+C.\n"
+        "\nDocs:\n  https://github.com/gagexhill/notebook-alchemy"
     ),
 )
 @click.version_option(version=__version__, prog_name="notebook-alchemy")
@@ -374,9 +376,10 @@ def cli(ctx: click.Context, quiet: bool, verbose: int, no_color: bool, debug: bo
     epilog=(
         "\b\nExamples:\n"
         "  notebook-alchemy run https://www.youtube.com/@Hyperplexed\n"
-        '  notebook-alchemy run @Hyperplexed -N "CSS Course" --yes   name the notebook, skip questions\n'
-        "  notebook-alchemy run @Hyperplexed --save books           write the books here, upload nothing\n"
-        "  notebook-alchemy run --mock --save books                 try the sample catalog\n"
+        '  notebook-alchemy run @Hyperplexed -N "CSS Course" --yes\n'
+        "                                         name the notebook, skip the questions\n"
+        "  notebook-alchemy run @Hyperplexed --save books   save them, upload nothing\n"
+        "  notebook-alchemy run --mock --save books         try the sample catalog\n"
         "\nRun it again any time: only new videos cost anything, and the notebook is updated in place.\n"
     ),
 )
@@ -558,12 +561,14 @@ def run_pipeline(
 
     if save_dir is not None:
         paths = engine.save_books(report.books, save_dir)
-        ui.success(f"Saved {_plural(len(paths), 'file')} to {ui.name(_short(save_dir))}.")
+        ui.success(f"Saved {_plural(len(paths), 'file')} to {ui.name(_short(save_dir))}.", whole=True)
         return
 
     ui.step(3, total, "Uploading to NotebookLM")
     if confirmed is None:  # set whenever uploading
-        raise AlchemyError("Nothing to upload to.")
+        raise AlchemyError(
+            "Nothing to upload to.", hint="Run `notebook-alchemy login`, then the same command again."
+        )
     title = notebook_name or report.library.notebook_title
     if not notebook_name and not yes and _interactive():
         ui.console.print()
@@ -695,7 +700,15 @@ def dry_run(source: str | None, limit: int | None, tabs: tuple[str, ...], mock: 
 # --- status / login ------------------------------------------------------------------------------
 
 
-@cli.command(name="status")
+@cli.command(
+    name="status",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy status              is everything ready?\n"
+        "  notebook-alchemy status -v           every setting\n"
+        "  notebook-alchemy status -p personal  another account's profile\n"
+    ),
+)
 @profile_option
 @verbose_option
 @handle_errors
@@ -884,10 +897,10 @@ def _sign_in(
     name="login",
     epilog=(
         "\b\nExamples:\n"
-        "  notebook-alchemy login                        sign in through a browser window\n"
+        "  notebook-alchemy login           sign in through a browser window\n"
         "  notebook-alchemy login --account you@example.test --profile personal\n"
-        "                                                check the account, keep it in its own profile\n"
-        "  notebook-alchemy login --check                is the sign-in still working?\n"
+        "                                   check the account; use its own profile\n"
+        "  notebook-alchemy login --check   is the sign-in still working?\n"
     ),
 )
 @click.option(
@@ -1015,16 +1028,17 @@ def _keepalive_line(state: KeepAliveState) -> tuple[bool, str] | None:
     name="keep-signed-in",
     epilog=(
         "\b\nExamples:\n"
-        "  notebook-alchemy keep-signed-in              refresh the sign-in every 20 minutes\n"
+        "  notebook-alchemy keep-signed-in              refresh it every 20 minutes\n"
         "  notebook-alchemy keep-signed-in --off        stop refreshing it\n"
         "  notebook-alchemy keep-signed-in -p personal  for the profile named personal\n"
     ),
 )
 @click.option("--off", is_flag=True, help="Stop refreshing the sign-in in the background.")
+@click.option("-y", "--yes", is_flag=True, help="With --off: stop it without asking.")
 @profile_option
 @verbose_option
 @handle_errors
-def keep_signed_in(off: bool, profile: str | None) -> None:
+def keep_signed_in(off: bool, yes: bool, profile: str | None) -> None:
     """Optional: refresh the NotebookLM sign-in in the background every 20 minutes.
 
     It keeps a sign-in alive only while Google accepts the refresh; on some computers Google still
@@ -1033,6 +1047,12 @@ def keep_signed_in(off: bool, profile: str | None) -> None:
     """
     engine = _engine(profile)
     if off:
+        # Asked in a terminal only: outside one, --off is itself the instruction.
+        if not yes and _interactive() and _keepalive(engine).state().on:
+            ui.console.print("The background refresh of this sign-in will be removed from your scheduler.")
+            if not _ask("Do you want to continue"):
+                ui.info("Cancelled. Nothing was changed.")
+                return
         if _keepalive(engine).disable():
             ui.success("The background refresh is off.")
         else:
@@ -1291,10 +1311,19 @@ def export_state_command(file: Path) -> None:
 )
 @click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--replace", is_flag=True, help="Overwrite files this computer already has.")
+@click.option("-y", "--yes", is_flag=True, help="With --replace: overwrite without asking.")
 @verbose_option
 @handle_errors
-def import_state_command(file: Path, replace: bool) -> None:
+def import_state_command(file: Path, replace: bool, yes: bool) -> None:
     """Load captions, labels and sorting saved with `export-state`, so nothing is read or paid for again."""
+    # Asked in a terminal only: outside one, --replace is itself the instruction.
+    if replace and not yes and _interactive():
+        ui.console.print(
+            "Captions, labels and sorting this computer already has will be overwritten by the file's copies."
+        )
+        if not _ask("Do you want to continue"):
+            ui.info("Cancelled. Nothing was imported.")
+            return
     summary = import_state(AlchemyEngine(_config()), file, replace=replace)
     ui.success(f"Imported {_plural(summary.total, 'file')} from {ui.name(file)}.")
     ui.detail(f"  {_state_counts(summary.files)}.")
@@ -1382,10 +1411,10 @@ def _remove(path: Path) -> int:
     name="clean",
     epilog=(
         "\b\nExamples:\n"
-        "  notebook-alchemy clean                  clear downloaded captions\n"
-        "  notebook-alchemy clean --labels         forget the AI's labels and sorting (re-runs cost again)\n"
-        "  notebook-alchemy clean --records        forget past uploads and upload confirmations\n"
-        "  notebook-alchemy clean --all --yes      all of the above, without asking\n"
+        "  notebook-alchemy clean               clear downloaded captions\n"
+        "  notebook-alchemy clean --labels      forget the AI's labels and sorting\n"
+        "  notebook-alchemy clean --records     forget past uploads and confirmations\n"
+        "  notebook-alchemy clean --all --yes   all of the above, without asking\n"
     ),
 )
 @click.option("--all", "clean_all", is_flag=True, help="Captions, labels, records and old document folders.")
@@ -1450,13 +1479,21 @@ def clean_pipeline(
         return
 
     kinds = {kind for kind, _p in targets}
-    ask = (kinds & {"labels", "record", "vault"} or ("cache" in kinds and custom_cache)) and not yes
+    # Captions alone in the default folder are asked about in a terminal only (they can be read
+    # again for free); labels, records, old vaults and a custom folder are always asked about.
+    costly = bool(kinds & {"labels", "record", "vault"} or ("cache" in kinds and custom_cache))
+    ask = (costly or _interactive()) and not yes
     if ask:
         count = {k: sum(1 for kind, _p in targets if kind == k) for k in kinds}
         if "cache" in kinds and custom_cache:
             ui.console.print(
                 f"{_plural(count['cache'], 'caption file')} in a custom cache folder "
                 f"{ui.name(config.cache_dir)} will be deleted."
+            )
+        elif "cache" in kinds:
+            ui.console.print(
+                f"{_plural(count['cache'], 'caption file')} will be deleted; the next run reads those "
+                "videos again."
             )
         if "labels" in kinds:
             ui.console.print(
@@ -1496,7 +1533,14 @@ def clean_pipeline(
     ui.success(f"Removed {_plural(len(targets), 'item')} and freed {ui.human_bytes(freed)}.")
 
 
-@cli.command(name="test")
+@cli.command(
+    name="test",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy test      check the install\n"
+        "  notebook-alchemy test -v   show each check\n"
+    ),
+)
 @verbose_option
 @handle_errors
 def run_automated_test() -> None:

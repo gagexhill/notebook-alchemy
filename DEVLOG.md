@@ -2,6 +2,16 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## The command line, audited against #32 (2026-11-14)
+
+- **Why.** An audit of 0.3.0 against #32's five acceptance items found gaps in four.
+- **Help.** `status` and `test` gained examples, and every help line now fits 80 columns. The top-level help lists the exit codes; the README has the table.
+- **Progress.** Outside a terminal, a run prints one line per finished stage without `-v`. Before, a piped run showed no progress at all.
+- **Errors.** Every typed error now carries a next step; 17 had none.
+- **Confirmations.** In a terminal, `keep-signed-in --off`, `import-state --replace` and clearing captions now ask first, and `--yes` skips the question. Outside a terminal the flag itself is the instruction, so scripts are not blocked.
+- **Paths.** The line that names where books were saved is never wrapped, so the path can be copied whole.
+- **Guards.** Tests fail if a help line passes 80 columns, a visible command lacks an example, or a typed error is raised without a next step. Each was checked by removing its guard.
+
 ## No browser-cookie reader in the install (#55, 2026-11-14)
 
 - **What was wrong.** The default install required `notebooklm-py[browser,cookies]`. The `cookies` extra installs `rookie-cookies`, a library that reads the saved sign-ins of every installed browser. Microsoft Defender quarantined its binary on the maintainer's machine as a Severe info-stealer. Whether that detection is a false positive was never established; either way, a tool for ordinary users should not put such a reader on their machine.

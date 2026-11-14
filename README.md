@@ -185,7 +185,7 @@ src/notebook_alchemy/
 - **Nothing kept that you did not ask for.** The books go to NotebookLM and are not stored; `--save DIR` writes a copy.
 - **Knows your plan's limit.** `run` reads the upload account's NotebookLM plan (for example Pro: 300 sources per notebook) and will not upload past it. When the notebook is tight, the copies being replaced are removed first.
 - **A known upload account.** `status` and `run` name the Google account that receives uploads, or say plainly when it is unknown. The first upload to an account asks first (`--yes` skips the question).
-- **Checked uploads.** Each book is uploaded, waited on, titled and read back; failures are listed by book and the exit code is non-zero.
+- **Checked uploads.** Each book is uploaded, waited on, titled and read back; failures are listed by book and the exit code is non-zero (see [Exit codes](#exit-codes)).
 - **Key hygiene.** The Claude API key travels in a header only and is removed from every error and log line.
 - **Plain output, detail on request.** Modelled on Google's `gcloud`:
   - everyday words and one line per result;
@@ -347,6 +347,16 @@ A real preview of that channel, recorded from the terminal:
 - **Browser sign-in for yt-dlp:** `--cookies chrome` lets yt-dlp use your browser's YouTube sign-in. On Windows, Chrome and Edge often lock or encrypt it, and the run says so.
 
 **Channel tabs:** a channel link reads the Videos and Live tabs; add Shorts with `--tabs videos,streams,shorts`. Playlist and video links are read as they are.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Done. |
+| 1 | A failure the message explains, with a next step: a channel that cannot be read, an ended sign-in outside a terminal, a failed upload, a failed self-test. |
+| 2 | A wrong option or argument, or a setting in `.env` or the environment that is not valid. |
+| 70 | An unexpected error; run again with `--debug` and report it. |
+| 130 | Stopped with Ctrl+C. |
 
 ### What It Stores
 

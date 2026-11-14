@@ -1408,3 +1408,123 @@ def test_the_install_does_not_pull_in_a_browser_cookie_reader() -> None:
     notebooklm = [d for d in deps if d.startswith("notebooklm-py")]
     assert notebooklm == ["notebooklm-py[browser]>=0.8.6,<0.9"]  # no `cookies` extra (rookie-cookies)
     assert not any("rookie" in d or "cookie" in d for d in deps)
+
+
+def test_every_help_line_fits_in_80_columns() -> None:
+    top = click.Context(cli, info_name="notebook-alchemy", max_content_width=100, terminal_width=80)
+    helps = {"notebook-alchemy": cli.get_help(top)}
+    for name, command in cli.commands.items():
+        if not command.hidden:
+            ctx = click.Context(command, info_name=name, parent=top, terminal_width=80, max_content_width=100)
+            helps[name] = command.get_help(ctx)
+    long = [f"{name}: {line}" for name, text in helps.items() for line in text.splitlines() if len(line) > 80]
+    assert long == []
+
+
+def test_every_visible_command_has_an_example_in_its_help() -> None:
+    missing = [n for n, c in cli.commands.items() if not c.hidden and "Example" not in (c.epilog or "")]
+    assert missing == []
+
+
+def test_turning_the_refresh_off_in_a_terminal_asks_first(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _signed_in(monkeypatch)
+    monkeypatch.setattr(NotebookLMClient, "is_authenticated", lambda self: True)
+    turned_on = runner.invoke(cli, ["keep-signed-in"])
+    assert turned_on.exit_code == 0, turned_on.output
+    assert isolated_environment.scheduler.tasks
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    kept = runner.invoke(cli, ["keep-signed-in", "--off"], input="n\n")
+    assert "Nothing was changed" in kept.output and isolated_environment.scheduler.tasks
+    gone = runner.invoke(cli, ["keep-signed-in", "--off", "--yes"])
+    assert gone.exit_code == 0 and not isolated_environment.scheduler.tasks
+
+
+def test_replacing_on_import_in_a_terminal_asks_first(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment, tmp_path: Path
+) -> None:
+    home = isolated_environment.home / ".notebook-alchemy"
+    (home / "cache").mkdir(parents=True, exist_ok=True)
+    record = home / "cache" / "vid00000001.json"
+    record.write_text('{"video_id": "vid00000001", "full_text": "first"}', encoding="utf-8")
+    archive = tmp_path / "state.zip"
+    assert runner.invoke(cli, ["export-state", str(archive)]).exit_code == 0
+    record.write_text('{"video_id": "vid00000001", "full_text": "changed here"}', encoding="utf-8")
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    declined = runner.invoke(cli, ["import-state", str(archive), "--replace"], input="n\n")
+    assert "Nothing was imported" in declined.output and "changed here" in record.read_text(encoding="utf-8")
+    accepted = runner.invoke(cli, ["import-state", str(archive), "--replace", "--yes"])
+    assert accepted.exit_code == 0 and "first" in record.read_text(encoding="utf-8")
+
+
+def test_clearing_captions_in_a_terminal_asks_first(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    cache = isolated_environment.home / ".notebook-alchemy" / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    record = cache / "vid00000001.json"
+    record.write_text('{"video_id": "vid00000001", "full_text": "words"}', encoding="utf-8")
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    declined = runner.invoke(cli, ["clean"], input="n\n")
+    assert "Nothing was deleted" in declined.output and record.exists()
+    assert runner.invoke(cli, ["clean", "--yes"]).exit_code == 0 and not record.exists()
+
+
+def test_every_typed_error_carries_a_next_step() -> None:
+    import ast
+
+    family = {
+        "AlchemyError", "ConfigError", "ChannelScanError", "ClaudeError",
+        "NotebookLMError", "SessionError", "SyncError", "VaultError",
+    }  # fmt: skip
+    source_dir = Path(cli_module.__file__).parent
+    missing = []
+    for path in sorted(source_dir.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            call = node.exc if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) else None
+            if call is None or getattr(call.func, "id", "") not in family:
+                continue
+            if not any(k.arg == "hint" for k in call.keywords):
+                missing.append(f"{path.name}:{node.lineno}")
+    assert missing == []
+
+
+def test_progress_outside_a_terminal_is_one_line_per_finished_stage(capsys, monkeypatch) -> None:
+    from notebook_alchemy import ui
+
+    monkeypatch.setattr(ui.UiState, "quiet", False)
+    monkeypatch.setattr(ui.UiState, "verbose", 0)
+    with ui.Reporter() as report:  # under pytest the console is not a terminal
+        report("Labelling", 1, 3)
+        report("Labelling", 3, 3)
+        report("Labelling", 3, 3)
+    assert capsys.readouterr().out.count("Labelling: 3/3") == 1  # shown without -v, once
+    monkeypatch.setattr(ui.UiState, "quiet", True)
+    with ui.Reporter() as report:
+        report("Sorting", 2, 2)
+    assert "Sorting" not in capsys.readouterr().out  # -q keeps only errors and results
+
+
+def test_a_saved_path_is_never_cut_in_the_middle(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deep = tmp_path / ("a-long-folder-name-" * 4) / "books"
+    monkeypatch.setenv("COLUMNS", "60")
+    result = runner.invoke(cli, ["run", "--mock", "--save", str(deep)])
+    assert result.exit_code == 0, result.output
+    saved = next(line for line in result.output.splitlines() if "Saved " in line)
+    assert saved.rstrip().endswith("books].")  # the whole path on the line that names it
+
+
+def test_the_help_and_readme_document_the_exit_codes(runner: CliRunner) -> None:
+    from notebook_alchemy import ui
+    from notebook_alchemy.errors import AlchemyError, ConfigError
+
+    codes = {0, AlchemyError.exit_code, ConfigError.exit_code, ui.EXIT_UNEXPECTED, ui.EXIT_INTERRUPTED}
+    assert codes == {0, 1, 2, 70, 130}
+    help_text = " ".join(runner.invoke(cli, ["--help"]).output.split())
+    readme = (Path(cli_module.__file__).resolve().parents[2] / "README.md").read_text(encoding="utf-8")
+    for code in sorted(codes):
+        assert f"{code} " in help_text.split("Exit codes:")[1]
+        assert f"| {code} |" in readme
