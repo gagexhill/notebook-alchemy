@@ -890,3 +890,25 @@ def test_cached_words_a_model_wrote_down_are_read_again(tmp_path: Path) -> None:
     engine.transcripts._write_cache("vid00000002", "t", "captions said this", method="youtube")
     assert engine.transcripts._read_cache("vid00000001") is None  # not used: the video is read again
     assert engine.transcripts._read_cache("vid00000002").text == "captions said this"
+
+
+def test_a_half_made_upload_is_recorded_so_the_next_run_removes_it(tmp_path: Path) -> None:
+    import notebooklm.exceptions as lib
+
+    fake = FakeNotebookLM()
+    nb = fake.seed("Chan", [])
+    fake.sources[nb].append({"id": "src-half", "title": "Beta_Topics.md", "status": "error"})
+
+    def breaks_after_registering(words: list[str]) -> None:
+        if "add" in words and any("Beta" in part for part in words):
+            raise lib.SourceProcessingError("src-half")  # NotebookLM kept a source it could not finish
+
+    fake.before = breaks_after_registering
+    engine = _fake_engine(tmp_path, fake)
+    with pytest.raises(SyncError):
+        engine.publish("Chan", _books())
+    record = json.loads(engine._sync_state_path(nb).read_text(encoding="utf-8"))
+    assert "src-half" in record["orphans"]
+    fake.before = None
+    engine.publish("Chan", _books())
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]  # the half-made copy is gone

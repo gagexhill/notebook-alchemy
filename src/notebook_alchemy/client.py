@@ -39,6 +39,8 @@ NOTEBOOKLM_BIN = "notebooklm"
 LIST_TIMEOUT = 60.0
 OPEN_TIMEOUT = 60.0  # opening the session: reading the sign-in file and one request for its tokens
 CLOSE_TIMEOUT = 10.0
+# After a call runs out of time: how long it is given to let go of what it was doing.
+SETTLE_TIMEOUT = 30.0
 # For answers from NotebookLM this tool cannot read: usually a newer or older notebooklm-py.
 UNEXPECTED_HINT = (
     "Run the same command again. If it keeps failing, update Notebook Alchemy by running its "
@@ -65,20 +67,30 @@ ApiOpener = Callable[[str | None, str | None], Any]
 def default_api(profile: str | None, path: str | None) -> Any:
     """notebooklm-py's client for a profile, or for a session file when one is given."""
     from notebooklm import NotebookLMClient as _Library  # imported on use: it takes half a second
+    from notebooklm.options import ClientConfig, TimeoutOptions, TransferOptions
 
-    # allow_headless stays off: renewing an ended sign-in through a hidden browser made a
-    # signed-out check take minutes; an ended sign-in is offered to the user instead.
-    return _Library.from_storage(
-        path=path, profile=profile, upload_timeout=UPLOAD_HTTP_TIMEOUT, allow_headless=False
-    )
+    # The library's usual wait for an answer is short for a large book, so both steps of an upload
+    # get a longer one. allow_headless stays off: renewing an ended sign-in through a hidden browser
+    # made a signed-out check take minutes; an ended sign-in is offered to the user instead.
+    window = TimeoutOptions(connect=10.0, read=UPLOAD_HTTP_TIMEOUT, write=UPLOAD_HTTP_TIMEOUT, pool=10.0)
+    config = ClientConfig(transfers=TransferOptions(start_timeout=window, finalize_timeout=window))
+    return _Library.from_storage(path=path, profile=profile, allow_headless=False, config=config)
 
 
 class _NoSignIn(Exception):
-    """The sign-in file is missing or cannot be read."""
+    """The sign-in file is missing or cannot be used."""
+
+
+class _OpenFailed(Exception):
+    """The session could not be opened, for a reason signing in again would not fix."""
 
 
 class _CallTimeout(Exception):
     """A call did not finish in the time this tool allows."""
+
+
+class _Closed(Exception):
+    """The session was closed while the call was waiting."""
 
 
 _OPEN: set[_Session] = set()
@@ -96,12 +108,76 @@ def close_all() -> None:
 atexit.register(close_all)
 
 
+class _Pending:
+    """One call handed to the session's event loop, and how it ended."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.task: asyncio.Task[Any] | None = None
+        self.value: Any = None
+        self.error: BaseException | None = None
+
+    def finish(self, value: Any = None, error: BaseException | None = None) -> None:
+        if not self.done.is_set():
+            self.value, self.error = value, error
+            self.done.set()
+
+
+def _submit(loop: asyncio.AbstractEventLoop, make: Callable[[], Awaitable[Any]]) -> _Pending:
+    """Start `make()` on the loop. The result is recorded when the task itself ends, so a cancelled
+    call is known to have let go only once it really has."""
+    pending = _Pending()
+
+    def ended(task: asyncio.Task[Any]) -> None:
+        if task.cancelled():
+            pending.finish(error=asyncio.CancelledError())
+        elif task.exception() is not None:
+            pending.finish(error=task.exception())
+        else:
+            pending.finish(value=task.result())
+
+    def start() -> None:
+        try:
+            pending.task = loop.create_task(make())  # type: ignore[arg-type]
+        except BaseException as exc:  # noqa: BLE001 - handed to the thread that is waiting
+            pending.finish(error=exc)
+            return
+        pending.task.add_done_callback(ended)
+
+    loop.call_soon_threadsafe(start)
+    return pending
+
+
+def _cancel(loop: asyncio.AbstractEventLoop, pending: _Pending) -> None:
+    def stop() -> None:
+        if pending.task is not None:
+            pending.task.cancel()
+
+    try:
+        loop.call_soon_threadsafe(stop)
+    except RuntimeError:  # the loop is already closed: nothing is running on it
+        pending.finish(error=asyncio.CancelledError())
+
+
+def _is_sign_in_file_problem(exc: BaseException) -> bool:
+    """A missing sign-in file, one that is not JSON, or one without the cookies Google needs.
+
+    The library raises other ValueErrors while opening (a page it cannot read, a region block)
+    that signing in again would not fix; those are not sign-in problems. The cookie error is
+    matched by name because the library keeps that class in a private module.
+    """
+    if isinstance(exc, (FileNotFoundError, json.JSONDecodeError)):
+        return True
+    return any(kind.__name__ == "RequiredCookieValidationError" for kind in type(exc).__mro__)
+
+
 class _Session:
     """One notebooklm-py client on one background event loop.
 
     The library is asynchronous and its client belongs to the event loop that opened it, while
     uploads run on several threads. Every call is handed to that one loop and waited on, so all
-    threads share one client and one connection pool. Opened on first use.
+    threads share one client and one connection pool. Opened on first use; once closed it stays
+    closed, and the client makes a new one.
     """
 
     def __init__(self, opener: Callable[[], Any]) -> None:
@@ -111,6 +187,9 @@ class _Session:
         self._thread: threading.Thread | None = None
         self._context: Any = None
         self._library: Any = None
+        self._closed = False
+        self._waiting: set[_Pending] = set()
+        self._waiting_lock = threading.Lock()
 
     @property
     def is_open(self) -> bool:
@@ -118,17 +197,35 @@ class _Session:
 
     def run(self, call: Callable[[Any], Awaitable[Any]], timeout: float) -> Any:
         loop, library = self._open()
-        future = asyncio.run_coroutine_threadsafe(call(library), loop)  # type: ignore[arg-type]
         try:
-            return future.result(timeout)
-        except TimeoutError as exc:
-            if future.done():
-                raise  # the library's own timeout, raised inside the call
-            future.cancel()
-            raise _CallTimeout() from exc
+            pending = _submit(loop, lambda: call(library))
+        except RuntimeError as exc:  # closed between opening and starting
+            raise _Closed() from exc
+        with self._waiting_lock:
+            self._waiting.add(pending)
+        try:
+            if pending.done.wait(timeout):
+                if isinstance(pending.error, asyncio.CancelledError):
+                    raise _Closed() from pending.error
+                if pending.error is not None:
+                    raise pending.error
+                return pending.value
+            # Out of time. The library finishes a request NotebookLM already has before it lets
+            # go, so wait for the call to end: the caller's file is then no longer in use, and an
+            # answer that arrived in the meantime is used, not thrown away.
+            _cancel(loop, pending)
+            pending.done.wait(SETTLE_TIMEOUT)
+            if pending.done.is_set() and pending.error is None:
+                return pending.value
+            raise _CallTimeout()
+        finally:
+            with self._waiting_lock:
+                self._waiting.discard(pending)
 
     def _open(self) -> tuple[asyncio.AbstractEventLoop, Any]:
         with self._lock:
+            if self._closed:
+                raise _Closed()
             if self._loop is not None and self._library is not None:
                 return self._loop, self._library
             loop = asyncio.new_event_loop()
@@ -139,17 +236,30 @@ class _Session:
                 context = self._opener()
                 return context, await context.__aenter__()
 
-            future = asyncio.run_coroutine_threadsafe(enter(), loop)
+            pending = _submit(loop, enter)
             try:
-                self._context, self._library = future.result(OPEN_TIMEOUT)
-            except BaseException as exc:
-                future.cancel()
+                finished = pending.done.wait(OPEN_TIMEOUT)
+            except BaseException:  # Ctrl+C while opening: let the open unwind, then stop the loop
+                _cancel(loop, pending)
+                pending.done.wait(CLOSE_TIMEOUT)
                 _stop_loop(loop, thread)
-                if isinstance(exc, (FileNotFoundError, ValueError)):
-                    raise _NoSignIn(str(exc)) from exc
-                if isinstance(exc, TimeoutError) and not future.done():
-                    raise _CallTimeout() from exc
                 raise
+            if not finished:
+                _cancel(loop, pending)
+                pending.done.wait(CLOSE_TIMEOUT)
+            if not finished or pending.error is not None:
+                _stop_loop(loop, thread)
+                error = pending.error
+                if not finished or error is None:
+                    raise _CallTimeout()
+                if _is_sign_in_file_problem(error):
+                    raise _NoSignIn(
+                        "missing" if isinstance(error, FileNotFoundError) else "unusable"
+                    ) from error
+                if isinstance(error, ValueError):
+                    raise _OpenFailed(str(error)) from error
+                raise error
+            self._context, self._library = pending.value
             self._loop, self._thread = loop, thread
             with _OPEN_LOCK:
                 _OPEN.add(self)
@@ -159,16 +269,25 @@ class _Session:
         with self._lock:
             loop, thread, context = self._loop, self._thread, self._context
             self._loop = self._thread = self._context = self._library = None
+            self._closed = True
         with _OPEN_LOCK:
             _OPEN.discard(self)
         if loop is None or thread is None:
             return
-        try:
-            asyncio.run_coroutine_threadsafe(context.__aexit__(None, None, None), loop).result(CLOSE_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001 - closing is cleanup; the work is done, the reason is logged
-            logger.info("Closing the NotebookLM session: %s", type(exc).__name__)
-        finally:
-            _stop_loop(loop, thread)
+        with self._waiting_lock:
+            waiting = list(self._waiting)
+        for pending in waiting:  # calls still under way are told to stop, and given time to
+            _cancel(loop, pending)
+        for pending in waiting:
+            pending.done.wait(CLOSE_TIMEOUT)
+        closing = _submit(loop, lambda: context.__aexit__(None, None, None))
+        if not closing.done.wait(CLOSE_TIMEOUT):
+            logger.info("Closing the NotebookLM session did not finish in %ss.", CLOSE_TIMEOUT)
+        elif closing.error is not None:  # closing is cleanup; the work is done, the reason is logged
+            logger.info("Closing the NotebookLM session: %s", type(closing.error).__name__)
+        _stop_loop(loop, thread)
+        for pending in waiting:  # none is left waiting on a loop that no longer runs
+            pending.finish(error=asyncio.CancelledError())
 
 
 def _stop_loop(loop: asyncio.AbstractEventLoop, thread: threading.Thread) -> None:
@@ -184,60 +303,90 @@ def _said(exc: BaseException) -> str:
     return re.sub(r"\s*Run 'notebooklm login'[^.]*\.", "", text).strip() or type(exc).__name__
 
 
-def _translate(exc: BaseException, what: str, timeout: float) -> NotebookLMError | None:
-    """A notebooklm-py error as this tool's typed error, chosen by the error's type.
+def _unreachable(exc: BaseException, what: str) -> NotebookLMError:
+    return NotebookLMError(
+        f"NotebookLM could not be reached ({what}): {_said(exc)}",
+        hint="Check your connection and run the same command again.",
+    )
 
-    None for an error that is not NotebookLM's (a bug here or in a test fake), which is raised as it
-    is.
+
+def _limited(what: str, wait: object = None) -> NotebookLMError:
+    asked = f" It asks for {wait} seconds." if wait else ""
+    return NotebookLMError(
+        f"NotebookLM is limiting requests from this account ({what}).{asked}",
+        hint="Wait a few minutes, then run the same command again.",
+    )
+
+
+def _translate(exc: BaseException, what: str, timeout: float) -> NotebookLMError | None:
+    """A failure as this tool's typed error, chosen by the error's type, never by its words.
+
+    None for an error that is not NotebookLM's or the network's (a bug here or in a test fake),
+    which is raised as it is.
     """
     if isinstance(exc, _NoSignIn):
-        return SessionError(
-            f"The NotebookLM sign-in could not be read: {_said(exc)}", hint="Run `notebook-alchemy login`."
+        return SessionError(f"The saved NotebookLM sign-in is {exc}.", hint="Run `notebook-alchemy login`.")
+    if isinstance(exc, _OpenFailed):
+        return NotebookLMError(
+            f"NotebookLM's sign-in could not be checked ({what}): {_said(exc)}", hint=UNEXPECTED_HINT
+        )
+    if isinstance(exc, _Closed):
+        return NotebookLMError(
+            f"The NotebookLM session was closed before the request finished ({what}).", hint=RETRY_HINT
         )
     if isinstance(exc, _CallTimeout):
         return NotebookLMError(
             f"NotebookLM did not finish in {timeout:.0f}s ({what}).",
             hint="Check your connection and run the same command again.",
         )
-    import notebooklm.exceptions as lib  # imported on use: it takes half a second
+    import httpx  # the library's own HTTP client; both imported on use
+    import notebooklm.exceptions as lib
 
+    error: NotebookLMError | None = None
     if isinstance(exc, lib.AuthError):
-        return SessionError(
+        error = SessionError(
             f"NotebookLM rejected the session: {_said(exc)}", hint="Run `notebook-alchemy login`."
         )
-    if isinstance(exc, lib.RateLimitError):
-        wait = f" It asks for {exc.retry_after} seconds." if getattr(exc, "retry_after", None) else ""
-        return NotebookLMError(
-            f"NotebookLM is limiting requests from this account ({what}).{wait}",
-            hint="Wait a few minutes, then run the same command again.",
-        )
-    if isinstance(exc, lib.NotebookLimitError):
-        return NotebookLMError(
+    elif isinstance(exc, lib.RateLimitError):
+        error = _limited(what, getattr(exc, "retry_after", None))
+    elif isinstance(exc, lib.NotebookLimitError):
+        error = NotebookLMError(
             "This NotebookLM account has as many notebooks as its plan allows.",
             hint="Delete a notebook you no longer need in NotebookLM, then run the same command again.",
         )
-    if isinstance(exc, lib.SourceTimeoutError):
-        return NotebookLMError(
-            f"NotebookLM was still processing the source after {timeout:.0f}s ({what}).",
+    elif isinstance(exc, lib.SourceTimeoutError):
+        error = NotebookLMError(
+            f"NotebookLM was still processing the source when the wait ended ({what}).",
             hint="Run the same command again; a source that is ready by then is not uploaded twice.",
         )
-    if isinstance(exc, lib.SourceProcessingError):
-        return NotebookLMError(f"NotebookLM could not process the source ({what}).", hint=RETRY_HINT)
-    if isinstance(exc, lib.SourceNotFoundError):
-        return NotebookLMError(f"The source is no longer in the notebook ({what}).", hint=RETRY_HINT)
-    if isinstance(exc, lib.NetworkError):  # includes the library's request timeout
-        return NotebookLMError(
-            f"NotebookLM could not be reached ({what}): {_said(exc)}",
-            hint="Check your connection and run the same command again.",
-        )
-    if isinstance(exc, lib.DecodingError):
-        return NotebookLMError(
+    elif isinstance(exc, lib.SourceProcessingError):
+        error = NotebookLMError(f"NotebookLM could not process the source ({what}).", hint=RETRY_HINT)
+    elif isinstance(exc, lib.SourceNotFoundError):
+        error = NotebookLMError(f"The source is no longer in the notebook ({what}).", hint=RETRY_HINT)
+    elif isinstance(exc, lib.NetworkError):  # includes the library's request timeout
+        error = _unreachable(exc, what)
+    elif isinstance(exc, lib.DecodingError):
+        error = NotebookLMError(
             f"NotebookLM answered in a form this tool cannot read ({what}): {_said(exc)}",
             hint=UNEXPECTED_HINT,
         )
-    if isinstance(exc, lib.NotebookLMError):
-        return NotebookLMError(f"NotebookLM refused ({what}): {_said(exc)}", hint=RETRY_HINT)
-    return None
+    elif isinstance(exc, lib.NotebookLMError):
+        error = NotebookLMError(f"NotebookLM refused ({what}): {_said(exc)}", hint=RETRY_HINT)
+    # Opening the session asks Google for its tokens with plain HTTP; those errors are not wrapped.
+    elif isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        error = (
+            _limited(what)
+            if status == 429
+            else NotebookLMError(f"NotebookLM answered HTTP {status} ({what}).", hint=RETRY_HINT)
+        )
+    elif isinstance(exc, (httpx.TransportError, TimeoutError)):
+        error = _unreachable(exc, what)
+    if error is not None:
+        # A source NotebookLM registered before the failure: the caller records it, so the next
+        # run can remove the half-made copy.
+        error.source_id = str(getattr(exc, "source_id", "") or "") or None  # type: ignore[attr-defined]
+    return error
 
 
 @dataclass
@@ -442,7 +591,7 @@ class NotebookLMClient:
     def plan_limits(self) -> PlanLimits | None:
         """The account's source and notebook limits, read live from NotebookLM; None when unknown.
 
-        One read-only request through notebooklm-py's Python API (the CLI has no command for it).
+        One read-only request on the shared session.
         Unknown is reported as unknown: callers never substitute a guessed plan.
         """
         if self._limits_reader is not None:
@@ -627,8 +776,9 @@ class NotebookLMClient:
 
     def wait_for_source(self, notebook_id: str, source_id: str, timeout: int = 180) -> None:
         """Block until NotebookLM has finished processing a source; raise if it failed or timed out."""
+        # The library does the waiting and reports the timeout; ours is only a later backstop.
         self._call(
-            "wait for a source",
+            f"waited {timeout}s for a source",
             lambda lib: lib.sources.wait_until_ready(notebook_id, source_id, timeout=float(timeout)),
             timeout=timeout + 30,
         )

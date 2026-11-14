@@ -108,22 +108,53 @@ def test_upload_sends_a_file_not_content_and_not_text_flag(tmp_path: Path) -> No
     assert sent[3] == "Big_Doc.md" and big not in sent  # a markdown file is sent, named for the title
 
 
-def test_the_library_is_opened_with_a_long_upload_timeout_and_no_hidden_browser(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The library's own request timeout is too short for a large book, and its hidden-browser
-    # renewal made a signed-out check take minutes; an ended sign-in is offered instead.
+def test_the_real_library_accepts_how_it_is_opened(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real notebooklm-py client is built, offline, from the tool's own opener.
+
+    Every other test replaces the opener, so only this one sees an argument the library rejects or
+    has deprecated. The stored sign-in is replaced by synthetic tokens; nothing is sent anywhere.
+    """
+    import asyncio
+    import warnings
+
+    from notebooklm import client as library
+    from notebooklm._auth import tokens
+
+    from .conftest import real_default_api
+
+    asked: dict[str, object] = {}
+    auth = library.AuthTokens(
+        cookies={"SID": "synthetic-test"}, csrf_token="synthetic", session_id="synthetic"
+    )
+
+    async def stored(**kwargs: object):
+        asked.update(kwargs)
+        return tokens.InlineLoadedAuth(auth=auth)
+
+    monkeypatch.setattr(tokens, "_load_stored_auth", stored)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # a deprecated argument is a failure here
+        built = asyncio.run(real_default_api()("work", None)._build())
+    assert type(built).__name__ == "NotebookLMClient" and asked["profile"] == "work" and asked["path"] is None
+    # No hidden-browser renewal: it made a signed-out check take minutes.
+    assert asked["policy"].allow_headless is False  # type: ignore[attr-defined]
+    for part in ("notebooks", "sources", "settings"):
+        assert hasattr(built, part)
+
+
+def test_an_upload_gets_a_longer_wait_than_the_librarys_usual_one(monkeypatch: pytest.MonkeyPatch) -> None:
     import notebooklm
 
-    from notebook_alchemy import client as client_module
+    from .conftest import real_default_api
 
     seen: dict[str, object] = {}
-    monkeypatch.undo()  # this test reads the real default_api, not the blocked one
     monkeypatch.setattr(
         notebooklm.NotebookLMClient, "from_storage", classmethod(lambda cls, **kw: seen.update(kw))
     )
-    client_module.default_api("work", None)
-    assert seen == {"path": None, "profile": "work", "upload_timeout": 180.0, "allow_headless": False}
+    real_default_api()(None, "session.json")
+    assert seen["path"] == "session.json" and seen["profile"] is None and seen["allow_headless"] is False
+    transfers = seen["config"].transfers  # type: ignore[attr-defined]
+    assert transfers.start_timeout.read == 180.0 and transfers.finalize_timeout.write == 180.0
 
 
 def test_an_upload_without_a_source_id_is_an_error(tmp_path: Path) -> None:
@@ -147,26 +178,95 @@ def test_upload_failure_raises_with_cause(tmp_path: Path) -> None:
     assert isinstance(err.value.__cause__, lib.NotebookLMError) and err.value.hint
 
 
-def test_a_slow_answer_and_a_missing_sign_in_file_are_typed_errors(
+def test_a_slow_answer_is_a_typed_error_and_the_call_has_let_go(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("notebook_alchemy.client.LIST_TIMEOUT", 0.05)
+    fake = FakeNotebookLM(delay={"list": 5})
     with pytest.raises(NotebookLMError, match="did not finish") as slow:
-        _client(tmp_path, api=FakeNotebookLM(delay={"list": 5})).list_notebooks()
+        _client(tmp_path, api=fake).list_notebooks()
     assert not isinstance(slow.value, SessionError) and "connection" in (slow.value.hint or "")
+    assert fake.active == 0  # the request was stopped and had ended before the error was raised
 
-    def no_file(profile: str | None, path: str | None) -> None:
-        raise FileNotFoundError("storage_state.json")
 
-    with pytest.raises(SessionError) as gone:
-        _client(tmp_path, api=no_file).list_notebooks()
-    assert "notebook-alchemy login" in (gone.value.hint or "")
+def test_only_a_sign_in_file_problem_is_a_sign_out_when_opening(tmp_path: Path) -> None:
+    import httpx
 
-    def broken_file(profile: str | None, path: str | None) -> None:
-        raise ValueError("the sign-in file holds no cookies")
+    def opener(error: Exception):
+        def refuse(profile: str | None, path: str | None) -> None:
+            raise error
 
-    with pytest.raises(SessionError, match="no cookies"):
-        _client(tmp_path, api=broken_file).list_notebooks()
+        return refuse
+
+    class RequiredCookieValidationError(ValueError):  # the library's name for cookies Google needs
+        pass
+
+    for error, words in (
+        (FileNotFoundError("storage_state.json"), "missing"),
+        (json.JSONDecodeError("not JSON", "{", 0), "unusable"),
+        (RequiredCookieValidationError("no SID cookie; try --browser-cookies"), "unusable"),
+    ):
+        with pytest.raises(SessionError) as gone:
+            _client(tmp_path, api=opener(error)).list_notebooks()
+        assert words in gone.value.message and "notebook-alchemy login" in (gone.value.hint or "")
+        assert "--browser-cookies" not in gone.value.message  # a route this tool removed
+
+    # A page the library cannot read, or a region block: signing in again would not help.
+    with pytest.raises(NotebookLMError) as odd:
+        _client(tmp_path, api=opener(ValueError("the page shape changed"))).list_notebooks()
+    assert not isinstance(odd.value, SessionError) and "installer again" in (odd.value.hint or "")
+
+    # No connection while opening: a network fault, never a sign-out.
+    offline = _client(tmp_path, api=opener(httpx.ConnectError("no route to host")))
+    with pytest.raises(NotebookLMError, match="could not be reached") as down:
+        offline.list_notebooks()
+    assert not isinstance(down.value, SessionError)
+    _profile_session(offline)
+    status = offline.check_session()
+    assert not status.ok and not status.signed_out
+    request = httpx.Request("GET", "https://notebooklm.example.test/")
+    busy = httpx.HTTPStatusError("429", request=request, response=httpx.Response(429, request=request))
+    with pytest.raises(NotebookLMError, match="limiting requests"):
+        _client(tmp_path, api=opener(busy)).list_notebooks()
+
+
+def test_closing_while_a_request_is_under_way_ends_it_at_once(tmp_path: Path) -> None:
+    import time
+
+    fake = _two_notebooks()
+    fake.delay = {"list": 30}
+    client = _client(tmp_path, api=fake)
+    seen: list[BaseException] = []
+
+    def ask() -> None:
+        try:
+            client.list_notebooks()
+        except BaseException as exc:
+            seen.append(exc)
+
+    worker = threading.Thread(target=ask)
+    worker.start()
+    while fake.active == 0 and worker.is_alive():
+        time.sleep(0.01)
+    started = time.monotonic()
+    client.close()
+    worker.join(10)
+    assert not worker.is_alive() and time.monotonic() - started < 10  # not the 30 s the request wanted
+    assert isinstance(seen[0], NotebookLMError) and "closed before" in seen[0].message
+    fake.delay = {}
+    assert len(client.list_notebooks()) == 2 and len(fake.opened) == 2  # a new session, tracked
+
+
+def test_a_source_registered_before_a_failure_is_named_on_the_error(tmp_path: Path) -> None:
+    import notebooklm.exceptions as lib
+
+    failure = lib.SourceProcessingError("src-half")
+    with pytest.raises(NotebookLMError) as err:
+        _client(tmp_path, api=_raising(failure)).list_notebooks()
+    assert err.value.source_id == "src-half"
+    with pytest.raises(NotebookLMError) as plain:
+        _client(tmp_path, api=_raising(lib.ServerError("HTTP 500"))).list_notebooks()
+    assert plain.value.source_id is None
 
 
 def _library_errors() -> list[tuple[Exception, type[NotebookLMError], str]]:
@@ -177,6 +277,7 @@ def _library_errors() -> list[tuple[Exception, type[NotebookLMError], str]]:
         (lib.RateLimitError("slow down", retry_after=30), NotebookLMError, "asks for 30 seconds"),
         (lib.NotebookLimitError(100, limit=100), NotebookLMError, "as many notebooks as its plan allows"),
         (lib.SourceTimeoutError("s-1", 1.0), NotebookLMError, "still processing"),
+        (TimeoutError("timed out"), NotebookLMError, "could not be reached"),
         (lib.SourceProcessingError("s-1"), NotebookLMError, "could not process"),
         (lib.SourceNotFoundError("s-1"), NotebookLMError, "no longer in the notebook"),
         (lib.NetworkError("connection reset"), NotebookLMError, "could not be reached"),
@@ -539,15 +640,36 @@ def test_plan_limits_name_the_plan_and_are_never_guessed(
     assert doubled.plan_limits() is None and fake.opened == []
 
 
-def test_the_test_suite_refuses_the_network_but_not_this_computer() -> None:
+def test_the_test_suite_refuses_every_connection_except_a_socket_pair() -> None:
     import socket
 
-    # 192.0.2.1 is an address reserved for documentation: nothing answers there.
-    with socket.socket() as outside:
-        outside.settimeout(0.2)
-        with pytest.raises(AssertionError, match="real network"):
-            outside.connect(("192.0.2.1", 9))
-    with socket.socket() as listener, socket.socket() as here:
+    with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
-        here.connect(listener.getsockname())  # an event loop wakes itself this way on Windows
+        for address in (("192.0.2.1", 9), listener.getsockname()):  # a reserved address; this computer
+            with socket.socket() as stray:
+                stray.settimeout(0.2)
+                with pytest.raises(AssertionError, match="real network"):
+                    stray.connect(address)
+    one, other = socket.socketpair()  # how an event loop wakes itself
+    with one, other:
+        one.sendall(b"x")
+        assert other.recv(1) == b"x"
+
+
+def test_a_closed_session_is_never_reopened_behind_the_clients_back() -> None:
+    from notebook_alchemy import client as client_module
+
+    fake = FakeNotebookLM()
+    session = client_module._Session(lambda: fake("work", None))
+
+    async def ask(library: SimpleNamespace) -> int:
+        return len(await library.notebooks.list())
+
+    assert session.run(ask, 5) == 0 and len(fake.opened) == 1
+    session.close()
+    # A thread that still holds the closed session gets an error; it does not open one the
+    # client no longer tracks or closes.
+    with pytest.raises(client_module._Closed):
+        session.run(ask, 5)
+    assert len(fake.opened) == 1 and not session.is_open

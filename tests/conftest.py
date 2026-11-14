@@ -54,7 +54,21 @@ _ENV_TO_CLEAR = (
     "ALCHEMY_COOKIES_BROWSER",
     "NOTEBOOKLM_AUTH_JSON",
     "NO_COLOR",
+    # A proxy on this computer would carry a stray request out; none is used in tests.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "NOTEBOOKLM_HOME",
+    "NOTEBOOKLM_REFRESH_CMD",
 )
+
+
+from notebook_alchemy import client as _client_module  # noqa: E402
+
+_REAL_DEFAULT_API = _client_module.default_api
 
 
 @pytest.fixture(autouse=True)
@@ -73,13 +87,24 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         raise AssertionError(f"test tried to start a real process: {args[:1]}")
 
     real_connect = socket.socket.connect
+    real_socketpair = socket.socketpair
+    pairing = threading.local()
+
+    def _socketpair(*args: object, **kwargs: object):
+        # An event loop wakes itself through a pair of sockets on this computer, which on Windows
+        # is made by connecting one to the other. That is not the network.
+        pairing.active = True
+        try:
+            return real_socketpair(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            pairing.active = False
 
     def _no_network(sock: socket.socket, address: object, *args: object) -> None:
-        # An event loop on Windows wakes itself through a pair of sockets on this computer;
-        # that is not the network. Everything else is refused.
-        if isinstance(address, tuple) and address[0] in ("127.0.0.1", "::1"):
-            return real_connect(sock, address, *args)
+        if getattr(pairing, "active", False):
+            return real_connect(sock, address, *args)  # type: ignore[arg-type]
         raise AssertionError("test tried to open a real network connection")
+
+    monkeypatch.setattr(socket, "socketpair", _socketpair)
 
     monkeypatch.setattr(subprocess, "run", _no_process)
     # The background sign-in refresh talks to the system scheduler; tests get a fake Task Scheduler.
@@ -107,6 +132,11 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     client.close_all()  # each session has a background thread; none outlives its test
     os.environ.clear()
     os.environ.update(snapshot)
+
+
+def real_default_api():
+    """The tool's real opener for notebooklm-py, which every test otherwise has blocked."""
+    return _REAL_DEFAULT_API
 
 
 class FakeScheduler:

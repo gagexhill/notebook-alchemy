@@ -61,7 +61,7 @@ LABEL_OUTPUT_SHARE = 0.05
 PUNCTUATED_OUTPUT_SHARE = 0.75
 SORTING_SHARE = 0.15  # sorting and consolidation, as a share of the labelling cost
 
-# `notebooklm` processes run at once during an upload. Kept small to stay clear of rate limits.
+# Requests under way at once during an upload. Kept small to stay clear of rate limits.
 SYNC_WORKERS = 3
 # In the library cache: topic -> section -> the part of the topic book it is in.
 PARTS_KEY = "parts"
@@ -787,6 +787,8 @@ class AlchemyEngine:
         failed: list[str] = []
         steps = _Counter(progress, "Uploading to NotebookLM", len(sending) * 2)
 
+        half_made: list[str] = []  # sources NotebookLM registered for an upload that then failed
+
         def add(book: Book) -> tuple[str, str | None, str | None]:
             try:
                 source_id = self.client.add_source_document(
@@ -794,6 +796,8 @@ class AlchemyEngine:
                 )
                 return book.title, source_id, None
             except AlchemyError as exc:
+                if getattr(exc, "source_id", None):
+                    half_made.append(str(exc.source_id))  # type: ignore[attr-defined]
                 return book.title, None, f"{book.title}: {exc.message}"
             except Exception as exc:  # noqa: BLE001 - reported per book, so the rest still reconcile
                 return book.title, None, f"{book.title}: {type(exc).__name__}: {exc}"
@@ -880,7 +884,8 @@ class AlchemyEngine:
             # a book whose upload was not confirmed gets no hash, so the next run sends it again.
             ids = {**record["ids"], **new_ids}
             displaced = [record["ids"][t] for t in new_ids if t in record["ids"]]
-            left = [i for i in [*displaced, *stuck, *orphans] if i not in freed]
+            # A half-made copy is recorded as this tool's own, so the next run removes it.
+            left = [i for i in [*displaced, *stuck, *orphans, *half_made] if i not in freed]
             hashes_kept = {t: h for t, h in record["hashes"].items() if t not in new_ids}
             old_built = {k: record[k] for k in ("sorted_by_ai", "videos_read") if record[k] not in (None, 0)}
             self._write_record(nb_id, ids, {**hashes_kept, **confirmed}, left, built=old_built)

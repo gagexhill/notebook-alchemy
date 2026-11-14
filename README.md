@@ -368,7 +368,7 @@ Everything stays on your machine. `notebook-alchemy clean --all` removes the wor
 | `~/.notebook-alchemy/cache/` | Downloaded words per video, and which videos had none (for a week) | `clean --cache` |
 | `~/.notebook-alchemy/knowledge/`, `library/`, `batches/` | The AI's labels, topics, placements and section orders, so reruns cost nothing, and per channel a labelling batch still running and its answers until they are stored | `clean --labels` |
 | `~/.notebook-alchemy/sync/`, `notebooks.json`, `upload_accounts.json` | What the last upload added, which notebook each channel uses, and a salted hash of the account you confirmed uploads to (not the email) | `clean --records` |
-| `~/.notebooklm/profiles/<profile>/` | The Google sign-in, kept by the `notebooklm` command | `notebooklm auth logout` |
+| `~/.notebooklm/profiles/<profile>/` | The Google sign-in, kept by notebooklm-py | `notebooklm auth logout` |
 | Your system scheduler, and `~/.notebook-alchemy/keepalive.json` | The 20-minute sign-in refresh (only if you turned it on) and when it last ran | `keep-signed-in --off` (asks first in a terminal; `--yes` skips); `clean --records` |
 | Your NotebookLM account | The notebook itself, and the "Notebook Alchemy workspace" notebook used to read blocked videos (left empty after each run) | Delete them in NotebookLM |
 
