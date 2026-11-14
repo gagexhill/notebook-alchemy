@@ -34,8 +34,13 @@ NOTEBOOKLM_BIN = "notebooklm"
 LIST_TIMEOUT = 60.0
 # For answers from `notebooklm` this tool cannot read: usually a newer or older notebooklm-py.
 UNEXPECTED_HINT = (
-    "Run the same command again. If it keeps failing, update Notebook Alchemy (run its installer "
-    "again, or `pip install -U notebook-alchemy` in its environment) and check with `notebook-alchemy test`."
+    "Run the same command again. If it keeps failing, update Notebook Alchemy by running its "
+    "installer again, then check with `notebook-alchemy test`."
+)
+# The notebooklm tool comes with Notebook Alchemy, so a missing one is a broken install.
+INSTALL_HINT = (
+    "Run the Notebook Alchemy installer again; it installs the notebooklm tool too. "
+    "In a source checkout, run: pip install -e ."
 )
 WRITE_TIMEOUT = 120.0
 UPLOAD_TIMEOUT = 300.0
@@ -356,7 +361,7 @@ class NotebookLMClient:
         except FileNotFoundError as exc:
             raise NotebookLMError(
                 "The `notebooklm` command was not found.",
-                hint="Install it with: pip install notebooklm-py",
+                hint=INSTALL_HINT,
             ) from exc
         except subprocess.TimeoutExpired as exc:
             raise NotebookLMError(

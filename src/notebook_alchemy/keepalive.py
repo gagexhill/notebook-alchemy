@@ -200,8 +200,8 @@ class KeepAlive:
         except FileNotFoundError as exc:
             raise AlchemyError(
                 f"Could not {what}: `{cmd[0]}` was not found.",
-                hint="This computer's scheduler tool is not available, so the background refresh cannot be "
-                "changed from here.",
+                hint=f"Install or turn on `{cmd[0]}`, then run the same command again. Without it, "
+                "sign in when a run asks.",
             ) from exc
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise AlchemyError(

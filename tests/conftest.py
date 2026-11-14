@@ -17,6 +17,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+# Rich reads this when the tool's consoles are made, at import: with it set, captured output
+# is treated as a terminal and a few tests see colour codes inside the text they check.
+os.environ.pop("FORCE_COLOR", None)
+
 import youtube_transcript_api  # noqa: F401
 
 # The tool imports these on first use. Load them now, before the fixtures below replace

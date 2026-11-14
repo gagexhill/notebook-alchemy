@@ -28,6 +28,7 @@ from . import __version__, ui
 from .channel import CHANNEL_TABS, DEFAULT_TABS
 from .claude import price_for
 from .client import (
+    INSTALL_HINT,
     AccountIdentity,
     NotebookLMClient,
     SessionStatus,
@@ -84,14 +85,31 @@ def _engine(profile: str | None = None) -> AlchemyEngine:
     return AlchemyEngine(_config(profile))
 
 
+def _is_console(stream: Any) -> bool:
+    """Whether a stream is a real terminal. On Windows `NUL` also answers isatty(), so a command run
+    with `<NUL` or `>NUL` would be asked a question nobody sees; only a console has a console mode."""
+    try:
+        if not stream.isatty():
+            return False
+        if os.name != "nt":
+            return True
+        import ctypes
+        import msvcrt
+
+        handle = ctypes.c_void_p(msvcrt.get_osfhandle(stream.fileno()))
+        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(ctypes.c_ulong())))
+    except (AttributeError, OSError, ValueError):
+        return False  # no file behind the stream: not a terminal
+
+
 def _interactive() -> bool:
-    return sys.stdin.isatty()
+    return _is_console(sys.stdin)
 
 
 def _can_ask() -> bool:
     """Whether a question would be seen: input and output are both a terminal. With output sent to
     a file the question would go there, and the command would wait unseen."""
-    return _interactive() and sys.stdout.isatty()
+    return _interactive() and _is_console(sys.stdout)
 
 
 def _ask(question: str, *, default: bool = False) -> bool:
@@ -782,7 +800,7 @@ def status(profile: str | None) -> None:
             console.print(f"[dim]{esc(KEY_BILLING_NOTE)}[/dim]")
 
     if not has_cli:
-        ui.next_command("install the notebooklm tool", "pip install notebooklm-py")
+        ui.info(f"\nThe notebooklm tool is missing. {INSTALL_HINT}")
     if not has_session:
         ui.next_command("sign in", "notebook-alchemy login")
     elif not identity.email:
@@ -805,7 +823,7 @@ def _run_login(cmd: list[str], waiting: str, answer: str | None = None) -> subpr
     except FileNotFoundError as exc:
         raise NotebookLMError(
             "The notebooklm tool is not installed.",
-            hint="Install it with: pip install notebooklm-py",
+            hint=INSTALL_HINT,
         ) from exc
 
 
@@ -1494,6 +1512,12 @@ def clean_pipeline(
     # again for free); labels, records, old vaults and a custom folder are always asked about.
     costly = bool(kinds & {"labels", "record", "vault"} or ("cache" in kinds and custom_cache))
     ask = (costly or _can_ask()) and not yes
+    if costly and not yes and not _interactive():
+        # Nobody is there to answer: say so, instead of reading the end of the input as a stop.
+        raise AlchemyError(
+            "Deleting labels, records or a custom caption folder needs your confirmation.",
+            hint="Run the same command in a terminal, or add --yes to delete without the question.",
+        )
     if ask:
         count = {k: sum(1 for kind, _p in targets if kind == k) for k in kinds}
         if "cache" in kinds and custom_cache:
@@ -1513,7 +1537,8 @@ def clean_pipeline(
             )
         if "record" in kinds:
             ui.console.print(
-                f"{count['record']} local records will be deleted. Later runs will not remove sources "
+                f"{_plural(count['record'], 'local record')} will be deleted. Later runs will not "
+                "remove sources "
                 "that earlier "
                 "runs uploaded, and the next upload asks you to confirm the account again."
             )
