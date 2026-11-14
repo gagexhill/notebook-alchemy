@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
-import subprocess
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,14 +23,35 @@ from notebook_alchemy.client import (
 from notebook_alchemy.config import AlchemyConfig
 from notebook_alchemy.errors import ConfigError, NotebookLMError, SessionError
 
-from .conftest import FakeProcess
-
-NOTEBOOKS = json.dumps([{"id": "nb-1", "title": "Alpha"}, {"id": "nb-2", "title": "Alpha Beta"}])
+from .conftest import FakeNotebookLM, FakeProcess, _FakeContext
 
 
-def _client(tmp_path: Path, process: FakeProcess | None = None, **cfg) -> NotebookLMClient:
+def _client(tmp_path: Path, process: FakeProcess | None = None, *, api=None, **cfg) -> NotebookLMClient:
     config = AlchemyConfig(cache_dir=tmp_path / "c", **cfg)
-    return NotebookLMClient(config, runner=process)
+    return NotebookLMClient(config, runner=process, api=api)
+
+
+def _two_notebooks() -> FakeNotebookLM:
+    fake = FakeNotebookLM()
+    fake.seed("Alpha", [])
+    fake.seed("Alpha Beta", [])
+    return fake
+
+
+def _raising(error: Exception) -> FakeNotebookLM:
+    """A NotebookLM that answers every request with this error."""
+    fake = FakeNotebookLM()
+
+    def refuse(words: list[str]) -> None:
+        raise error
+
+    fake.before = refuse
+    return fake
+
+
+def _library(**parts: object):
+    """A hand-made library, for answers the in-memory fake would never give."""
+    return lambda profile, path: _FakeContext(SimpleNamespace(**parts))
 
 
 def test_session_found_in_notebooklm_profile_dir(tmp_path: Path) -> None:
@@ -62,15 +84,12 @@ def test_check_session_states(tmp_path: Path) -> None:
     missing = _client(tmp_path).check_session()
     assert not missing.ok and "No NotebookLM session" in missing.detail
 
-    good = _client(tmp_path, FakeProcess(("list", 0, NOTEBOOKS, "")))
+    good = _client(tmp_path, api=_two_notebooks())
     _profile_session(good)
     status = good.check_session()
     assert status.ok and status.notebooks == 2
 
-    expired = _client(
-        tmp_path,
-        FakeProcess(("list", 1, json.dumps({"message": "Authentication expired or invalid."}), "")),
-    )
+    expired = _client(tmp_path, api=_raising(FakeNotebookLM.sign_in_ended()))
     result = expired.check_session()
     assert not result.ok and "expired" in result.detail.lower()
     assert missing.signed_out  # no sign-in at all
@@ -79,121 +98,262 @@ def test_check_session_states(tmp_path: Path) -> None:
 
 
 def test_upload_sends_a_file_not_content_and_not_text_flag(tmp_path: Path) -> None:
-    uploaded: dict[str, str] = {}
+    fake = FakeNotebookLM()
+    nb = fake.seed("Chan", [])
+    client = _client(tmp_path, api=fake)
+    big = "x" * 60_000  # larger than one command-line argument may be on Windows
+    src_id = client.add_source_document(nb, SourceDocument("a", "Big Doc", big))
+    assert src_id.startswith("src-") and fake.uploaded == {"Big Doc": big}
+    sent = next(c for c in fake.calls if "add" in c)
+    assert sent[3] == "Big_Doc.md" and big not in sent  # a markdown file is sent, named for the title
 
-    def runner(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        path = Path(cmd[cmd.index("add") + 1])
-        uploaded["content"] = path.read_text(encoding="utf-8")
-        uploaded["cmd"] = " ".join(cmd)
-        return subprocess.CompletedProcess(cmd, 0, json.dumps({"id": "src-9"}), "")
 
-    client = _client(tmp_path, runner)  # type: ignore[arg-type]
-    big = "x" * 60_000  # larger than the Windows command-line limit
-    src_id = client.add_source_document("nb-1", SourceDocument("a", "Big Doc", big))
-    assert src_id == "src-9"
-    assert uploaded["content"] == big
-    assert "--text" not in uploaded["cmd"]
-    assert big not in uploaded["cmd"]
-    assert "--type file" in uploaded["cmd"] and "--title Big Doc" in uploaded["cmd"]
-    assert "--request-timeout 180" in uploaded["cmd"]  # notebooklm's own 30 s default is too short
+def test_the_library_is_opened_with_a_long_upload_timeout_and_no_hidden_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The library's own request timeout is too short for a large book, and its hidden-browser
+    # renewal made a signed-out check take minutes; an ended sign-in is offered instead.
+    import notebooklm
+
+    from notebook_alchemy import client as client_module
+
+    seen: dict[str, object] = {}
+    monkeypatch.undo()  # this test reads the real default_api, not the blocked one
+    monkeypatch.setattr(
+        notebooklm.NotebookLMClient, "from_storage", classmethod(lambda cls, **kw: seen.update(kw))
+    )
+    client_module.default_api("work", None)
+    assert seen == {"path": None, "profile": "work", "upload_timeout": 180.0, "allow_headless": False}
 
 
 def test_an_upload_without_a_source_id_is_an_error(tmp_path: Path) -> None:
-    client = _client(tmp_path, FakeProcess(("source add", 0, json.dumps({"status": "ok"}), "")))
+    class Sources:
+        async def add_file(self, *a: object, **k: object) -> SimpleNamespace:
+            return SimpleNamespace(id="", title="Doc")
+
+    client = _client(tmp_path, api=_library(sources=Sources()))
     with pytest.raises(NotebookLMError, match="no source id"):
         client.add_source_document("nb-1", SourceDocument("a", "Doc", "body"))
 
 
 def test_upload_failure_raises_with_cause(tmp_path: Path) -> None:
-    client = _client(tmp_path, FakeProcess(("source add", 2, "", "No such option")))
+    import notebooklm.exceptions as lib
+
+    fake = FakeNotebookLM(fail={"add": "Doc"})
+    nb = fake.seed("Chan", [])
     with pytest.raises(NotebookLMError) as err:
-        client.add_source_document("nb-1", SourceDocument("a", "Doc", "body"))
-    assert "No such option" in err.value.message
+        _client(tmp_path, api=fake).add_source_document(nb, SourceDocument("a", "Doc", "body"))
+    assert "add failed on purpose" in err.value.message and "upload 'Doc'" in err.value.message
+    assert isinstance(err.value.__cause__, lib.NotebookLMError) and err.value.hint
 
 
-def test_timeout_and_missing_binary_are_typed_errors(tmp_path: Path) -> None:
-    def slow(cmd: list[str], **kwargs: object):
-        raise subprocess.TimeoutExpired(cmd, 1)
+def test_a_slow_answer_and_a_missing_sign_in_file_are_typed_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("notebook_alchemy.client.LIST_TIMEOUT", 0.05)
+    with pytest.raises(NotebookLMError, match="did not finish") as slow:
+        _client(tmp_path, api=FakeNotebookLM(delay={"list": 5})).list_notebooks()
+    assert not isinstance(slow.value, SessionError) and "connection" in (slow.value.hint or "")
 
-    def absent(cmd: list[str], **kwargs: object):
-        raise FileNotFoundError("notebooklm")
+    def no_file(profile: str | None, path: str | None) -> None:
+        raise FileNotFoundError("storage_state.json")
 
-    with pytest.raises(NotebookLMError, match="did not finish"):
-        _client(tmp_path, slow).list_notebooks()  # type: ignore[arg-type]
+    with pytest.raises(SessionError) as gone:
+        _client(tmp_path, api=no_file).list_notebooks()
+    assert "notebook-alchemy login" in (gone.value.hint or "")
+
+    def broken_file(profile: str | None, path: str | None) -> None:
+        raise ValueError("the sign-in file holds no cookies")
+
+    with pytest.raises(SessionError, match="no cookies"):
+        _client(tmp_path, api=broken_file).list_notebooks()
+
+
+def _library_errors() -> list[tuple[Exception, type[NotebookLMError], str]]:
+    import notebooklm.exceptions as lib
+
+    return [
+        (lib.AuthError("Authentication expired or invalid."), SessionError, "rejected the session"),
+        (lib.RateLimitError("slow down", retry_after=30), NotebookLMError, "asks for 30 seconds"),
+        (lib.NotebookLimitError(100, limit=100), NotebookLMError, "as many notebooks as its plan allows"),
+        (lib.SourceTimeoutError("s-1", 1.0), NotebookLMError, "still processing"),
+        (lib.SourceProcessingError("s-1"), NotebookLMError, "could not process"),
+        (lib.SourceNotFoundError("s-1"), NotebookLMError, "no longer in the notebook"),
+        (lib.NetworkError("connection reset"), NotebookLMError, "could not be reached"),
+        (lib.RPCTimeoutError("no answer in 30s"), NotebookLMError, "could not be reached"),
+        (lib.DecodingError("unexpected shape"), NotebookLMError, "cannot read"),
+        (lib.ServerError("HTTP 500"), NotebookLMError, "refused"),
+    ]
+
+
+def test_each_library_error_becomes_the_right_typed_error_by_its_type(tmp_path: Path) -> None:
+    for raised, expected, words in _library_errors():
+        with pytest.raises(NotebookLMError) as err:
+            _client(tmp_path, api=_raising(raised)).list_notebooks()
+        assert type(err.value) is expected, raised
+        assert words in err.value.message and err.value.hint, raised
+        assert err.value.__cause__ is raised
+
+
+def test_a_video_that_mentions_signing_in_is_not_a_sign_out(tmp_path: Path) -> None:
+    # Errors are told apart by type. Matching words made any message with "login" in it a sign-out.
+    import notebooklm.exceptions as lib
+
+    said = lib.SourceProcessingError("s-1", message="This video requires login to view.")
     with pytest.raises(NotebookLMError) as err:
-        _client(tmp_path, absent).list_notebooks()  # type: ignore[arg-type]
+        _client(tmp_path, api=_raising(said)).list_notebooks()
+    assert not isinstance(err.value, SessionError)
+
+
+def test_an_error_that_is_not_notebooklms_is_not_dressed_up(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="a bug"):
+        _client(tmp_path, api=_raising(RuntimeError("a bug"))).list_notebooks()
+
+
+def test_an_answer_the_library_cannot_read_points_to_an_update(tmp_path: Path) -> None:
+    import notebooklm.exceptions as lib
+
+    with pytest.raises(NotebookLMError) as err:
+        _client(tmp_path, api=_raising(lib.DecodingError("unexpected shape"))).list_notebooks()
     assert "installer again" in (err.value.hint or "")
 
 
-def test_unparseable_output_is_an_error(tmp_path: Path) -> None:
-    with pytest.raises(NotebookLMError, match="not JSON"):
-        _client(tmp_path, FakeProcess(("list", 0, "<html>", ""))).list_notebooks()
-
-
 def test_auth_failure_is_a_session_error(tmp_path: Path) -> None:
-    client = _client(tmp_path, FakeProcess(("list", 1, "", "Authentication expired")))
+    client = _client(tmp_path, api=_raising(FakeNotebookLM.sign_in_ended()))
     with pytest.raises(SessionError):
         client.list_notebooks()
 
 
 def test_find_notebook_exact_then_unique_partial_and_ambiguity(tmp_path: Path) -> None:
-    client = _client(tmp_path, FakeProcess(("list", 0, NOTEBOOKS, "")))
-    assert client.find_notebook("alpha")["id"] == "nb-1"  # exact title wins over the longer title
-    assert client.find_notebook("nb-2")["title"] == "Alpha Beta"
-    assert client.find_notebook("beta")["id"] == "nb-2"
+    fake = _two_notebooks()
+    client = _client(tmp_path, api=fake)
+    first, second = fake.notebook_id("Alpha"), fake.notebook_id("Alpha Beta")
+    assert client.find_notebook("alpha")["id"] == first  # exact title wins over the longer title
+    assert client.find_notebook(second)["title"] == "Alpha Beta"
+    assert client.find_notebook("beta")["id"] == second
     assert client.find_notebook("zzz") is None
-    ambiguous = _client(
-        tmp_path,
-        FakeProcess(
-            (
-                "list",
-                0,
-                json.dumps([{"id": "1", "title": "Data A"}, {"id": "2", "title": "Data B"}]),
-                "",
-            )
-        ),
-    )
+    data = FakeNotebookLM()
+    data.seed("Data A", [])
+    data.seed("Data B", [])
     with pytest.raises(NotebookLMError, match="matches 2 notebooks"):
-        ambiguous.find_notebook("data")
+        _client(tmp_path, api=data).find_notebook("data")
 
 
 def test_create_notebook_reuses_exact_title_only(tmp_path: Path) -> None:
-    process = FakeProcess(("create", 0, json.dumps({"id": "new-1"}), ""), ("list", 0, NOTEBOOKS, ""))
-    client = _client(tmp_path, process)
-    assert client.create_notebook("Alpha") == ("nb-1", False)  # exact title reused
-    assert client.create_notebook("Alph") == ("new-1", True)  # a prefix is not a match
-    assert any("create" in " ".join(c) for c in process.calls)
+    fake = _two_notebooks()
+    client = _client(tmp_path, api=fake)
+    assert client.create_notebook("Alpha") == (fake.notebook_id("Alpha"), False)  # exact title reused
+    made, created = client.create_notebook("Alph")  # a prefix is not a match
+    assert created and made == fake.notebook_id("Alph")
+    assert ["create", "Alph"] in fake.calls
 
 
 def test_create_without_id_is_an_error(tmp_path: Path) -> None:
-    client = _client(tmp_path, FakeProcess(("create", 0, "{}", ""), ("list", 0, "[]", "")))
+    class Notebooks:
+        async def list(self) -> list[SimpleNamespace]:
+            return []
+
+        async def create(self, title: str) -> SimpleNamespace:
+            return SimpleNamespace(id="", title=title)
+
+    client = _client(tmp_path, api=_library(notebooks=Notebooks()))
     with pytest.raises(NotebookLMError, match="no notebook id"):
         client.create_notebook("New")
 
 
-def test_a_missing_session_file_setting_is_not_passed_to_the_cli(tmp_path: Path) -> None:
-    process = FakeProcess(("list", 0, NOTEBOOKS, ""))
+def test_a_session_file_setting_that_does_not_exist_is_ignored(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
     missing = tmp_path / "old-env" / "session.json"  # for example copied from an old .env
-    _client(tmp_path, process, session_file=missing).list_notebooks()
-    assert "--storage" not in process.calls[0]
+    _client(tmp_path, api=fake, session_file=missing).list_notebooks()
+    assert fake.opened == [("default", None)]  # the profile's own sign-in
 
 
-def test_an_existing_session_file_setting_is_passed_to_the_cli(tmp_path: Path) -> None:
+def test_an_existing_session_file_setting_opens_that_file(tmp_path: Path) -> None:
     session = tmp_path / "session.json"
     session.write_text("{}", encoding="utf-8")
-    process = FakeProcess(("list", 0, NOTEBOOKS, ""))
-    _client(tmp_path, process, session_file=session).list_notebooks()
-    assert process.calls[0][process.calls[0].index("--storage") + 1] == str(session)
+    fake = FakeNotebookLM()
+    _client(tmp_path, api=fake, session_file=session).list_notebooks()
+    assert fake.opened == [(None, str(session))]
 
 
-def test_auth_not_found_is_a_session_error(tmp_path: Path) -> None:
-    client = _client(tmp_path, FakeProcess(("list", 1, json.dumps({"message": "Auth not found."}), "")))
+def test_one_session_is_opened_on_first_use_and_shared_by_every_thread(tmp_path: Path) -> None:
+    fake = _two_notebooks()
+    client = _client(tmp_path, api=fake)
+    assert fake.opened == [] and not client.session_is_open  # nothing is opened until it is needed
+    threads = [threading.Thread(target=client.list_notebooks) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(fake.opened) == 1 and len(fake.calls) == 6 and fake.threads == {"notebooklm-session"}
+
+
+def test_closing_stops_the_background_thread_and_the_next_call_opens_again(tmp_path: Path) -> None:
+    def session_threads() -> list[threading.Thread]:
+        return [t for t in threading.enumerate() if t.name == "notebooklm-session"]
+
+    fake = _two_notebooks()
+    client = _client(tmp_path, api=fake)
+    client.list_notebooks()
+    assert client.session_is_open and len(session_threads()) == 1
+    client.close()
+    client.close()  # closing twice is harmless
+    assert not client.session_is_open and session_threads() == []
+    assert len(client.list_notebooks()) == 2 and len(fake.opened) == 2
+    from notebook_alchemy.client import close_all
+
+    close_all()
+    assert session_threads() == []
+
+
+def test_a_failed_open_leaves_no_thread_behind(tmp_path: Path) -> None:
+    def no_file(profile: str | None, path: str | None) -> None:
+        raise FileNotFoundError("storage_state.json")
+
+    client = _client(tmp_path, api=no_file)
     with pytest.raises(SessionError):
         client.list_notebooks()
+    assert not [t for t in threading.enumerate() if t.name == "notebooklm-session"]
 
 
-def test_check_session_reports_any_cli_failure_instead_of_raising(tmp_path: Path) -> None:
-    client = _client(tmp_path, FakeProcess(("list", 1, "", "something unexpected broke")))
+def test_sources_are_plain_records_with_the_fields_the_tool_reads(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    nb = fake.seed("Chan", ["A book"])
+    client = _client(tmp_path, api=fake)
+    client.add_youtube_sources(nb, ["https://www.youtube.com/watch?v=vid00000001"])
+    book, video = client.list_sources(nb)
+    assert book == {"id": book["id"], "title": "A book", "url": "", "type": "markdown", "status": "ready"}
+    assert video["type"] == "youtube" and video["url"].endswith("vid00000001")
+    assert client.source_text(nb, video["id"]).startswith("words spoken in")
+    client.rename_source(nb, book["id"], "Renamed")
+    client.wait_for_source(nb, book["id"])
+    client.delete_source(nb, video["id"])
+    assert fake.titles("Chan") == ["Renamed"]
+
+
+def test_the_sign_in_file_is_found_where_notebooklm_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, notebooklm_profile="work")
+    assert (
+        client.profile_state_path()
+        == Path.home() / ".notebooklm" / "profiles" / "work" / "storage_state.json"
+    )
+    moved = tmp_path / "elsewhere"
+    monkeypatch.setenv("NOTEBOOKLM_HOME", str(moved))
+    assert client.profile_state_path() == moved.resolve() / "profiles" / "work" / "storage_state.json"
+    # The default profile falls back to the older file in the folder's root, as notebooklm does.
+    default = _client(tmp_path)
+    moved.mkdir()
+    (moved / "storage_state.json").write_text("{}", encoding="utf-8")
+    assert default.profile_state_path() == moved.resolve() / "storage_state.json"
+    assert client.profile_state_path().parent.name == "work"  # a named profile never falls back
+
+
+def test_check_session_reports_any_failure_instead_of_raising(tmp_path: Path) -> None:
+    import notebooklm.exceptions as lib
+
+    client = _client(tmp_path, api=_raising(lib.ServerError("something unexpected broke")))
     _profile_session(client)
     status = client.check_session()
     assert not status.ok and "something unexpected broke" in status.detail
@@ -221,12 +381,12 @@ def _auth_check(email: str | None, *, code: int = 0, stored: bool = True) -> str
 
 
 def test_profile_comes_from_config_and_an_explicit_profile_wins(tmp_path: Path) -> None:
-    process = FakeProcess(("list", 0, "[]", ""))
-    _client(tmp_path, process, notebooklm_profile="work").list_notebooks()
-    assert process.calls[-1][:3] == ["notebooklm", "--profile", "work"]
+    fake = FakeNotebookLM()
+    _client(tmp_path, api=fake, notebooklm_profile="work").list_notebooks()
+    assert fake.opened[-1] == ("work", None)
     config = AlchemyConfig(notebooklm_profile="work")
-    NotebookLMClient(config, "other", runner=process).list_notebooks()
-    assert process.calls[-1][:3] == ["notebooklm", "--profile", "other"]
+    NotebookLMClient(config, "other", api=fake).list_notebooks()
+    assert fake.opened[-1] == ("other", None)
 
 
 def test_upload_account_reads_the_profile_record(tmp_path: Path) -> None:
@@ -328,11 +488,13 @@ def test_a_session_file_setting_overrides_the_profile_and_is_named(tmp_path: Pat
 def test_an_explicit_profile_with_a_session_file_is_refused(tmp_path: Path) -> None:
     storage = tmp_path / "my_session.json"
     storage.write_text("{}", encoding="utf-8")
-    process = FakeProcess(("list", 0, "[]", ""))
-    client = _client(tmp_path, process, session_file=storage, notebooklm_profile="work")
+    fake = FakeNotebookLM()
+    client = _client(tmp_path, api=fake, session_file=storage, notebooklm_profile="work")
     with pytest.raises(ConfigError, match="ALCHEMY_SESSION_FILE"):
         client.list_notebooks()
-    assert process.calls == []  # refused before anything ran
+    assert fake.opened == [] and fake.calls == []  # refused before anything was opened
+    with pytest.raises(ConfigError, match="ALCHEMY_SESSION_FILE"):
+        client.login_command()
 
 
 def test_cli_version_comes_from_package_metadata_without_a_process(
@@ -366,20 +528,7 @@ def test_plan_limits_name_the_plan_and_are_never_guessed(tmp_path: Path) -> None
     client = NotebookLMClient(AlchemyConfig(), limits_reader=lambda c: pro)
     assert client.plan_limits() == pro and pro.plan == "Pro"
     assert PlanLimits(50, 100, 1).plan == "Standard" and PlanLimits(None, None, 9).plan == "unknown plan"
-    assert _client(tmp_path, FakeProcess()).plan_limits() is None  # a test runner never reads live
+    fake = FakeNotebookLM()
+    assert _client(tmp_path, FakeProcess()).plan_limits() is None  # a test double never reads live
+    assert _client(tmp_path, api=fake).plan_limits() is None and fake.opened == []
     assert NotebookLMClient(AlchemyConfig()).plan_limits() is None  # no session: unknown, not a guess
-
-
-def test_notebooklm_is_not_told_to_renew_sessions_through_a_hidden_browser(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The headless renewal made a signed-out check take minutes; an ended sign-in is offered instead.
-    seen: list[object] = []
-
-    def runner(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        seen.append(kwargs.get("env"))
-        return subprocess.CompletedProcess(cmd, 0, json.dumps({"notebooks": []}), "")
-
-    monkeypatch.delenv("NOTEBOOKLM_HEADLESS_REAUTH", raising=False)
-    _client(tmp_path, runner).list_notebooks()  # type: ignore[arg-type]
-    assert seen == [None]  # the user's own environment, unchanged

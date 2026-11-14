@@ -787,15 +787,16 @@ def test_profile_option_and_env_select_the_profile_for_every_notebooklm_call(
     profile_dir.mkdir(parents=True)
     (profile_dir / "storage_state.json").write_text("{}", encoding="utf-8")
     fake = FakeNotebookLM()
-    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr("notebook_alchemy.client.default_api", fake)
     result = runner.invoke(cli, [*RUN, "-N", "chan", "--profile", "work", "--yes"])
     assert result.exit_code == 0, result.output
-    assert fake.calls and all(c[1:3] == ["--profile", "work"] for c in fake.calls)
+    assert fake.calls and fake.opened and set(fake.opened) == {("work", None)}
     assert "Uploads go to [owner@example.test] (profile work)" in result.output
     fake.calls.clear()
+    fake.opened.clear()
     monkeypatch.setenv("ALCHEMY_NOTEBOOKLM_PROFILE", "work")
     assert runner.invoke(cli, [*RUN, "-N", "chan", "--yes"]).exit_code == 0
-    assert fake.calls and all(c[1:3] == ["--profile", "work"] for c in fake.calls)
+    assert fake.calls and fake.opened and set(fake.opened) == {("work", None)}
 
 
 def test_unknown_upload_account_is_shown_as_unknown(
@@ -1059,7 +1060,7 @@ def test_run_shows_the_plan_and_the_upload_stops_when_the_books_cannot_fit(
     profile_dir.mkdir(parents=True)
     (profile_dir / "storage_state.json").write_text("{}", encoding="utf-8")
     fake = FakeNotebookLM()
-    monkeypatch.setattr(subprocess, "run", fake)
+    monkeypatch.setattr("notebook_alchemy.client.default_api", fake)
     monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 3))
     monkeypatch.setattr(NotebookLMClient, "plan_limits", lambda self: PlanLimits(1, 100, 1))
     result = runner.invoke(cli, [*RUN, "-N", "Mine", "--yes"])
@@ -1631,3 +1632,17 @@ def test_two_names_for_one_file_are_counted_once(
     target.write_text("{}", encoding="utf-8")
     # Windows finds the one file under both names; elsewhere only the lower-case name exists.
     assert state.count_existing(engine, twice) == 1
+
+
+def test_status_and_a_dry_run_never_open_a_notebooklm_session(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    fake_channel("a b c d")
+    profile_dir = isolated_environment.home / ".notebooklm" / "profiles" / "default"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "storage_state.json").write_text("{}", encoding="utf-8")
+    fake = FakeNotebookLM()
+    monkeypatch.setattr("notebook_alchemy.client.default_api", fake)
+    assert runner.invoke(cli, ["status"]).exit_code == 0
+    assert runner.invoke(cli, ["dry-run", "@my"]).exit_code == 0
+    assert fake.opened == [] and fake.calls == []

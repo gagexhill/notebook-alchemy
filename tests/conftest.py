@@ -6,13 +6,14 @@ transcript cache, NotebookLM session, notebooks, or the network.
 
 from __future__ import annotations
 
-import json
+import asyncio
 import os
 import pathlib
 import platform
 import socket
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -71,7 +72,13 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     def _no_process(*args: object, **kwargs: object) -> None:
         raise AssertionError(f"test tried to start a real process: {args[:1]}")
 
-    def _no_network(*args: object, **kwargs: object) -> None:
+    real_connect = socket.socket.connect
+
+    def _no_network(sock: socket.socket, address: object, *args: object) -> None:
+        # An event loop on Windows wakes itself through a pair of sockets on this computer;
+        # that is not the network. Everything else is refused.
+        if isinstance(address, tuple) and address[0] in ("127.0.0.1", "::1"):
+            return real_connect(sock, address, *args)
         raise AssertionError("test tried to open a real network connection")
 
     monkeypatch.setattr(subprocess, "run", _no_process)
@@ -80,6 +87,11 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("notebook_alchemy.keepalive.PLATFORM", "win32")
     monkeypatch.setattr("notebook_alchemy.keepalive._default_runner", lambda: scheduler)
     monkeypatch.setattr(subprocess, "Popen", _no_process)
+
+    def _no_notebooklm(profile: str | None, path: str | None) -> None:
+        raise AssertionError("test tried to open a real NotebookLM session")
+
+    monkeypatch.setattr("notebook_alchemy.client.default_api", _no_notebooklm)
     monkeypatch.setattr(socket.socket, "connect", _no_network)
     # Real runs space caption requests seconds apart; tests do not wait.
     monkeypatch.setattr("notebook_alchemy.config.DEFAULT_CAPTION_SPACING", (0.0, 0.0))
@@ -90,6 +102,9 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # .env loading writes to os.environ directly; put the environment back so nothing leaks onward.
     snapshot = dict(os.environ)
     yield SimpleNamespace(home=home, work=work, scheduler=scheduler)
+    from notebook_alchemy import client
+
+    client.close_all()  # each session has a background thread; none outlives its test
     os.environ.clear()
     os.environ.update(snapshot)
 
@@ -161,21 +176,48 @@ class FakeProcess:
 
 
 class FakeNotebookLM:
-    """In-memory stand-in for the `notebooklm` CLI: notebooks and their sources keep state.
+    """In-memory stand-in for notebooklm-py's Python API: notebooks and their sources keep state.
+
+    Pass it as `api=` to `NotebookLMClient`, or set it as `notebook_alchemy.client.default_api`.
+    `opened` records the (profile, session file) each session was opened with. `calls` records
+    every request as words: `["list"]`, `["create", title]`, `["source", verb, notebook id, ...]`.
 
     `reset_titles` copies what the real service did: after processing, a source's title becomes its
-    file name. `fail` maps a command word (`add`, `wait`, `rename`, `delete`) to a substring of the
-    command line; a matching call exits non-zero.
+    file name. `fail` maps a verb (`add`, `wait`, `rename`, `delete`, `add-async`, `fulltext`) to a
+    substring of the request's words; a matching request raises the library's error, or its
+    sign-in error when the verb is in `signed_out`.
     """
 
-    def __init__(self, *, reset_titles: bool = False, fail: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        reset_titles: bool = False,
+        fail: dict[str, str] | None = None,
+        signed_out: tuple[str, ...] = (),
+        delay: dict[str, float] | None = None,
+    ) -> None:
         self.notebooks: list[dict[str, str]] = []
         self.sources: dict[str, list[dict[str, str]]] = {}
         self.reset_titles = reset_titles
         self.fail = fail or {}
+        self.signed_out = signed_out
         self.calls: list[list[str]] = []
+        self.opened: list[tuple[str | None, str | None]] = []
+        self.uploaded: dict[str, str] = {}  # title -> the text of the file that was sent
+        self.threads: set[str] = set()  # the threads requests ran on
+        self.delay = delay or {}  # verb -> seconds a request takes, so requests can overlap
+        self.before: Callable[[list[str]], None] | None = None  # runs first; may raise
+        self.active = 0
+        self.peak = 0  # the most requests under way at once
         self._n = 0
         self._lock = threading.Lock()  # the sync uploads from several threads
+        self.api = SimpleNamespace(
+            notebooks=_FakeNotebooks(self), sources=_FakeSources(self), settings=_FakeSettings()
+        )
+
+    def __call__(self, profile: str | None = None, path: str | None = None) -> _FakeContext:
+        self.opened.append((profile, path))
+        return _FakeContext(self.api)
 
     def seed(self, notebook_title: str, source_titles: list[str]) -> str:
         nb_id = self._new_id("nb")
@@ -195,69 +237,147 @@ class FakeNotebookLM:
         self._n += 1
         return f"{prefix}-{self._n}"
 
-    def __call__(self, cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        with self._lock:
-            return self._handle(cmd)
+    def request(self, *words: str) -> None:
+        """Record one request; raise when the test asked this one to fail."""
+        import notebooklm.exceptions as lib
 
-    def _handle(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
-        self.calls.append(list(cmd))
-        args = [a for a in cmd[1:] if a != "--json"]
-        if "--storage" in args:
-            i = args.index("--storage")
-            del args[i : i + 2]
-        del args[:2]  # --profile NAME
-        joined = " ".join(cmd)
-        verb = args[1] if args[0] == "source" else args[0]
+        self.calls.append(list(words))
+        self.threads.add(threading.current_thread().name)
+        if self.before is not None:
+            self.before(list(words))
+        verb = words[1] if words[0] == "source" else words[0]
         needle = self.fail.get(verb)
-        if needle and needle in joined:
-            return subprocess.CompletedProcess(cmd, 2, "", f"{verb} failed on purpose")
+        if needle and needle in " ".join(words):
+            if verb in self.signed_out:
+                raise lib.AuthError("Authentication expired or invalid.")
+            raise lib.NotebookLMError(f"{verb} failed on purpose")
 
-        def option(name: str) -> str:
-            return args[args.index(name) + 1]
+    async def pause(self, verb: str) -> None:
+        """Take as long as the test asked this verb to take, counting the requests under way."""
+        self.active += 1
+        self.peak = max(self.peak, self.active)
+        try:
+            await asyncio.sleep(self.delay.get(verb, 0))
+        finally:
+            self.active -= 1
 
-        def done(payload: object) -> subprocess.CompletedProcess[str]:
-            return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+    @staticmethod
+    def sign_in_ended() -> Exception:
+        import notebooklm.exceptions as lib
 
-        if args[0] == "list":
-            return done({"notebooks": self.notebooks, "count": len(self.notebooks)})
-        if args[0] == "create":
-            nb_id = self._new_id("nb")
-            self.notebooks.append({"id": nb_id, "title": args[1]})
-            self.sources[nb_id] = []
-            return done({"id": nb_id})
-        nb_id = option("-n")
-        bucket = self.sources[nb_id]
-        if verb == "list":
-            return done(list(bucket))
-        if verb == "add":
-            path = args[2]
-            source_id = self._new_id("src")
-            stored = pathlib.Path(path).name if self.reset_titles else option("--title")
-            bucket.append({"id": source_id, "title": stored, "status": "ready"})
-            return done({"source": {"id": source_id, "title": option("--title")}})
-        if verb == "add-async":
-            for url in [a for a in args[2:] if a.startswith("http")]:
+        return lib.AuthError("Authentication expired or invalid.")
+
+
+def _as_source(record: dict[str, str]) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=record["id"],
+        title=record.get("title"),
+        url=record.get("url"),
+        kind=SimpleNamespace(value=record.get("type", "markdown")),
+        status=SimpleNamespace(name=record.get("status", "ready").upper()),
+    )
+
+
+class _FakeContext:
+    def __init__(self, api: SimpleNamespace) -> None:
+        self.api = api
+
+    async def __aenter__(self) -> SimpleNamespace:
+        return self.api
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeSettings:
+    async def get_account_limits(self) -> SimpleNamespace:
+        return SimpleNamespace(source_limit=None, notebook_limit=None, tier=None)
+
+
+class _FakeNotebooks:
+    def __init__(self, fake: FakeNotebookLM) -> None:
+        self.fake = fake
+
+    async def list(self) -> list[SimpleNamespace]:
+        await self.fake.pause("list")
+        with self.fake._lock:
+            self.fake.request("list")
+            return [SimpleNamespace(id=n["id"], title=n["title"]) for n in self.fake.notebooks]
+
+    async def create(self, title: str) -> SimpleNamespace:
+        await self.fake.pause("create")
+        with self.fake._lock:
+            self.fake.request("create", title)
+            nb_id = self.fake._new_id("nb")
+            self.fake.notebooks.append({"id": nb_id, "title": title})
+            self.fake.sources[nb_id] = []
+            return SimpleNamespace(id=nb_id, title=title)
+
+
+class _FakeSources:
+    def __init__(self, fake: FakeNotebookLM) -> None:
+        self.fake = fake
+
+    async def list(self, notebook_id: str) -> list[SimpleNamespace]:
+        await self.fake.pause("list")
+        with self.fake._lock:
+            self.fake.request("source", "list", notebook_id)
+            return [_as_source(s) for s in self.fake.sources[notebook_id]]
+
+    async def add_file(
+        self, notebook_id: str, file_path: object, mime_type: str | None = None, *, title: str | None = None
+    ) -> SimpleNamespace:
+        await self.fake.pause("add")
+        path = pathlib.Path(str(file_path))
+        assert path.is_file() and mime_type == "text/markdown"  # content travels as a file
+        with self.fake._lock:
+            self.fake.request("source", "add", notebook_id, path.name, title or "")
+            self.fake.uploaded[title or path.name] = path.read_text(encoding="utf-8")
+            source_id = self.fake._new_id("src")
+            stored = path.name if self.fake.reset_titles else (title or path.name)
+            self.fake.sources[notebook_id].append({"id": source_id, "title": stored, "status": "ready"})
+            return SimpleNamespace(id=source_id, title=title)
+
+    async def add_urls_async(self, notebook_id: str, urls: list[str]) -> list[SimpleNamespace]:
+        await self.fake.pause("add-async")
+        with self.fake._lock:
+            self.fake.request("source", "add-async", notebook_id, *urls)
+            added = []
+            for url in urls:
                 vid = url.rsplit("v=", 1)[-1]
-                bucket.append(
-                    {
-                        "id": self._new_id("yt"),
-                        "title": f"Video {vid}",
-                        "url": url,
-                        "status": "ready",
-                        "type": "youtube",
-                    }
-                )
-            return done({"queued": True})
-        if verb == "fulltext":
-            src = next(s for s in bucket if s["id"] == args[2])
+                record = {
+                    "id": self.fake._new_id("yt"),
+                    "title": f"Video {vid}",
+                    "url": url,
+                    "status": "ready",
+                    "type": "youtube",
+                }
+                self.fake.sources[notebook_id].append(record)
+                added.append(_as_source(record))
+            return added
+
+    async def get_fulltext(self, notebook_id: str, source_id: str) -> SimpleNamespace:
+        await self.fake.pause("fulltext")
+        with self.fake._lock:
+            self.fake.request("source", "fulltext", notebook_id, source_id)
+            src = next(s for s in self.fake.sources[notebook_id] if s["id"] == source_id)
             url = src.get("url") or src.get("title", "")
-            return done({"source_id": src["id"], "content": f"words spoken in {url}"})
-        if verb == "wait":
-            return subprocess.CompletedProcess(cmd, 0, "ready", "")
-        if verb == "rename":
-            next(s for s in bucket if s["id"] == args[2])["title"] = args[3]
-            return done({})
-        if verb == "delete":
-            self.sources[nb_id] = [s for s in bucket if s["id"] != args[2]]
-            return done({})
-        return subprocess.CompletedProcess(cmd, 1, "", f"unscripted: {joined}")
+            return SimpleNamespace(source_id=source_id, content=f"words spoken in {url}")
+
+    async def wait_until_ready(self, notebook_id: str, source_id: str, timeout: float = 120.0) -> None:
+        await self.fake.pause("wait")
+        with self.fake._lock:
+            self.fake.request("source", "wait", notebook_id, source_id)
+
+    async def rename(self, notebook_id: str, source_id: str, new_title: str) -> None:
+        await self.fake.pause("rename")
+        with self.fake._lock:
+            self.fake.request("source", "rename", notebook_id, source_id, new_title)
+            next(s for s in self.fake.sources[notebook_id] if s["id"] == source_id)["title"] = new_title
+
+    async def delete(self, notebook_id: str, source_id: str) -> None:
+        await self.fake.pause("delete")
+        with self.fake._lock:
+            self.fake.request("source", "delete", notebook_id, source_id)
+            bucket = self.fake.sources[notebook_id]
+            self.fake.sources[notebook_id] = [s for s in bucket if s["id"] != source_id]

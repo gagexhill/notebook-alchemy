@@ -1,12 +1,16 @@
-"""NotebookLM access through the `notebooklm` CLI (notebooklm-py).
+"""NotebookLM access through notebooklm-py's Python API.
 
-Every call checks the process result. A failure raises a typed error; nothing here reports
-success for work that did not happen.
+Notebooks and sources are read and changed through the library, on one session per client that
+stays open for the run. The `notebooklm` command is used only where the library has no public
+Python function: the sign-in window (`login`) and reading the account a profile recorded
+(`auth check`). A failure raises a typed error; nothing here reports success for work that did
+not happen.
 """
 
 from __future__ import annotations
 
 import asyncio
+import atexit
 import hashlib
 import hmac
 import importlib.metadata
@@ -18,7 +22,8 @@ import secrets
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable
+import threading
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,7 +37,9 @@ NOTEBOOKLM_BIN = "notebooklm"
 
 
 LIST_TIMEOUT = 60.0
-# For answers from `notebooklm` this tool cannot read: usually a newer or older notebooklm-py.
+OPEN_TIMEOUT = 60.0  # opening the session: reading the sign-in file and one request for its tokens
+CLOSE_TIMEOUT = 10.0
+# For answers from NotebookLM this tool cannot read: usually a newer or older notebooklm-py.
 UNEXPECTED_HINT = (
     "Run the same command again. If it keeps failing, update Notebook Alchemy by running its "
     "installer again, then check with `notebook-alchemy test`."
@@ -44,12 +51,193 @@ INSTALL_HINT = (
 )
 WRITE_TIMEOUT = 120.0
 UPLOAD_TIMEOUT = 300.0
-# notebooklm's own HTTP timeout for an upload (its default is 30 s, short for a large compendium);
-# kept below UPLOAD_TIMEOUT so notebooklm reports the timeout itself.
+# notebooklm's own HTTP timeout for an upload (its default is short for a large book); kept below
+# UPLOAD_TIMEOUT so notebooklm reports the timeout itself.
 UPLOAD_HTTP_TIMEOUT = 180.0
-_AUTH_HINTS = ("authentication", "auth not found", "sign-in", "signed-out", "login", "re-authenticate")
+RETRY_HINT = "Run the same command again; `notebook-alchemy status` shows whether the sign-in works."
 
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]  # defaults to subprocess.run at call time
+# Opens notebooklm-py for a profile or a session file: (profile, path) -> an async context manager
+# whose value has `.notebooks`, `.sources` and `.settings`.
+ApiOpener = Callable[[str | None, str | None], Any]
+
+
+def default_api(profile: str | None, path: str | None) -> Any:
+    """notebooklm-py's client for a profile, or for a session file when one is given."""
+    from notebooklm import NotebookLMClient as _Library  # imported on use: it takes half a second
+
+    # allow_headless stays off: renewing an ended sign-in through a hidden browser made a
+    # signed-out check take minutes; an ended sign-in is offered to the user instead.
+    return _Library.from_storage(
+        path=path, profile=profile, upload_timeout=UPLOAD_HTTP_TIMEOUT, allow_headless=False
+    )
+
+
+class _NoSignIn(Exception):
+    """The sign-in file is missing or cannot be read."""
+
+
+class _CallTimeout(Exception):
+    """A call did not finish in the time this tool allows."""
+
+
+_OPEN: set[_Session] = set()
+_OPEN_LOCK = threading.Lock()
+
+
+def close_all() -> None:
+    """Close every open NotebookLM session. Runs at exit; safe to call at any time."""
+    with _OPEN_LOCK:
+        sessions = list(_OPEN)
+    for session in sessions:
+        session.close()
+
+
+atexit.register(close_all)
+
+
+class _Session:
+    """One notebooklm-py client on one background event loop.
+
+    The library is asynchronous and its client belongs to the event loop that opened it, while
+    uploads run on several threads. Every call is handed to that one loop and waited on, so all
+    threads share one client and one connection pool. Opened on first use.
+    """
+
+    def __init__(self, opener: Callable[[], Any]) -> None:
+        self._opener = opener
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._context: Any = None
+        self._library: Any = None
+
+    @property
+    def is_open(self) -> bool:
+        return self._library is not None
+
+    def run(self, call: Callable[[Any], Awaitable[Any]], timeout: float) -> Any:
+        loop, library = self._open()
+        future = asyncio.run_coroutine_threadsafe(call(library), loop)  # type: ignore[arg-type]
+        try:
+            return future.result(timeout)
+        except TimeoutError as exc:
+            if future.done():
+                raise  # the library's own timeout, raised inside the call
+            future.cancel()
+            raise _CallTimeout() from exc
+
+    def _open(self) -> tuple[asyncio.AbstractEventLoop, Any]:
+        with self._lock:
+            if self._loop is not None and self._library is not None:
+                return self._loop, self._library
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(target=loop.run_forever, name="notebooklm-session", daemon=True)
+            thread.start()
+
+            async def enter() -> tuple[Any, Any]:
+                context = self._opener()
+                return context, await context.__aenter__()
+
+            future = asyncio.run_coroutine_threadsafe(enter(), loop)
+            try:
+                self._context, self._library = future.result(OPEN_TIMEOUT)
+            except BaseException as exc:
+                future.cancel()
+                _stop_loop(loop, thread)
+                if isinstance(exc, (FileNotFoundError, ValueError)):
+                    raise _NoSignIn(str(exc)) from exc
+                if isinstance(exc, TimeoutError) and not future.done():
+                    raise _CallTimeout() from exc
+                raise
+            self._loop, self._thread = loop, thread
+            with _OPEN_LOCK:
+                _OPEN.add(self)
+            return loop, self._library
+
+    def close(self) -> None:
+        with self._lock:
+            loop, thread, context = self._loop, self._thread, self._context
+            self._loop = self._thread = self._context = self._library = None
+        with _OPEN_LOCK:
+            _OPEN.discard(self)
+        if loop is None or thread is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(context.__aexit__(None, None, None), loop).result(CLOSE_TIMEOUT)
+        except Exception as exc:  # noqa: BLE001 - closing is cleanup; the work is done, the reason is logged
+            logger.info("Closing the NotebookLM session: %s", type(exc).__name__)
+        finally:
+            _stop_loop(loop, thread)
+
+
+def _stop_loop(loop: asyncio.AbstractEventLoop, thread: threading.Thread) -> None:
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(CLOSE_TIMEOUT)
+    if not thread.is_alive():
+        loop.close()
+
+
+def _said(exc: BaseException) -> str:
+    """What an error says, on one line, without notebooklm's own "run notebooklm login" advice."""
+    text = " ".join(str(exc).split())[:400]
+    return re.sub(r"\s*Run 'notebooklm login'[^.]*\.", "", text).strip() or type(exc).__name__
+
+
+def _translate(exc: BaseException, what: str, timeout: float) -> NotebookLMError | None:
+    """A notebooklm-py error as this tool's typed error, chosen by the error's type.
+
+    None for an error that is not NotebookLM's (a bug here or in a test fake), which is raised as it
+    is.
+    """
+    if isinstance(exc, _NoSignIn):
+        return SessionError(
+            f"The NotebookLM sign-in could not be read: {_said(exc)}", hint="Run `notebook-alchemy login`."
+        )
+    if isinstance(exc, _CallTimeout):
+        return NotebookLMError(
+            f"NotebookLM did not finish in {timeout:.0f}s ({what}).",
+            hint="Check your connection and run the same command again.",
+        )
+    import notebooklm.exceptions as lib  # imported on use: it takes half a second
+
+    if isinstance(exc, lib.AuthError):
+        return SessionError(
+            f"NotebookLM rejected the session: {_said(exc)}", hint="Run `notebook-alchemy login`."
+        )
+    if isinstance(exc, lib.RateLimitError):
+        wait = f" It asks for {exc.retry_after} seconds." if getattr(exc, "retry_after", None) else ""
+        return NotebookLMError(
+            f"NotebookLM is limiting requests from this account ({what}).{wait}",
+            hint="Wait a few minutes, then run the same command again.",
+        )
+    if isinstance(exc, lib.NotebookLimitError):
+        return NotebookLMError(
+            "This NotebookLM account has as many notebooks as its plan allows.",
+            hint="Delete a notebook you no longer need in NotebookLM, then run the same command again.",
+        )
+    if isinstance(exc, lib.SourceTimeoutError):
+        return NotebookLMError(
+            f"NotebookLM was still processing the source after {timeout:.0f}s ({what}).",
+            hint="Run the same command again; a source that is ready by then is not uploaded twice.",
+        )
+    if isinstance(exc, lib.SourceProcessingError):
+        return NotebookLMError(f"NotebookLM could not process the source ({what}).", hint=RETRY_HINT)
+    if isinstance(exc, lib.SourceNotFoundError):
+        return NotebookLMError(f"The source is no longer in the notebook ({what}).", hint=RETRY_HINT)
+    if isinstance(exc, lib.NetworkError):  # includes the library's request timeout
+        return NotebookLMError(
+            f"NotebookLM could not be reached ({what}): {_said(exc)}",
+            hint="Check your connection and run the same command again.",
+        )
+    if isinstance(exc, lib.DecodingError):
+        return NotebookLMError(
+            f"NotebookLM answered in a form this tool cannot read ({what}): {_said(exc)}",
+            hint=UNEXPECTED_HINT,
+        )
+    if isinstance(exc, lib.NotebookLMError):
+        return NotebookLMError(f"NotebookLM refused ({what}): {_said(exc)}", hint=RETRY_HINT)
+    return None
 
 
 @dataclass
@@ -178,16 +366,12 @@ def normalize_title(title: str) -> str:
     return " ".join(stem.replace("_", " ").split()).lower()
 
 
-def _first(data: Any, *keys: str) -> Any:
-    if isinstance(data, dict):
-        for key in keys:
-            if data.get(key):
-                return data[key]
-    return None
-
-
 class NotebookLMClient:
-    """Notebook management and source upload through the notebooklm CLI."""
+    """Notebook management and source upload through notebooklm-py.
+
+    `api` replaces the library in tests; `runner` replaces the `notebooklm` command, which is used
+    for the sign-in window and for reading the recorded account only.
+    """
 
     def __init__(
         self,
@@ -196,16 +380,30 @@ class NotebookLMClient:
         *,
         runner: Runner | None = None,
         limits_reader: LimitsReader | None = None,
+        api: ApiOpener | None = None,
     ) -> None:
         self.config = config
         self.profile = profile or config.notebooklm_profile
         self._runner = runner
         self._limits_reader = limits_reader
+        self._api = api
+        self._session: _Session | None = None
+        self._session_lock = threading.Lock()
 
     # -- session --
 
     def profile_state_path(self) -> Path:
-        return Path.home() / ".notebooklm" / "profiles" / self.profile / "storage_state.json"
+        """Where notebooklm keeps this profile's sign-in, by notebooklm's own rule: NOTEBOOKLM_HOME
+        or `~/.notebooklm`, and for the default profile the older file in that folder's root when
+        the profile has none. Worked out here because importing the library takes half a second
+        and `status` asks this on every start."""
+        configured = os.environ.get("NOTEBOOKLM_HOME")
+        home = Path(configured).expanduser().resolve() if configured else Path.home() / ".notebooklm"
+        state = home / "profiles" / self.profile / "storage_state.json"
+        legacy = home / "storage_state.json"
+        if self.profile == DEFAULT_NOTEBOOKLM_PROFILE and not state.exists() and legacy.exists():
+            return legacy
+        return state
 
     def storage_override(self) -> Path | None:
         """The ALCHEMY_SESSION_FILE in use, if it exists. notebooklm then ignores --profile."""
@@ -249,30 +447,18 @@ class NotebookLMClient:
         """
         if self._limits_reader is not None:
             return self._limits_reader(self)
-        if self._runner is not None:
-            return None  # an injected test runner: no live requests from here
+        if self._runner is not None or self._api is not None:
+            return None  # an injected test double: no live requests from here
         if os.getenv("NOTEBOOKLM_AUTH_JSON") is None and self.session_file() is None:
             return None
         return self._read_plan_limits_live()
 
     def _read_plan_limits_live(self) -> PlanLimits | None:
         try:
-            return asyncio.run(self._read_plan_limits())
+            got = self._call("read the plan limits", lambda lib: lib.settings.get_account_limits())
         except Exception as exc:  # noqa: BLE001 - the limit is advisory; the reason is logged, not hidden
             logger.info("Could not read the NotebookLM plan limits: %s", type(exc).__name__)
             return None
-
-    async def _read_plan_limits(self) -> PlanLimits:
-        from notebooklm import NotebookLMClient as _Library  # imported on use: it is large
-
-        override = self.storage_override()
-        opener = (
-            _Library.from_storage(path=str(override))
-            if override
-            else _Library.from_storage(profile=self.profile)
-        )
-        async with opener as library:
-            got = await library.settings.get_account_limits()
         return PlanLimits(got.source_limit, got.notebook_limit, got.tier)
 
     def check_session(self) -> SessionStatus:
@@ -291,7 +477,8 @@ class NotebookLMClient:
         """Read the account recorded on this profile with `notebooklm auth check --json`.
 
         This is a local read (no network). The email is reported only when notebooklm itself
-        recorded one; otherwise it is None with the reason in `detail`.
+        recorded one; otherwise it is None with the reason in `detail`. It stays on the command
+        line: the library's public Python API has no function for it.
         """
         if os.getenv("NOTEBOOKLM_AUTH_JSON"):
             return AccountIdentity(
@@ -325,93 +512,73 @@ class NotebookLMClient:
             self.profile, None, "this profile's sign-in did not record an account", storage
         )
 
-    # -- process plumbing --
+    # -- the notebooklm command: the sign-in window and the recorded account only --
+
+    def _refuse_profile_with_session_file(self) -> Path | None:
+        """The session file in use, if any; refused when a profile was also chosen.
+
+        A configured path that does not exist (for example one copied from an old .env) is
+        ignored, so the notebooklm profile's own session is used.
+        """
+        override = self.storage_override()
+        if override and self.profile != DEFAULT_NOTEBOOKLM_PROFILE:
+            raise ConfigError(
+                f"ALCHEMY_SESSION_FILE ({override}) is set, so notebooklm would ignore "
+                f"profile '{self.profile}' and use that file's account instead.",
+                hint="Remove ALCHEMY_SESSION_FILE from .env to use profiles, or drop --profile "
+                "and ALCHEMY_NOTEBOOKLM_PROFILE to use that file.",
+            )
+        return override
 
     def _command(self, args: list[str], *, as_json: bool) -> list[str]:
         cmd = [NOTEBOOKLM_BIN]
-        # A configured path that does not exist (for example one copied from an old .env) is
-        # ignored, so the notebooklm profile's own session is used.
-        override = self.storage_override()
+        override = self._refuse_profile_with_session_file()
         if override:
-            if self.profile != DEFAULT_NOTEBOOKLM_PROFILE:
-                raise ConfigError(
-                    f"ALCHEMY_SESSION_FILE ({override}) is set, so notebooklm would ignore "
-                    f"profile '{self.profile}' and use that file's account instead.",
-                    hint="Remove ALCHEMY_SESSION_FILE from .env to use profiles, or drop --profile "
-                    "and ALCHEMY_NOTEBOOKLM_PROFILE to use that file.",
-                )
             cmd += ["--storage", str(override)]
         cmd += ["--profile", self.profile, *args]
         if as_json:
             cmd.append("--json")
         return cmd
 
-    def _run(self, args: list[str], *, timeout: float, as_json: bool = True) -> Any:
-        cmd = self._command(args, as_json=as_json)
-        shown = "notebooklm " + " ".join(args[:2] if args[0] == "source" else args[:1])
-        try:
-            res = (self._runner or subprocess.run)(
-                cmd,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=timeout,
-            )
-        except FileNotFoundError as exc:
-            raise NotebookLMError(
-                "The `notebooklm` command was not found.",
-                hint=INSTALL_HINT,
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise NotebookLMError(
-                f"`{shown}` did not finish within {timeout:.0f}s.",
-                hint="Check your connection and try again.",
-            ) from exc
-        except OSError as exc:
-            raise NotebookLMError(
-                f"Could not start `{shown}`: {exc}",
-                hint="Check the install with `notebook-alchemy test`; the installer repairs it.",
-            ) from exc
+    # -- the library --
 
-        out = (res.stdout or "").strip()
-        if res.returncode != 0:
-            message = ""
-            try:
-                parsed = json.loads(out or (res.stderr or ""))
-                message = str(parsed.get("message", "")) if isinstance(parsed, dict) else ""
-            except ValueError:
-                pass
-            message = message or (res.stderr or "").strip() or out or f"exit code {res.returncode}"
-            message = " ".join(message.split())[:400]
-            message = re.sub(r"\s*Run 'notebooklm login'[^.]*\.", "", message).strip()
-            if any(h in message.lower() for h in _AUTH_HINTS):
-                raise SessionError(
-                    f"NotebookLM rejected the session: {message}",
-                    hint="Run `notebook-alchemy login`.",
-                )
-            raise NotebookLMError(
-                f"`{shown}` failed: {message}",
-                hint="Run the same command again; `notebook-alchemy status` shows whether the sign-in works.",
-            )
-        if not as_json:
-            return out
+    def _open_session(self) -> _Session:
+        with self._session_lock:
+            if self._session is None:
+                override = self._refuse_profile_with_session_file()
+                profile, path = (None, str(override)) if override else (self.profile, None)
+                opener = self._api or default_api
+                self._session = _Session(lambda: opener(profile, path))
+            return self._session
+
+    def _call(self, what: str, call: Callable[[Any], Awaitable[Any]], *, timeout: float | None = None) -> Any:
+        """Run one library call on the shared session; a failure becomes a typed error."""
+        timeout = LIST_TIMEOUT if timeout is None else timeout
+        session = self._open_session()
         try:
-            return json.loads(out)
-        except ValueError as exc:
-            raise NotebookLMError(
-                f"`{shown}` returned output that is not JSON: {out[:120]!r}", hint=UNEXPECTED_HINT
-            ) from exc
+            return session.run(call, timeout)
+        except Exception as exc:
+            error = _translate(exc, what, timeout)
+            if error is None:
+                raise
+            raise error from exc
+
+    @property
+    def session_is_open(self) -> bool:
+        return self._session is not None and self._session.is_open
+
+    def close(self) -> None:
+        """Close the NotebookLM session, if one was opened. The next call opens a new one."""
+        with self._session_lock:
+            session, self._session = self._session, None
+        if session is not None:
+            session.close()
 
     # -- notebooks --
 
     def list_notebooks(self) -> list[dict[str, Any]]:
-        data = self._run(["list"], timeout=LIST_TIMEOUT)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and isinstance(data.get("notebooks"), list):
-            return data["notebooks"]
-        raise NotebookLMError("`notebooklm list` returned an unexpected shape.", hint=UNEXPECTED_HINT)
+        notebooks = self._call("list the notebooks", lambda lib: lib.notebooks.list())
+        return [{"id": str(n.id), "title": str(n.title or "")} for n in notebooks]
 
     def find_notebook(self, query: str, *, exact_only: bool = False) -> dict[str, Any] | None:
         """Exact title or id match; otherwise a unique substring match. Ambiguity is an error."""
@@ -436,8 +603,10 @@ class NotebookLMClient:
         existing = self.find_notebook(title, exact_only=True)
         if existing and existing.get("id"):
             return str(existing["id"]), False
-        data = self._run(["create", title], timeout=WRITE_TIMEOUT)
-        nb_id = _first(data, "id", "notebook_id") or _first(_first(data, "notebook"), "id")
+        made = self._call(
+            "create the notebook", lambda lib: lib.notebooks.create(title), timeout=WRITE_TIMEOUT
+        )
+        nb_id = getattr(made, "id", None)
         if not nb_id:
             raise NotebookLMError(
                 f"NotebookLM created '{title}' but returned no notebook id.",
@@ -448,65 +617,74 @@ class NotebookLMClient:
     # -- sources --
 
     def list_sources(self, notebook_id: str) -> list[dict[str, Any]]:
-        data = self._run(["source", "list", "-n", notebook_id], timeout=LIST_TIMEOUT)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and isinstance(data.get("sources"), list):
-            return data["sources"]
-        raise NotebookLMError("`notebooklm source list` returned an unexpected shape.", hint=UNEXPECTED_HINT)
+        sources = self._call("list the sources", lambda lib: lib.sources.list(notebook_id))
+        return [_source_record(s) for s in sources]
 
     def delete_source(self, notebook_id: str, source_id: str) -> None:
-        self._run(["source", "delete", source_id, "-n", notebook_id, "-y"], timeout=WRITE_TIMEOUT)
+        self._call(
+            "remove a source", lambda lib: lib.sources.delete(notebook_id, source_id), timeout=WRITE_TIMEOUT
+        )
 
     def wait_for_source(self, notebook_id: str, source_id: str, timeout: int = 180) -> None:
         """Block until NotebookLM has finished processing a source; raise if it failed or timed out."""
-        self._run(
-            ["source", "wait", source_id, "-n", notebook_id, "--timeout", str(timeout)],
+        self._call(
+            "wait for a source",
+            lambda lib: lib.sources.wait_until_ready(notebook_id, source_id, timeout=float(timeout)),
             timeout=timeout + 30,
-            as_json=False,
         )
 
     def add_youtube_sources(self, notebook_id: str, urls: list[str]) -> None:
         """Queue YouTube videos as sources without waiting; NotebookLM fetches their transcripts."""
-        self._run(["source", "add-async", *urls, "-n", notebook_id], timeout=WRITE_TIMEOUT)
+        self._call(
+            "add videos",
+            lambda lib: lib.sources.add_urls_async(notebook_id, list(urls)),
+            timeout=WRITE_TIMEOUT,
+        )
 
     def source_text(self, notebook_id: str, source_id: str) -> str:
         """The full text NotebookLM holds for a source (for a video, its transcript)."""
-        data = self._run(["source", "fulltext", source_id, "-n", notebook_id], timeout=LIST_TIMEOUT)
-        return str(_first(data, "content", "text") or "")
+        got = self._call("read a source", lambda lib: lib.sources.get_fulltext(notebook_id, source_id))
+        return str(getattr(got, "content", "") or "")
 
     def rename_source(self, notebook_id: str, source_id: str, title: str) -> None:
-        self._run(["source", "rename", source_id, title, "-n", notebook_id], timeout=WRITE_TIMEOUT)
+        self._call(
+            "rename a source",
+            lambda lib: lib.sources.rename(notebook_id, source_id, title),
+            timeout=WRITE_TIMEOUT,
+        )
 
     def add_source_document(self, notebook_id: str, document: SourceDocument) -> str:
-        """Upload one document as a file source (content never travels on the command line)."""
+        """Upload one document as a file source. The text goes as a file, as it always has: a book
+        is far larger than one command-line argument may be, and the library uploads files."""
         safe = re.sub(r"[^\w\-]+", "_", document.title).strip("_") or "source"
         # A scanner briefly holding the temp file must not turn a finished upload into an error.
         with tempfile.TemporaryDirectory(prefix="notebook-alchemy-", ignore_cleanup_errors=True) as tmp:
             path = Path(tmp) / f"{safe[:80]}.md"
             path.write_text(document.content, encoding="utf-8")
-            data = self._run(
-                [
-                    "source",
-                    "add",
-                    str(path),
-                    "-n",
-                    notebook_id,
-                    "--type",
-                    "file",
-                    "--title",
-                    document.title,
-                    "--request-timeout",
-                    f"{UPLOAD_HTTP_TIMEOUT:g}",
-                ],
+            made = self._call(
+                f"upload '{document.title}'",
+                lambda lib: lib.sources.add_file(notebook_id, path, "text/markdown", title=document.title),
                 timeout=UPLOAD_TIMEOUT,
             )
-        source_id = _first(data, "id", "source_id") or _first(_first(data, "source"), "id")
+        source_id = getattr(made, "id", None)
         if not source_id:
             # Without the new source's id it cannot be waited on, renamed or told apart from an
             # older copy, so the upload is not reported as done.
             raise NotebookLMError(
-                f"`notebooklm source add` returned no source id for '{document.title}'.",
+                f"NotebookLM returned no source id for '{document.title}'.",
                 hint="Check the notebook in NotebookLM, then run the sync again.",
             )
         return str(source_id)
+
+
+def _source_record(source: Any) -> dict[str, Any]:
+    """A library source as the plain record the rest of this tool reads."""
+    kind = getattr(source, "kind", None)
+    status = getattr(source, "status", None)
+    return {
+        "id": str(getattr(source, "id", "") or ""),
+        "title": str(getattr(source, "title", "") or ""),
+        "url": str(getattr(source, "url", "") or ""),
+        "type": str(getattr(kind, "value", kind) or "").lower(),
+        "status": str(getattr(status, "name", status) or "").lower(),
+    }

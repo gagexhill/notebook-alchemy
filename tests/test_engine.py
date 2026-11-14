@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -72,7 +69,7 @@ def _sync_engine(tmp_path: Path, process: FakeProcess) -> AlchemyEngine:
 def _fake_engine(tmp_path: Path, fake: FakeNotebookLM) -> AlchemyEngine:
     _session(tmp_path)
     engine = AlchemyEngine(_config(tmp_path))
-    engine.client = NotebookLMClient(engine.config, runner=fake)
+    engine.client = NotebookLMClient(engine.config, api=fake)
     return engine
 
 
@@ -84,25 +81,13 @@ def test_sync_creates_the_notebook_and_uploads_every_file(tmp_path: Path) -> Non
 
 
 def test_uploads_and_waits_overlap_but_titles_are_fixed_only_after_all_waits(tmp_path: Path) -> None:
-    fake = FakeNotebookLM(reset_titles=True)
-    active, peak, order = [0], [0], []
-    lock = threading.Lock()
-
-    def slow(cmd: list[str], **kw: object):
-        verb = cmd[cmd.index("source") + 1] if "source" in cmd else cmd[3]
-        with lock:
-            active[0] += 1
-            peak[0] = max(peak[0], active[0])
-            order.append(verb)
-        time.sleep(0.05 if verb in ("add", "wait") else 0)
-        with lock:
-            active[0] -= 1
-        return fake(cmd, **kw)
-
+    fake = FakeNotebookLM(reset_titles=True, delay={"add": 0.05, "wait": 0.05})
     names = tuple(f"Topic_{i}" for i in range(6))
-    result = _fake_engine(tmp_path, slow).publish("Chan", _books(names))  # type: ignore[arg-type]
+    result = _fake_engine(tmp_path, fake).publish("Chan", _books(names))
     assert result.uploaded == 6 and fake.titles("Chan") == sorted(n.replace("_", " ") for n in names)
-    assert peak[0] > 1  # several notebooklm processes ran at once
+    assert fake.peak > 1  # several requests were under way at once
+    assert len(fake.opened) == 1 and fake.threads == {"notebooklm-session"}  # on one shared session
+    order = [c[1] for c in fake.calls if c[0] == "source"]
     assert max(i for i, v in enumerate(order) if v == "wait") < min(
         i for i, v in enumerate(order) if v == "rename"
     )
@@ -111,13 +96,13 @@ def test_uploads_and_waits_overlap_but_titles_are_fixed_only_after_all_waits(tmp
 def test_an_unexpected_error_in_one_upload_is_reported_and_the_rest_reconcile(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
 
-    def flaky(cmd: list[str], **kw: object):
-        if "add" in cmd and any("Beta" in part for part in cmd):
+    def flaky(words: list[str]) -> None:
+        if "add" in words and any("Beta" in part for part in words):
             raise RuntimeError("something nobody expected")
-        return fake(cmd, **kw)
 
+    fake.before = flaky
     with pytest.raises(SyncError) as err:
-        _fake_engine(tmp_path, flaky).publish("Chan", _books())  # type: ignore[arg-type]
+        _fake_engine(tmp_path, fake).publish("Chan", _books())
     assert any("Beta Topics" in f and "RuntimeError" in f for f in err.value.failed)
     assert fake.titles("Chan") == ["Alpha Topics"]  # the other upload was waited on and kept
 
@@ -159,7 +144,9 @@ def test_sync_reports_each_failed_file_and_still_uploads_the_rest(tmp_path: Path
     fake = FakeNotebookLM(fail={"add": "Beta_Topics.md"})
     with pytest.raises(SyncError) as err:
         _fake_engine(tmp_path, fake).publish("Chan", _books())
-    assert err.value.failed == ["Beta Topics: `notebooklm source add` failed: add failed on purpose"]
+    assert err.value.failed == [
+        "Beta Topics: NotebookLM refused (upload 'Beta Topics'): add failed on purpose"
+    ]
     assert fake.titles("Chan") == ["Alpha Topics"]
 
 
@@ -216,10 +203,10 @@ def test_a_failed_sync_does_not_overwrite_the_record(tmp_path: Path) -> None:
     engine.publish("Chan", _books(("Alpha_Topics",)))
     broken = FakeNotebookLM(fail={"add": "Gamma"})
     broken.notebooks, broken.sources = fake.notebooks, fake.sources
-    engine.client = NotebookLMClient(engine.config, runner=broken)
+    engine.client = NotebookLMClient(engine.config, api=broken)
     with pytest.raises(SyncError):
         engine.publish("Chan", _books(("Gamma_Topics",)))
-    engine.client = NotebookLMClient(engine.config, runner=fake)
+    engine.client = NotebookLMClient(engine.config, api=fake)
     engine.publish("Chan", _books(("Gamma_Topics",)))
     assert fake.titles("Chan") == ["Gamma Topics"]  # Alpha was still recorded, so it is pruned now
 
@@ -231,7 +218,7 @@ def _limited_engine(tmp_path: Path, fake: FakeNotebookLM, limit: int | None) -> 
     _session(tmp_path)
     engine = AlchemyEngine(_config(tmp_path))
     plan = PlanLimits(limit, 100, 1) if limit is not None else None
-    engine.client = NotebookLMClient(engine.config, runner=fake, limits_reader=lambda client: plan)
+    engine.client = NotebookLMClient(engine.config, api=fake, limits_reader=lambda client: plan)
     return engine
 
 
@@ -292,7 +279,7 @@ def test_notebooklm_reads_blocked_videos_in_a_working_notebook_and_cleans_up(tmp
             "status": "ready",
         }
     )
-    engine.client = NotebookLMClient(engine.config, runner=fake)
+    engine.client = NotebookLMClient(engine.config, api=fake)
     texts = engine.transcripts_via_notebooklm(
         [("abcdefghijk", "One"), ("bcdefghijkl", "Two"), ("cdefghijklm", "Three")]
     )
@@ -308,7 +295,7 @@ def test_notebooklm_reads_blocked_videos_in_a_working_notebook_and_cleans_up(tmp
 def test_notebooklm_route_needs_a_sign_in(tmp_path: Path) -> None:
     engine = AlchemyEngine(_config(tmp_path))
     fake = FakeNotebookLM()
-    engine.client = NotebookLMClient(engine.config, runner=fake)
+    engine.client = NotebookLMClient(engine.config, api=fake)
     assert engine.transcripts_via_notebooklm([("abcdefghijk", "One")]) == {} and fake.calls == []
 
 
@@ -482,11 +469,11 @@ def test_a_book_that_fails_to_upload_keeps_its_old_copy(tmp_path: Path) -> None:
     engine.publish("Chan", _books())  # first run: both books, recorded by id
     broken = FakeNotebookLM(fail={"add": "Beta"})
     broken.notebooks, broken.sources = fake.notebooks, fake.sources
-    engine.client = NotebookLMClient(engine.config, runner=broken)
+    engine.client = NotebookLMClient(engine.config, api=broken)
     with pytest.raises(SyncError):
         engine.publish("Chan", _edited(_books()))
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]  # Beta's old copy is still there
-    engine.client = NotebookLMClient(engine.config, runner=fake)
+    engine.client = NotebookLMClient(engine.config, api=fake)
     result = engine.publish("Chan", _edited(_books()))
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]  # and the next run replaces it once
     assert (result.uploaded, result.unchanged) == (1, 1)  # Beta was still the old text; Alpha was in
@@ -532,7 +519,7 @@ def test_the_working_notebook_only_ever_loses_videos_and_titles_must_be_unique(t
     fake.sources[ws].append(
         {"id": "yt-old", "title": "Live Q&A", "url": None, "type": "youtube", "status": "ready"}
     )
-    engine.client = NotebookLMClient(engine.config, runner=fake)
+    engine.client = NotebookLMClient(engine.config, api=fake)
     texts = engine.transcripts_via_notebooklm([("abcdefghijk", "Live Q&A"), ("bcdefghijkl", "Live Q&A")])
     # The leftover titled "Live Q&A" matches two queued videos, so it is read for neither: each video's
     # words come from its own URL.
@@ -557,7 +544,7 @@ def test_a_book_whose_title_was_never_set_is_sent_again(tmp_path: Path) -> None:
     assert sorted(_ids_by_title(broken)) == ["Alpha Topics", "Beta_Topics.md"]
     fixed = FakeNotebookLM(reset_titles=True)
     fixed.notebooks, fixed.sources = broken.notebooks, broken.sources
-    engine.client = NotebookLMClient(engine.config, runner=fixed)
+    engine.client = NotebookLMClient(engine.config, api=fixed)
     result = engine.publish("Chan", _books())
     assert (result.uploaded, result.unchanged) == (1, 1)  # Beta's upload was never confirmed
     assert sorted(_ids_by_title(fixed)) == ["Alpha Topics", "Beta Topics"]
@@ -580,12 +567,12 @@ def test_an_old_copy_that_could_not_be_removed_is_removed_next_time(tmp_path: Pa
     old_beta = _ids_by_title(fake)["Beta Topics"]
     stubborn = FakeNotebookLM(fail={"delete": old_beta})
     stubborn.notebooks, stubborn.sources = fake.notebooks, fake.sources
-    engine.client = NotebookLMClient(engine.config, runner=stubborn)
+    engine.client = NotebookLMClient(engine.config, api=stubborn)
     alpha, beta = _books()
     with pytest.raises(SyncError, match="1 problems"):
         engine.publish("Chan", [alpha, *_edited([beta])])
     assert [s["title"] for s in fake.sources[fake.notebook_id("Chan")]].count("Beta Topics") == 2
-    engine.client = NotebookLMClient(engine.config, runner=fake)
+    engine.client = NotebookLMClient(engine.config, api=fake)
     result = engine.publish("Chan", [alpha, *_edited([beta])])
     assert result.uploaded == 0 and sorted(fake.titles("Chan")) == ["Alpha Topics", "Beta Topics"]
     assert old_beta not in _ids_by_title(fake).values()
@@ -607,18 +594,9 @@ def test_books_a_0_2_upload_recorded_under_its_own_file_name_are_replaced(tmp_pa
 def test_the_transcript_route_stops_when_notebooklm_ends_the_sign_in(tmp_path: Path) -> None:
     _session(tmp_path)
     engine = AlchemyEngine(_config(tmp_path))
-    fake = FakeNotebookLM(fail={"add-async": "watch"})  # every add: refused as signed out
-    engine.client = NotebookLMClient(engine.config, runner=fake)
-
-    real = fake._handle
-
-    def signed_out(cmd):
-        result = real(cmd)
-        if result.returncode == 2 and "add-async" in cmd:
-            return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
-        return result
-
-    fake._handle = signed_out  # type: ignore[method-assign]
+    # Every add is refused as signed out.
+    fake = FakeNotebookLM(fail={"add-async": "watch"}, signed_out=("add-async",))
+    engine.client = NotebookLMClient(engine.config, api=fake)
     _really_signed_out(engine)
     videos = [(f"vid{i:08d}", f"Video {i}") for i in range(60)]  # three batches
     texts = engine.transcripts_via_notebooklm(videos)
@@ -632,17 +610,9 @@ def test_the_transcript_route_stops_when_notebooklm_ends_the_sign_in(tmp_path: P
 def test_the_transcript_route_stops_when_the_sign_in_ends_while_reading(tmp_path: Path) -> None:
     _session(tmp_path)
     engine = AlchemyEngine(_config(tmp_path))
-    fake = FakeNotebookLM(fail={"fulltext": "-"})  # every read: refused as signed out
-    engine.client = NotebookLMClient(engine.config, runner=fake)
-    real = fake._handle
-
-    def signed_out(cmd):
-        result = real(cmd)
-        if result.returncode == 2 and "fulltext" in cmd:
-            return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
-        return result
-
-    fake._handle = signed_out  # type: ignore[method-assign]
+    # Every read is refused as signed out.
+    fake = FakeNotebookLM(fail={"fulltext": "-"}, signed_out=("fulltext",))
+    engine.client = NotebookLMClient(engine.config, api=fake)
     _really_signed_out(engine)
     texts = engine.transcripts_via_notebooklm([(f"vid{i:08d}", f"Video {i}") for i in range(60)])
     assert texts == {} and len([c for c in fake.calls if "add-async" in c]) == 1  # no second batch
@@ -651,7 +621,6 @@ def test_the_transcript_route_stops_when_the_sign_in_ends_while_reading(tmp_path
     assert len(reads) <= 3  # the reads already under way at most; the rest of the batch is skipped
     assert not [c for c in fake.calls if "delete" in c]  # nothing more is sent once signed out
     # The next run, signed in again, reads the videos left in the working notebook.
-    fake._handle = real  # type: ignore[method-assign]
     fake.fail = {}
     again = engine.transcripts_via_notebooklm([(f"vid{i:08d}", f"Video {i}") for i in range(20)])
     assert len(again) == 20
@@ -669,16 +638,14 @@ def test_one_video_whose_error_mentions_signing_in_does_not_stop_the_route(tmp_p
     _session(tmp_path)
     engine = AlchemyEngine(_config(tmp_path))
     fake = FakeNotebookLM()
-    engine.client = NotebookLMClient(engine.config, runner=fake)
-    real = fake._handle
+    engine.client = NotebookLMClient(engine.config, api=fake)
     reads = iter(range(1000))
 
-    def odd(cmd):
-        if "fulltext" in cmd and next(reads) == 3:  # the fourth read: one video's own odd message
-            return subprocess.CompletedProcess(cmd, 1, "", "This video requires login to view.")
-        return real(cmd)
+    def odd(words: list[str]) -> None:
+        if "fulltext" in words and next(reads) == 3:  # the fourth read: refused, though still signed in
+            raise fake.sign_in_ended()
 
-    fake._handle = odd  # type: ignore[method-assign]
+    fake.before = odd
     engine.client.check_session = lambda: SessionStatus(True, "Session is active.", 1)  # type: ignore[method-assign]
     texts = engine.transcripts_via_notebooklm([(f"vid{i:08d}", f"Video {i}") for i in range(40)])
     assert len(texts) == 39 and engine.route_notices == []  # one video waits; the rest are read
@@ -688,12 +655,12 @@ def test_a_sign_in_that_ended_before_the_route_starts_is_said_once(tmp_path: Pat
     _session(tmp_path)
     engine = AlchemyEngine(_config(tmp_path))
     fake = FakeNotebookLM()
-    engine.client = NotebookLMClient(engine.config, runner=fake)
+    engine.client = NotebookLMClient(engine.config, api=fake)
 
-    def refused(cmd):
-        return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
+    def refused(words: list[str]) -> None:
+        raise fake.sign_in_ended()
 
-    fake._handle = refused  # type: ignore[method-assign]
+    fake.before = refused
     assert engine.transcripts_via_notebooklm([("vid00000001", "One"), ("vid00000002", "Two")]) == {}
     assert engine.route_notices == [
         "The NotebookLM sign-in ended while reading videos; 2 videos wait for the next run."
@@ -706,16 +673,14 @@ def test_one_batch_refused_with_a_sign_in_message_does_not_stop_the_route(tmp_pa
     _session(tmp_path)
     engine = AlchemyEngine(_config(tmp_path))
     fake = FakeNotebookLM()
-    engine.client = NotebookLMClient(engine.config, runner=fake)
-    real = fake._handle
+    engine.client = NotebookLMClient(engine.config, api=fake)
     adds = iter(range(1000))
 
-    def odd(cmd):
-        if "add-async" in cmd and next(adds) == 0:  # the first batch: an odd message, still signed in
-            return subprocess.CompletedProcess(cmd, 1, "", "A video in this batch requires login.")
-        return real(cmd)
+    def odd(words: list[str]) -> None:
+        if "add-async" in words and next(adds) == 0:  # the first batch: refused, though still signed in
+            raise fake.sign_in_ended()
 
-    fake._handle = odd  # type: ignore[method-assign]
+    fake.before = odd
     engine.client.check_session = lambda: SessionStatus(True, "Session is active.", 1)  # type: ignore[method-assign]
     texts = engine.transcripts_via_notebooklm([(f"vid{i:08d}", f"Video {i}") for i in range(40)])
     assert len(texts) == 20 and engine.route_notices == []  # the second batch was still read
@@ -725,18 +690,15 @@ def test_a_delete_refused_as_signed_out_stops_the_route(tmp_path: Path) -> None:
     _session(tmp_path)
     engine = AlchemyEngine(_config(tmp_path))
     fake = FakeNotebookLM()
-    engine.client = NotebookLMClient(engine.config, runner=fake)
-    real = fake._handle
-
+    engine.client = NotebookLMClient(engine.config, api=fake)
     deletes: list[list[str]] = []
 
-    def refuse_deletes(cmd):
-        if "delete" in cmd:
-            deletes.append(cmd)
-            return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
-        return real(cmd)
+    def refuse_deletes(words: list[str]) -> None:
+        if "delete" in words:
+            deletes.append(words)
+            raise fake.sign_in_ended()
 
-    fake._handle = refuse_deletes  # type: ignore[method-assign]
+    fake.before = refuse_deletes
     engine.transcripts_via_notebooklm([(f"vid{i:08d}", f"Video {i}") for i in range(60)])
     assert 1 <= len(deletes) <= 3 and len([c for c in fake.calls if "add-async" in c]) == 1
     assert "videos wait for the next run" in engine.route_notices[0]
@@ -749,19 +711,17 @@ def test_old_videos_are_not_deleted_one_by_one_after_a_sign_out(tmp_path: Path) 
     ws = fake.seed("Notebook Alchemy workspace", [])
     for i in range(5):  # videos an interrupted run left behind that are no longer wanted
         fake.sources[ws].append(
-            {"id": f"yt-old-{i}", "title": f"Old {i}", "url": None, "type": "youtube", "status": "ready"}
+            {"id": f"yt-old-{i}", "title": f"Old {i}", "url": "", "type": "youtube", "status": "ready"}
         )
-    engine.client = NotebookLMClient(engine.config, runner=fake)
-    real = fake._handle
+    engine.client = NotebookLMClient(engine.config, api=fake)
     refused: list[list[str]] = []
 
-    def refuse_deletes(cmd):
-        if "delete" in cmd:
-            refused.append(cmd)
-            return subprocess.CompletedProcess(cmd, 1, "", "Authentication expired or invalid.")
-        return real(cmd)
+    def refuse_deletes(words: list[str]) -> None:
+        if "delete" in words:
+            refused.append(words)
+            raise fake.sign_in_ended()
 
-    fake._handle = refuse_deletes  # type: ignore[method-assign]
+    fake.before = refuse_deletes
     engine.transcripts_via_notebooklm([("vid00000001", "One")])
     assert len(refused) == 1  # the first refusal; the other four wait for the next run
 
