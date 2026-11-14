@@ -28,7 +28,7 @@ NOTEBOOKS = json.dumps([{"id": "nb-1", "title": "Alpha"}, {"id": "nb-2", "title"
 
 
 def _client(tmp_path: Path, process: FakeProcess | None = None, **cfg) -> NotebookLMClient:
-    config = AlchemyConfig(vault_path=tmp_path / "v", **cfg)
+    config = AlchemyConfig(cache_dir=tmp_path / "c", **cfg)
     return NotebookLMClient(config, runner=process)
 
 
@@ -73,6 +73,9 @@ def test_check_session_states(tmp_path: Path) -> None:
     )
     result = expired.check_session()
     assert not result.ok and "expired" in result.detail.lower()
+    assert missing.signed_out  # no sign-in at all
+    _profile_session(expired)
+    assert expired.check_session().signed_out  # an ended sign-in
 
 
 def test_upload_sends_a_file_not_content_and_not_text_flag(tmp_path: Path) -> None:
@@ -194,6 +197,7 @@ def test_check_session_reports_any_cli_failure_instead_of_raising(tmp_path: Path
     _profile_session(client)
     status = client.check_session()
     assert not status.ok and "something unexpected broke" in status.detail
+    assert not status.signed_out  # a fault, not a sign-out: signing in again would not help
 
 
 def test_an_old_unprefixed_title_counts_as_a_copy_of_the_new_one() -> None:
@@ -373,3 +377,18 @@ def test_plan_limits_name_the_plan_and_are_never_guessed(tmp_path: Path) -> None
     assert PlanLimits(50, 100, 1).plan == "Standard" and PlanLimits(None, None, 9).plan == "unknown plan"
     assert _client(tmp_path, FakeProcess()).plan_limits() is None  # a test runner never reads live
     assert NotebookLMClient(AlchemyConfig()).plan_limits() is None  # no session: unknown, not a guess
+
+
+def test_notebooklm_is_not_told_to_renew_sessions_through_a_hidden_browser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The headless renewal made a signed-out check take minutes; an ended sign-in is offered instead.
+    seen: list[object] = []
+
+    def runner(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append(kwargs.get("env"))
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"notebooks": []}), "")
+
+    monkeypatch.delenv("NOTEBOOKLM_HEADLESS_REAUTH", raising=False)
+    _client(tmp_path, runner).list_notebooks()  # type: ignore[arg-type]
+    assert seen == [None]  # the user's own environment, unchanged

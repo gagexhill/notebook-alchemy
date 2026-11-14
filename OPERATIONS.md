@@ -11,7 +11,7 @@ Maintainer runbook: how to validate, scan, release and regenerate assets. User d
 | Completed decisions | Design decisions and their rationale | `DEVLOG.md` |
 | Rules for changes | Invariants, validation commands | `AGENTS.md` |
 | Runtime defaults | Model, concurrency, paths | `src/notebook_alchemy/config.py`, `.env.example` |
-| Model prices | Cost estimates in `dry-run` | `src/notebook_alchemy/gemini.py` (`PRICING_USD_PER_M`) |
+| Model prices | Cost estimates in `dry-run` | `src/notebook_alchemy/claude.py` (`PRICING_USD_PER_M`) |
 | Dependency updates | Weekly pip and Actions pull requests | `.github/dependabot.yml` |
 
 ## Validation
@@ -40,6 +40,27 @@ maintainer approves it for that pull request. The approval is recorded in the pu
 ("Hosted run approved by the maintainer"), so the record lives with the run it covers. A workflow file,
 an included runner allowance, or an earlier approved run is not permission for the next one. Dependabot
 pull requests start a run too; review them in a batch rather than one at a time.
+
+## Claude API Key
+
+The maintainer's runs use a key that belongs to a Console service account (not a person), scoped to
+one workspace kept for this tool. That workspace has:
+
+- a monthly spend limit with an email alert below it;
+- rate limits that allow only the model in `config.py` (every other model at 0 requests a minute), so
+  a leaked key cannot be spent on costlier models;
+- keys that expire after 30 days.
+
+Rotate before the key expires, or at once if it may have leaked:
+
+1. In the Console, create a key for the same service account, scoped to the same workspace.
+2. Put it in `.env` as `ANTHROPIC_API_KEY` (never in a file git tracks), and run
+   `notebook-alchemy status`.
+3. Run one small build (`notebook-alchemy run <channel> --limit 1 --save books`) to confirm it works.
+4. Delete the old key in the Console.
+
+A key that may have leaked is disabled first, then rotated; the spend limit bounds what it could cost
+in the meantime. Price changes go in `PRICING_USD_PER_M` with the date they were read.
 
 ## Secret Scan Hook
 

@@ -215,7 +215,8 @@ function Install-NotebookAlchemy {
     Write-Host ''
     Write-Host 'Notebook Alchemy is installed.'
     Write-Host 'To start, open [Notebook Alchemy] on your desktop, or open a new terminal and run:'
-    Write-Host '  $ notebook-alchemy'
+    # Settings (.env) are read from the folder a run starts in, so the command starts there too.
+    Write-Host "  PS> Set-Location -LiteralPath '$workDir'; notebook-alchemy"
 }
 
 try {

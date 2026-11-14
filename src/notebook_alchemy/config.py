@@ -13,13 +13,11 @@ from .errors import ConfigError
 
 logger = logging.getLogger(__name__)
 
-# Default model: Google's most capable Flash model. Cheaper choices (gemini-3.5-flash-lite,
-# gemini-2.5-flash-lite) are one ALCHEMY_GEMINI_MODEL setting away; gemini-2.5-flash shuts down
-# on 2026-12-01.
-DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
-# Used when the default is overloaded or unavailable; set ALCHEMY_GEMINI_FALLBACK_MODEL to an empty
-# value to turn the fallback off.
-DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+# Default model: Claude Haiku 5.5, which matched careful labels best of the models measured on this
+# task (DEVLOG 0.3.0) and is the lowest-cost Claude model. ALCHEMY_MODEL chooses another.
+DEFAULT_MODEL = "claude-haiku-5-5"
+# Where a Claude API key is made.
+KEY_URL = "https://platform.claude.com/settings/keys"
 DEFAULT_NOTEBOOKLM_PROFILE = "default"
 # notebooklm-py 0.8.6 accepts ^[a-zA-Z0-9][a-zA-Z0-9_-]*$; the name is also a folder, so Windows
 # device names are refused too.
@@ -28,8 +26,12 @@ WINDOWS_RESERVED_NAMES = frozenset(
     {"con", "prn", "aux", "nul"} | {f"{p}{n}" for p in ("com", "lpt") for n in range(1, 10)}
 )
 DEFAULT_MAX_CONCURRENCY = 4
-DEFAULT_MAX_PER_VOLUME = 50
 MAX_ALLOWED_CONCURRENCY = 16
+# Seconds between remote caption requests (a random gap in this range), so a long channel is not
+# refused by YouTube; and how long a refused route rests before it is tried again.
+DEFAULT_CAPTION_SPACING = (3.0, 8.0)
+CAPTION_BLOCK_PAUSE = 180.0
+COOKIE_BROWSERS = ("chrome", "edge", "firefox", "brave")
 LOG_LEVELS = {
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
@@ -47,8 +49,16 @@ def is_usable_api_key(key: str | None) -> bool:
     return len(value) >= 15
 
 
+# The only names a .env may set. Anything else (ANTHROPIC_BASE_URL, NOTEBOOKLM_*, PATH) would change
+# where the key is sent or how the tools this one starts behave, so it is ignored. GEMINI_API_KEY is
+# read only to tell an old setup apart from one with no key at all.
+DOTENV_NAMES = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY")
+DOTENV_PREFIX = "ALCHEMY_"
+
+
 def _load_dotenv_simple(env_path: Path | None = None) -> None:
-    """Load KEY=VALUE pairs from a .env file into os.environ without overriding real variables."""
+    """Load this tool's KEY=VALUE pairs from a .env file into os.environ, without overriding real
+    variables. Names that are not this tool's are ignored, and said so in the log."""
     path = env_path or Path(".env")
     if not path.is_file():
         return
@@ -67,6 +77,11 @@ def _load_dotenv_simple(env_path: Path | None = None) -> None:
         key, value = line.split("=", 1)
         key, value = key.strip(), value.strip()
         if not key or key in os.environ:
+            continue
+        if key not in DOTENV_NAMES and not key.startswith(DOTENV_PREFIX):
+            logger.warning(
+                "Ignoring %s in %s: only ANTHROPIC_API_KEY and ALCHEMY_* settings are read.", key, path
+            )
             continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
@@ -162,19 +177,19 @@ class AlchemyConfig:
     """Runtime configuration for the Alchemy engine."""
 
     env: str = "development"
-    vault_path: Path = field(default_factory=lambda: Path("./vault").resolve())
     session_file: Path | None = None
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".notebook-alchemy" / "cache")
-    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
-    gemini_model: str = DEFAULT_GEMINI_MODEL
-    gemini_fallback_model: str = DEFAULT_GEMINI_FALLBACK_MODEL
+    api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
+    model: str = DEFAULT_MODEL
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     notebooklm_profile: str = DEFAULT_NOTEBOOKLM_PROFILE
     caption_languages: tuple[str, ...] = ("en", "en-US", "en-GB")
+    caption_spacing: tuple[float, float] = field(default_factory=lambda: DEFAULT_CAPTION_SPACING)
+    cookies_browser: str | None = None  # a browser yt-dlp may read the YouTube sign-in from
 
     @property
-    def has_gemini_key(self) -> bool:
-        return is_usable_api_key(self.gemini_api_key)
+    def has_api_key(self) -> bool:
+        return is_usable_api_key(self.api_key)
 
     @classmethod
     def from_env(cls) -> AlchemyConfig:
@@ -194,14 +209,10 @@ class AlchemyConfig:
 
         return cls(
             env=os.getenv("ALCHEMY_ENV", "development"),
-            vault_path=_path("ALCHEMY_VAULT_PATH", Path("./vault").resolve()),  # type: ignore[arg-type]
             session_file=_path("ALCHEMY_SESSION_FILE", None),
             cache_dir=_path("ALCHEMY_CACHE_DIR", Path.home() / ".notebook-alchemy" / "cache"),  # type: ignore[arg-type]
-            gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
-            gemini_model=os.getenv("ALCHEMY_GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL,
-            gemini_fallback_model=os.getenv(
-                "ALCHEMY_GEMINI_FALLBACK_MODEL", DEFAULT_GEMINI_FALLBACK_MODEL
-            ).strip(),
+            api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            model=os.getenv("ALCHEMY_MODEL", "").strip() or DEFAULT_MODEL,
             max_concurrency=_int_env(
                 "ALCHEMY_MAX_CONCURRENCY",
                 DEFAULT_MAX_CONCURRENCY,
@@ -217,4 +228,18 @@ class AlchemyConfig:
                 if code.strip()
             )
             or ("en",),
+            cookies_browser=_cookies_browser(),
         )
+
+
+def _cookies_browser() -> str | None:
+    """ALCHEMY_COOKIES_BROWSER: chrome, edge, firefox or brave, or unset."""
+    value = os.getenv("ALCHEMY_COOKIES_BROWSER", "").strip().lower()
+    if not value:
+        return None
+    if value not in COOKIE_BROWSERS:
+        raise ConfigError(
+            f"ALCHEMY_COOKIES_BROWSER={value!r} is not a supported browser.",
+            hint=f"Use one of: {', '.join(COOKIE_BROWSERS)}, or leave it unset.",
+        )
+    return value

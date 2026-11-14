@@ -9,12 +9,19 @@
 
 ## How Credentials Are Handled
 
-- The Gemini API key is read from the environment or a git-ignored `.env`, sent only in the
-  `x-goog-api-key` request header, and removed from any error text before it is shown or logged.
+- The Claude API key is read from the environment or a git-ignored `.env`, sent only in a request
+  header by the official `anthropic` SDK, and removed from any error text before it is shown or logged.
+  Use a key scoped to a Console workspace of its own, with a monthly spend limit, so a leaked key can
+  reach nothing else and cost little.
+- The API address is fixed in the code, and `.env` is read only for this tool's own settings
+  (`ANTHROPIC_API_KEY` and `ALCHEMY_*`), so a `.env` in the folder a run starts from cannot send the key
+  elsewhere or set the `notebooklm` command's own variables. Two of its settings do choose the
+  sign-in that receives uploads (`ALCHEMY_SESSION_FILE`, `ALCHEMY_NOTEBOOKLM_PROFILE`); `status` names that
+  account, and the first upload to an account asks first.
 - The NotebookLM session is owned by the `notebooklm` CLI, which keeps it under
   `~/.notebooklm/profiles/<profile>/`. This tool reads the file's location, never its contents.
 - Document content reaches `notebooklm` as a temporary file, not on the command line.
-- `.gitignore` blocks `.env`, session and token files, and the local `vault/`. A pre-push hook scans
+- `.gitignore` blocks `.env`, session and token files, and the `vault/` folder older versions wrote. A pre-push hook scans
   pushed commits with gitleaks, and GitHub secret scanning with push protection is enabled.
 
 ## Reporting a Vulnerability

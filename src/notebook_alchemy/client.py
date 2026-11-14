@@ -29,6 +29,8 @@ from .errors import ConfigError, NotebookLMError, SessionError
 logger = logging.getLogger(__name__)
 
 NOTEBOOKLM_BIN = "notebooklm"
+
+
 LIST_TIMEOUT = 60.0
 WRITE_TIMEOUT = 120.0
 UPLOAD_TIMEOUT = 300.0
@@ -75,6 +77,7 @@ class SessionStatus:
     ok: bool
     detail: str
     notebooks: int = 0
+    signed_out: bool = False  # not ok because there is no working sign-in (not a network or tool fault)
 
 
 @dataclass
@@ -265,9 +268,11 @@ class NotebookLMClient:
     def check_session(self) -> SessionStatus:
         """Ask NotebookLM whether the stored session works (one read-only list call)."""
         if not self.is_authenticated():
-            return SessionStatus(False, "No NotebookLM session found.")
+            return SessionStatus(False, "No NotebookLM session found.", signed_out=True)
         try:
             notebooks = self.list_notebooks()
+        except SessionError as exc:
+            return SessionStatus(False, exc.message, signed_out=True)
         except NotebookLMError as exc:
             return SessionStatus(False, exc.message)
         return SessionStatus(True, "Session is active.", len(notebooks))
@@ -344,7 +349,12 @@ class NotebookLMClient:
         shown = "notebooklm " + " ".join(args[:2] if args[0] == "source" else args[:1])
         try:
             res = (self._runner or subprocess.run)(
-                cmd, check=False, capture_output=True, text=True, encoding="utf-8", timeout=timeout
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=timeout,
             )
         except FileNotFoundError as exc:
             raise NotebookLMError(
@@ -442,6 +452,15 @@ class NotebookLMClient:
             timeout=timeout + 30,
             as_json=False,
         )
+
+    def add_youtube_sources(self, notebook_id: str, urls: list[str]) -> None:
+        """Queue YouTube videos as sources without waiting; NotebookLM fetches their transcripts."""
+        self._run(["source", "add-async", *urls, "-n", notebook_id], timeout=WRITE_TIMEOUT)
+
+    def source_text(self, notebook_id: str, source_id: str) -> str:
+        """The full text NotebookLM holds for a source (for a video, its transcript)."""
+        data = self._run(["source", "fulltext", source_id, "-n", notebook_id], timeout=LIST_TIMEOUT)
+        return str(_first(data, "content", "text") or "")
 
     def rename_source(self, notebook_id: str, source_id: str, title: str) -> None:
         self._run(["source", "rename", source_id, title, "-n", notebook_id], timeout=WRITE_TIMEOUT)

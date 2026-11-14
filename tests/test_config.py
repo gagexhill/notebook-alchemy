@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from notebook_alchemy.config import (
-    DEFAULT_GEMINI_MODEL,
+    DEFAULT_MODEL,
     AlchemyConfig,
     _load_dotenv_simple,
     is_usable_api_key,
@@ -21,15 +21,15 @@ from notebook_alchemy.errors import ConfigError
 def test_defaults() -> None:
     config = AlchemyConfig()
     assert config.env == "development"
-    assert config.vault_path.name == "vault"
-    assert config.gemini_model == DEFAULT_GEMINI_MODEL
+    assert config.cache_dir.name == "cache" and config.cookies_browser is None
+    assert config.model == DEFAULT_MODEL
     assert config.max_concurrency == 4
     assert config.session_file is None
 
 
 @pytest.mark.parametrize(
     ("key", "usable"),
-    [("", False), ("your_gemini_api_key_here", False), ("short", False), ("A" * 20, True)],
+    [("", False), ("your_anthropic_api_key_here", False), ("short", False), ("A" * 20, True)],
 )
 def test_api_key_validity(key: str, usable: bool) -> None:
     assert is_usable_api_key(key) is usable
@@ -38,7 +38,7 @@ def test_api_key_validity(key: str, usable: bool) -> None:
 def test_dotenv_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
     Path(".env").write_text(
         "# comment\n"
-        "export GEMINI_API_KEY='" + "K" * 20 + "'\n"
+        "export ANTHROPIC_API_KEY='" + "K" * 20 + "'\n"
         'ALCHEMY_ENV="staging"\n'
         "ALCHEMY_LOG_LEVEL=debug # inline comment\n"
         "ALREADY_SET=from-file\n"
@@ -46,9 +46,9 @@ def test_dotenv_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
         encoding="utf-8",
     )
     monkeypatch.setenv("ALREADY_SET", "from-process")
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _load_dotenv_simple()
-    assert os.environ["GEMINI_API_KEY"] == "K" * 20
+    assert os.environ["ANTHROPIC_API_KEY"] == "K" * 20
     assert os.environ["ALCHEMY_ENV"] == "staging"
     assert os.environ["ALCHEMY_LOG_LEVEL"] == "debug"
     assert os.environ["ALREADY_SET"] == "from-process"  # a real variable is never overridden
@@ -57,11 +57,11 @@ def test_dotenv_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_from_env_reads_dotenv_key() -> None:
-    Path(".env").write_text("GEMINI_API_KEY=" + "Z" * 24 + "\n", encoding="utf-8")
+    Path(".env").write_text("ANTHROPIC_API_KEY=" + "Z" * 24 + "\n", encoding="utf-8")
     try:
-        assert AlchemyConfig.from_env().has_gemini_key
+        assert AlchemyConfig.from_env().has_api_key
     finally:
-        os.environ.pop("GEMINI_API_KEY", None)
+        os.environ.pop("ANTHROPIC_API_KEY", None)
 
 
 @pytest.mark.parametrize("value", ["abc", "0", "99"])
@@ -80,16 +80,8 @@ def test_invalid_log_level(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ALCHEMY_GEMINI_MODEL", "gemini-test-model")
-    assert AlchemyConfig.from_env().gemini_model == "gemini-test-model"
-
-
-def test_fallback_model_default_override_and_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert AlchemyConfig.from_env().gemini_fallback_model == "gemini-3.5-flash-lite"
-    monkeypatch.setenv("ALCHEMY_GEMINI_FALLBACK_MODEL", "gemini-other")
-    assert AlchemyConfig.from_env().gemini_fallback_model == "gemini-other"
-    monkeypatch.setenv("ALCHEMY_GEMINI_FALLBACK_MODEL", "")
-    assert AlchemyConfig.from_env().gemini_fallback_model == ""
+    monkeypatch.setenv("ALCHEMY_MODEL", "claude-test-model")
+    assert AlchemyConfig.from_env().model == "claude-test-model"
 
 
 def test_notebooklm_profile_default_override_and_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,26 +96,26 @@ def test_notebooklm_profile_default_override_and_invalid(monkeypatch: pytest.Mon
 def test_update_dotenv_replaces_in_place_keeps_other_lines_and_round_trips() -> None:
     env = Path(".env")
     env.write_text(
-        "# my settings\nGEMINI_API_KEY=old_value_123456789\nOTHER=keep\nGEMINI_API_KEY=dup\n",
+        "# my settings\nANTHROPIC_API_KEY=old_value_123456789\nOTHER=keep\nANTHROPIC_API_KEY=dup\n",
         encoding="utf-8",
     )
-    update_dotenv({"GEMINI_API_KEY": "new_value_123456789", "ALCHEMY_VAULT_PATH": "C:/My Vault"})
+    update_dotenv({"ANTHROPIC_API_KEY": "new_value_123456789", "ALCHEMY_VAULT_PATH": "C:/My Vault"})
     lines = env.read_text(encoding="utf-8").splitlines()
     assert lines == [
         "# my settings",
-        "GEMINI_API_KEY=new_value_123456789",
+        "ANTHROPIC_API_KEY=new_value_123456789",
         "OTHER=keep",
         'ALCHEMY_VAULT_PATH="C:/My Vault"',
     ]
     _load_dotenv_simple(env)
-    assert os.environ["GEMINI_API_KEY"] == "new_value_123456789"
+    assert os.environ["ANTHROPIC_API_KEY"] == "new_value_123456789"
     assert os.environ["ALCHEMY_VAULT_PATH"] == "C:/My Vault"
 
 
 @pytest.mark.parametrize("value", ['has"quote', "two\nlines", " padded"])
 def test_update_dotenv_rejects_values_it_cannot_round_trip(value: str) -> None:
     with pytest.raises(ConfigError):
-        update_dotenv({"GEMINI_API_KEY": value})
+        update_dotenv({"ANTHROPIC_API_KEY": value})
     assert not Path(".env").exists()
 
 
@@ -135,10 +127,10 @@ def test_unusable_profile_names_are_refused(name: str) -> None:
 
 def test_update_dotenv_replaces_export_lines_and_quotes_hash_values() -> None:
     env = Path(".env")
-    env.write_text("export GEMINI_API_KEY=old_value_123456789\n", encoding="utf-8")
-    update_dotenv({"GEMINI_API_KEY": "new_value_123456789", "ALCHEMY_VAULT_PATH": "C:/a#b"})
+    env.write_text("export ANTHROPIC_API_KEY=old_value_123456789\n", encoding="utf-8")
+    update_dotenv({"ANTHROPIC_API_KEY": "new_value_123456789", "ALCHEMY_VAULT_PATH": "C:/a#b"})
     assert env.read_text(encoding="utf-8").splitlines() == [
-        "GEMINI_API_KEY=new_value_123456789",
+        "ANTHROPIC_API_KEY=new_value_123456789",
         'ALCHEMY_VAULT_PATH="C:/a#b"',
     ]
     _load_dotenv_simple(env)
@@ -147,15 +139,33 @@ def test_update_dotenv_replaces_export_lines_and_quotes_hash_values() -> None:
 
 def test_a_byte_order_mark_does_not_hide_the_first_key(monkeypatch: pytest.MonkeyPatch) -> None:
     env = Path(".env")
-    env.write_bytes("\ufeffGEMINI_API_KEY=old_value_123456789\nOTHER=1\n".encode())
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    env.write_bytes("\ufeffANTHROPIC_API_KEY=old_value_123456789\nOTHER=1\n".encode())
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     _load_dotenv_simple(env)
-    assert os.environ["GEMINI_API_KEY"] == "old_value_123456789"
-    update_dotenv({"GEMINI_API_KEY": "new_value_123456789"}, env)
+    assert os.environ["ANTHROPIC_API_KEY"] == "old_value_123456789"
+    update_dotenv({"ANTHROPIC_API_KEY": "new_value_123456789"}, env)
     text = env.read_text(encoding="utf-8-sig")
-    assert text.count("GEMINI_API_KEY=") == 1 and "old_value" not in text and "OTHER=1" in text
+    assert text.count("ANTHROPIC_API_KEY=") == 1 and "old_value" not in text and "OTHER=1" in text
 
 
 def test_caption_languages_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALCHEMY_CAPTION_LANGUAGES", " de, en ,,")
     assert AlchemyConfig.from_env().caption_languages == ("de", "en")
+
+
+def test_a_dotenv_sets_only_this_tools_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    for name in ("ANTHROPIC_BASE_URL", "NOTEBOOKLM_HOME", "ALCHEMY_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    env = tmp_path / ".env"
+    lines = [
+        "ANTHROPIC_BASE_URL=https://collector.example.test",
+        "NOTEBOOKLM_HOME=/elsewhere",
+        "ALCHEMY_MODEL=claude-x",
+    ]
+    env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    from notebook_alchemy.config import _load_dotenv_simple
+
+    _load_dotenv_simple(env)
+    assert os.environ.get("ALCHEMY_MODEL") == "claude-x"
+    assert "ANTHROPIC_BASE_URL" not in os.environ and "NOTEBOOKLM_HOME" not in os.environ
+    monkeypatch.delenv("ALCHEMY_MODEL")

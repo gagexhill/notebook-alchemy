@@ -24,8 +24,8 @@ class ChannelScanError(AlchemyError):
     """A channel, playlist or video URL could not be resolved to videos."""
 
 
-class GeminiError(AlchemyError):
-    """A Gemini API call failed. The message never contains the API key."""
+class ClaudeError(AlchemyError):
+    """A Claude API call failed or its answer cannot be used. The message never contains the key."""
 
     def __init__(
         self,
@@ -34,10 +34,18 @@ class GeminiError(AlchemyError):
         hint: str | None = None,
         status: int | None = None,
         detail: str | None = None,
+        stop_run: bool = False,
+        unusable: bool = False,
     ) -> None:
         super().__init__(message, hint=hint)
         self.status = status  # HTTP status, or None for a network failure
-        self.detail = detail or message  # short cause, used in fallback notices
+        self.detail = detail or message  # short cause, used in notices
+        # The key, the account's credit or spend limit, or the rate limit stops every request that
+        # follows: the run stops, keeps what it has, and the next run continues.
+        self.stop_run = stop_run
+        # An answer arrived but cannot be used (refused, cut off): it was billed, so it is
+        # remembered like a usable one instead of being asked again.
+        self.unusable = unusable
 
 
 class NotebookLMError(AlchemyError):

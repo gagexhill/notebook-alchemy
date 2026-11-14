@@ -2,6 +2,92 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## Topic books from every word (0.3.0, 2026-11-08)
+
+- **Whole-branch review before the PR (15 findings, all fixed, 2026-11-14).**
+  - The guided first run failed on every link: `ctx.invoke` fills in an option's default without its callback, so `--tabs` arrived as a string. The guided run now passes the tuple, and a test runs the real `run` command instead of a stand-in.
+  - Nothing is sorted while videos wait for labels, and no topic map is made from no passages. A first batch run used to fix the map from video titles alone, and keep it.
+  - An upload no longer quietly shrinks a notebook. The upload record now notes whether the books were AI-sorted and how many videos they came from. Unsorted books replace AI-sorted ones only with `--offline` (a run started outside the folder holding `.env` has no key). Books from under half the videos need `--allow-fewer` (`--limit`, or a new computer whose captions are blocked).
+  - Paid batch answers are kept on disk until every video's labels are stored, so a crash does not mean paying twice.
+  - Also fixed:
+    - `clean` checks the shape of each file before deleting it.
+    - Notebooks are recorded under the scanned channel name (the typed link still finds older records).
+    - An unsaved upload record and an unreadable refresh record are reported.
+    - `export-state` warns about a running batch.
+    - Cached words a model wrote down are read again.
+    - A `--save` build names whose NotebookLM reads blocked videos.
+    - The installers say to start from the folder that holds the settings.
+    - Personal names in tests and docs became synthetic ones.
+  - Not re-proven: the test suite reads Python's platform details before blocking processes. On Windows, Python otherwise starts `ver` when its WMI lookup fails, which a reviewer and one earlier run hit. Whether that happens depends on WMI, so removing the guard does not reliably fail a test.
+
+- **Claude replaces Gemini as the only AI (2026-11-13).**
+  - Why: Gemini's free tier stopped live run 2 after 10 videos (its daily request quota), and the Owner chose a paid API over enabling Google billing, asking for the cheapest option that still labels well.
+  - Measured on the same 3 channel videos, as keep/drop agreement per chunk with Gemini 3.8 Flash's labels:
+
+    | Labeller | Agreement |
+    |---|---|
+    | NotebookLM's own chat | 95.6%, 78.6%, 95.1% |
+    | Gemini 3.5 Flash-Lite | 88.9%, 77.4%, 95.1% |
+    | Gemini 3.1 Flash-Lite | 93.3%, 77.4%, 97.6% |
+    | **Claude Haiku 5.5, thinking off, effort low, structured outputs** | **95.6%, 85.7%, 95.1%** |
+    | Claude Haiku 5.5, adaptive thinking | 84.4%, 81.0%, 82.9% |
+
+    - NotebookLM's chat took about 4 minutes per video and spent the Owner's own chat allowance.
+    - Claude Haiku 5.5 took 7–12 s and about $0.0014 per video at list price ($0.10 / $0.50 per million tokens, read 2026-11-13), or half that in a batch.
+  - Every request now asks for JSON matching a schema (structured outputs), so every answer parses. Structured outputs need closed objects, so the two passage-number maps (placements, duplicates) became lists of pairs, and `LIBRARY_PROMPT_VERSION` moved to 2 so no answer cached in the old shape is reused.
+  - Batches use the Message Batches API at half price; one request builder serves batches and direct calls, so their settings cannot drift (the Gemini batch sent no thinking setting while direct calls did).
+  - A key, credit balance, spend limit or rate limit that would fail every request stops the run (`ClaudeError.stop_run`), keeping what was done; a refused or cut-off answer is handled like an unparseable one.
+  - Rejected:
+    - **A Claude subscription.** Anthropic does not let third-party tools use claude.ai sign-in or its rate limits.
+    - **Prompt caching.** The shared rules are about 1k tokens, below the smallest cacheable prompt, and every transcript differs.
+    - **A Gemini "agent".** It bills the same tokens plus the agent loop's own.
+  - `--watch` was removed: Claude cannot watch a video, and Gemini was the only route that could. Videos no route reads stay listed as unread in the overview.
+  - The maintainer's key belongs to a Console service account, scoped to a workspace kept for this tool, with a spend limit and rate limits that allow only Haiku 5.5 (a request for another model is refused with 429, checked live). The runbook is in `OPERATIONS.md`.
+
+- **Books grow without reshuffling.**
+  - Before: new subjects fell into Miscellaneous until 20% growth rebuilt the topic map, which moved passages and re-uploaded every book.
+  - Now: passages that fit nowhere extend the map once (new sections or topics; nothing existing is renamed); each passage's section is stored by name; a section past 200 passages is divided once into named subsections. Only `--resort` rebuilds.
+  - Only books whose text changed are uploaded (a content hash in the upload record), and a long topic's sections stay in their part, so one growing section does not re-upload every part.
+  - NotebookLM's own append only adds text at the end of a source, so a passage that belongs mid-book needs the whole book replaced; changed-only upload keeps that to the books that changed.
+- **Staying signed in.**
+  - Live run 1 failed because both NotebookLM sign-ins had expired overnight: Google's `__Secure-1PSIDTS` cookie must be rotated, and notebooklm-py's guidance is to run `notebooklm auth refresh` every 15–20 minutes from the OS scheduler.
+  - `keep-signed-in` sets up that refresh every 20 minutes per profile; `status` shows when it last ran and whether it worked.
+  - On Windows the task is registered from a task definition, not `schtasks /SC MINUTE`: the default refuses to start on battery, and in a live check on a laptop the task sat "Queued" and never ran. With the definition it ran on battery and recorded its result.
+  - **The refresh did not keep the session alive on Windows, so the default became "sign in when needed" (2026-11-13).** On the Owner's laptop the refresh ran on time but kept each session only about 2–6 hours; after that every refresh found the session signed out or hung on headless re-auth. notebooklm-py's troubleshooting guide says Google often gives the automated Windows sign-in a session without the cookie that keeps it alive. Its fix for unattended use, a stored master token, is a durable account-equivalent credential, so it is not offered: an open-source tool for ordinary users should not ask them to keep one on disk. Now `run` and the guided run offer an ended sign-in inline and carry on (checking again before uploading), `login` and the guided run no longer offer the refresh, `keep-signed-in` stays as an opt-in, and the NotebookLM transcript route stops at the first sign-out instead of sending hundreds of refused requests. Live check: runs no longer set `NOTEBOOKLM_HEADLESS_REAUTH=1`, because its hidden-browser renewal made a signed-out check take about 5 minutes (15 s without it); and `notebooklm login` could reuse its saved browser, which still looked signed in to Google, without a window and save a dead session, so a sign-in whose check fails is retried once from a clean browser (`--fresh`). Before the window opens the CLI says what it opens and, when known, which account to sign in as.
+- **Chunks no longer swallow whole videos.** The NotebookLM-as-AI check found a 5,143-word video read as one chunk: NotebookLM's transcripts often put a period before a lowercase word or inside quotes, which the sentence splitter (a capital letter must follow) does not break on. Of 802 cached transcripts from the test channel, 29 had a run over 90 words left whole and 17 were a single chunk, so those videos could not be deduplicated or sorted. A run longer than 90 words is now cut into chunks of the usual size, and the chunking version is part of the label key, so labels made for the old numbering are not reused.
+- **Review of the growth, sign-in, state and watch work (17 findings, all fixed).**
+  - Uploads: a book whose title NotebookLM reset (or whose read-back failed) was recorded as unchanged and never fixed; now only a confirmed upload gets a hash, a drifted title on an unchanged book is renamed, and an old copy that could not be removed is kept as the tool's own and removed by the next run.
+  - Sign-in refresh: the task called `notebooklm` through the scheduler's minimal PATH (launchd, cron, systemd), so it would not have been found; it now runs `python -m notebooklm` with the same Python. It reads back that the scheduler has the entry active, removes half-made entries, refuses paths a scheduler would rewrite (`%`, `$`, backquote), reuses the Linux scheduler it was made with, shows a refresh that stopped running as stale, refuses `ALCHEMY_SESSION_FILE` (which it could not keep fresh), and no longer makes `login` fail when only the offer failed.
+  - Sorting: an unusable extension or subsection answer was paid for again on every run; it is now remembered for the passages it saw. Subsection names survive a quota stop, `--resort` forgets subsections, and passages placed nowhere are asked about again with the next new passages.
+  - `--watch`: only a complete answer (`STOP`) is kept; a video that gave no words for good is remembered (`watched.json`), so the next run moves on; a watch is not retried within a run (a timed-out one may still be billed); the cost is shown and needs a yes (or `--yes`).
+  - State: channel names in any script were silently left out of exports; skipped files are now named. Import refuses device names (`NUL`, `COM1`), deep JSON and damaged members with a typed error, holds one member in memory at a time, and writes each atomically.
+  - Guided run: warns when a `GEMINI_API_KEY` in the environment would override the key it saved.
+- **`--watch N` for videos no route can read** (removed 2026-11-13 with the move to Claude, above). NotebookLM itself failed on 4 of 15 test videos. Gemini reads a public YouTube URL directly (`fileData.fileUri`, about 100 tokens per second of video, read 2026-11-08), and is asked to write down what is said, word for word. It is opt-in and capped (N per run, 90 minutes per video, a quota stops it), cached like captions so a video is never paid for twice, and every such video is named in the overview because the words are Gemini's hearing, not captions.
+- **A guided first run.** `notebook-alchemy` with no command, in a terminal, signs in, offers a free Gemini key (it opens the AI Studio key page), asks for a channel link and runs `run`; outside a terminal it prints the help. The one-line installer's shortcut starts it.
+- **`export-state` / `import-state`** move the working files to another computer as a zip. Import checks every member (known folders, safe names, JSON objects, size) before writing any, and keeps this computer's files unless `--replace`.
+
+- **The sources are the speakers' own words, not summaries.**
+  - What went wrong: in a live run on a 754-video channel, 22 of 28 sources were title lists (YouTube blocked captions and the run stopped asking) and 6 were short briefs, one written from a single transcript.
+  - Why it mattered: NotebookLM answers from the text it is given, so that gave it almost nothing.
+  - Now: every video's words are read, repeated passages are kept once (newest copy), and Gemini only labels, files and orders passages. Its punctuation is copied onto the original words (`apply_punctuation`): every word stays, in order, and a word the model added is never used.
+- **Gemini returns labels by chunk number, not text.**
+  - Each answer is a few percent of the transcript.
+  - Every paid answer is cached by what it saw: transcript + prompt version + model for labels; passages and taxonomy for placement; section contents + month for consolidation.
+  - A rerun with no new videos makes no request.
+  - Labels never come from the fallback model; a used-up daily quota stops the step and the next run resumes.
+- **Batch mode first, standard calls when Google refuses it** (superseded 2026-11-13: Claude's Message Batches, above). Google answers FAILED_PRECONDITION for a key whose project has no billing (seen live); the run then uses standard calls and says so. The batch success path is tested with fakes only, because the test key has no billing; the request shape follows aistudio.google.com/docs/batch-api.
+- **Words when YouTube refuses.**
+  - From this network YouTube refused both the captions API and yt-dlp's subtitle download (HTTP 429).
+  - yt-dlp cannot read Chrome or Edge cookies on Windows (copy lock, DPAPI).
+  - NotebookLM fetches a video's transcript on Google's side, so blocked videos go through a working notebook, are read back, and are removed. A first live test read 4 of 10, and a matching bug that left sources behind was fixed.
+  - Requests are spaced 3–8 s apart, a block pauses only the refused route, and blocks are never cached.
+- **Dates.** Channel listings carry approximate dates (yt-dlp `approximate_date`), shown as a year; yt-dlp subtitles give exact ones. Old news (12 months) is left out; old rules and figures (18 months) are kept and marked "As of". Undated passages are never judged.
+- **Nothing kept locally.**
+  - Removed: the vault, `sync`, `append`, `--no-sync`, `--max-per-vol`, `--preview-only`, and existing-notebook input; removed commands and flags print what replaced them.
+  - A channel → notebook-id record keeps a rerun on the same notebook, even when the AI's title changes.
+  - `--save DIR` writes a copy; `clean --vaults` removes 0.2 output for one release.
+- **Removed modules.** `analyzer.py`, `synthesizer.py` and `vault.py` are gone; the title-word grouping moved to `offline.py` for the no-key path.
+
 ## One-line install (2026-11-08)
 
 - **One command, no prerequisites.** `install/install.ps1` (`irm | iex`) and `install/install.sh`

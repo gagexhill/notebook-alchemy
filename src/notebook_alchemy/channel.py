@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -33,6 +34,9 @@ NEGATIVE_CACHE_DAYS = 7
 # usually under a minute, so they are left out unless asked for.
 CHANNEL_TABS = ("videos", "streams", "shorts")
 DEFAULT_TABS = ("videos", "streams")
+# How 0.3 previews cached words that Gemini wrote down from a video (`--watch`, since removed). They are
+# not the speakers' own, so such a record counts as no record and the video is read again.
+MODEL_WRITTEN = "gemini-video"
 PO_TOKEN_STOP_AFTER = 2  # proof-of-origin demands before the run stops asking YouTube for captions
 _YOUTUBE_ID_RE = re.compile(r"^[\w-]{11}$")
 
@@ -45,6 +49,7 @@ class ChannelVideo:
     title: str
     url: str
     duration_seconds: int = 0
+    published: str = ""  # YYYY-MM-DD; from a channel listing it is approximate ("3 years ago")
 
 
 @dataclass
@@ -194,6 +199,8 @@ class ChannelScanner:
             "quiet": True,
             "no_warnings": True,
             "logger": logger_sink,
+            # Turns a listing's "3 years ago" into a timestamp, so every video carries a date.
+            "extractor_args": {"youtubetab": {"approximate_date": [""]}},
         }
         if limit:
             ydl_opts["playlist_items"] = f"1-{limit}"
@@ -266,9 +273,21 @@ class ChannelScanner:
                     title=str(e.get("title") or "Untitled Video"),
                     url=v_url,
                     duration_seconds=int(e.get("duration") or 0),
+                    published=_entry_date(e),
                 )
             )
         return videos, tab_urls
+
+
+def _entry_date(entry: dict[str, Any]) -> str:
+    """YYYY-MM-DD from a yt-dlp entry (upload_date, else a timestamp), or "" when it has none."""
+    raw = str(entry.get("upload_date") or "")
+    if re.fullmatch(r"\d{8}", raw):
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+    stamp = entry.get("timestamp") or entry.get("release_timestamp")
+    if isinstance(stamp, (int, float)) and stamp > 0:
+        return datetime.fromtimestamp(stamp, UTC).date().isoformat()
+    return ""
 
 
 # --- Transcripts -----------------------------------------------------------------------------
@@ -310,12 +329,160 @@ class TranscriptResult:
 
     video_id: str
     text: str = ""
-    source: str = "none"  # local | cache | youtube | unavailable | blocked | skipped
+    source: str = "none"  # local | cache | youtube | subtitles | unavailable | blocked | skipped
     detail: str = ""
+    published: str = ""  # YYYY-MM-DD when a source reported the exact upload date
+    method: str = ""  # for cached words: how they were first got
+
+
+class SubtitlesBlocked(Exception):
+    """YouTube refused yt-dlp's request from this network (a bot check, a rate limit)."""
+
+
+class SubtitlesUnavailable(Exception):
+    """The video has no subtitle track yt-dlp can read, or the video itself cannot be read."""
+
+
+class SubtitlesSetupError(Exception):
+    """yt-dlp cannot run as configured (for example it cannot read the browser's cookies)."""
+
+
+# yt-dlp error text that means "this network is being refused", not "this video has no captions".
+_BLOCK_MARKERS = ("sign in to confirm", "not a bot", "http error 429", "too many requests", "po token")
+_GONE_MARKERS = (
+    "private video",
+    "video unavailable",
+    "has been removed",
+    "members-only",
+    "age-restricted",
+    "confirm your age",
+    "inappropriate for some users",
+)
+# yt-dlp could not read the browser's sign-in: a setup problem for every video, not this one.
+_COOKIE_MARKERS = ("cookie", "dpapi")
+
+
+class YtDlpSubtitles:
+    """Captions through yt-dlp: a second route to YouTube's subtitle tracks, with the exact date.
+
+    It meets the same network blocks as the captions API; with `cookies_browser` (your own signed-in
+    browser, read by yt-dlp in memory and never stored) it often gets through where the API does not.
+    """
+
+    def __init__(
+        self,
+        languages: tuple[str, ...] = PREFERRED_LANGUAGES,
+        *,
+        cookies_browser: str | None = None,
+        ydl_factory: Callable[[dict[str, Any]], Any] | None = None,
+    ) -> None:
+        self.languages = tuple(languages) or PREFERRED_LANGUAGES
+        self.cookies_browser = cookies_browser
+        self._ydl_factory = ydl_factory
+
+    def fetch(self, video_id: str) -> tuple[str, str]:
+        """(text, YYYY-MM-DD upload date). Raises SubtitlesBlocked or SubtitlesUnavailable."""
+        sink = _YdlLogger()
+        opts: dict[str, Any] = {"skip_download": True, "quiet": True, "no_warnings": True, "logger": sink}
+        if self.cookies_browser:
+            opts["cookiesfrombrowser"] = (self.cookies_browser,)
+        if self._ydl_factory is None:
+            import yt_dlp  # imported on use, like the scanner
+
+            factory: Callable[[dict[str, Any]], Any] = yt_dlp.YoutubeDL
+        else:
+            factory = self._ydl_factory
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        with factory(opts) as ydl:
+            try:
+                info = ydl.extract_info(url, download=False) or {}
+            except Exception as exc:
+                message = (sink.errors[-1] if sink.errors else str(exc)).lower()
+                if self.cookies_browser and any(m in message for m in _COOKIE_MARKERS):
+                    raise SubtitlesSetupError(
+                        f"yt-dlp could not read the {self.cookies_browser} sign-in "
+                        "(on Windows, Chrome and Edge often lock or encrypt it)"
+                    ) from exc
+                if any(m in message for m in _BLOCK_MARKERS):
+                    raise SubtitlesBlocked(message[:200]) from exc
+                if any(m in message for m in _GONE_MARKERS):
+                    raise SubtitlesUnavailable(message[:200]) from exc
+                raise
+            track = self._pick(info)
+            if track is None:
+                raise SubtitlesUnavailable("no subtitle track")
+            try:
+                raw = ydl.urlopen(track["url"]).read().decode("utf-8", errors="replace")
+            except Exception as exc:
+                message = str(exc).lower()
+                if any(m in message for m in _BLOCK_MARKERS):
+                    raise SubtitlesBlocked(message[:200]) from exc
+                raise
+        text = " ".join(parse_captions(raw).split())
+        if not text:
+            raise SubtitlesUnavailable("empty subtitle track")
+        return text, _entry_date(info)
+
+    def _pick(self, info: dict[str, Any]) -> dict[str, Any] | None:
+        """A WebVTT track: a written one in a preferred language, then an automatic one, then any."""
+        written = info.get("subtitles") or {}
+        automatic = info.get("automatic_captions") or {}
+        for tracks in (written, automatic):
+            for lang in self.languages:
+                vtt = self._vtt(tracks.get(lang))
+                if vtt:
+                    return vtt
+        for tracks in (written, automatic):
+            for formats in tracks.values():
+                vtt = self._vtt(formats)
+                if vtt:
+                    return vtt
+        return None
+
+    @staticmethod
+    def _vtt(formats: Any) -> dict[str, Any] | None:
+        for fmt in formats or []:
+            if isinstance(fmt, dict) and fmt.get("ext") == "vtt" and fmt.get("url"):
+                return fmt
+        return None
+
+
+# Reasons the captions API gives that hold for any route to the same video; others may differ by route.
+_FINAL_REASONS = frozenset({"TranscriptsDisabled", "NoTranscriptFound", "VideoUnavailable", "InvalidVideoId"})
+
+
+class _Pacer:
+    """Spaces remote caption requests: one at a time across all workers, a random gap apart."""
+
+    def __init__(
+        self,
+        spacing: tuple[float, float],
+        sleep: Callable[[float], None],
+        clock: Callable[[], float],
+        rand: Callable[[float, float], float],
+    ) -> None:
+        self.spacing, self._sleep, self._clock, self._rand = spacing, sleep, clock, rand
+        self._lock = threading.Lock()
+        self._next_at = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = self._clock()
+            start = max(now, self._next_at)
+            low, high = self.spacing
+            self._next_at = start + (self._rand(low, high) if high > 0 else 0.0)
+        if start > now:
+            self._sleep(start - now)
 
 
 class TranscriptManager:
-    """Resolves transcripts from local files, the cache, then the YouTube captions API."""
+    """Resolves transcripts: local files, the cache, the captions API, then yt-dlp subtitles.
+
+    A block pauses only the route that was refused, for `block_pause` seconds; the run carries on
+    through the other routes, and `fetch_many` tries blocked videos once more when a route reopens.
+    Remote requests are spaced by `spacing` seconds so a long channel is not refused in the first
+    place. A block is never cached, so the next run tries the video again.
+    """
 
     def __init__(
         self,
@@ -326,19 +493,34 @@ class TranscriptManager:
         api_factory: Callable[[], Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         languages: tuple[str, ...] = PREFERRED_LANGUAGES,
+        subtitles: YtDlpSubtitles | None = None,
+        bulk: Callable[[list[tuple[str, str]]], dict[str, str]] | None = None,
+        spacing: tuple[float, float] = (0.0, 0.0),
+        block_pause: float = 180.0,
+        clock: Callable[[], float] = time.monotonic,
+        rand: Callable[[float, float], float] = random.uniform,
     ) -> None:
         self.cache_dir = cache_dir or (Path.home() / ".notebook-alchemy" / "cache")
         self.transcripts_dir = transcripts_dir
         self.max_workers = max(1, max_workers)
         self._api_factory = api_factory
         self._sleep = sleep
+        self._clock = clock
         self.languages = tuple(languages) or PREFERRED_LANGUAGES
-        # Set once YouTube blocks a request: the rest of the run would be blocked too, so later
-        # videos skip the network instead of each waiting for the same answer.
-        self._blocked = threading.Event()
+        self.subtitles = subtitles
+        # A route that reads many videos at once (NotebookLM fetching the transcripts on Google's
+        # side), used for videos the per-video routes could not read.
+        self.bulk = bulk
+        self.block_pause = block_pause
+        self.notices: list[str] = []  # route problems to tell the user once
+        self._pacer = _Pacer(spacing, sleep, clock, rand)
+        # Per route: the clock time until which it is paused after a block (0 = open).
+        self._paused_until: dict[str, float] = {}
+        self._pause_lock = threading.Lock()
+        self._route_locks = {"api": threading.Lock(), "subtitles": threading.Lock()}
         self._po_token_demands = 0
-        self._po_lock = threading.Lock()
         self.blocked_total = 0  # videos this run could not get captions for because YouTube blocked it
+        self.by_source: dict[str, int] = {}  # how this run's videos were resolved, for the summary
 
     # -- helpers --
 
@@ -380,6 +562,20 @@ class TranscriptManager:
                         return text
         return None
 
+    def _pause(self, route: str) -> None:
+        with self._pause_lock:
+            self._paused_until[route] = self._clock() + self.block_pause
+
+    def _is_paused(self, route: str) -> bool:
+        with self._pause_lock:
+            return self._paused_until.get(route, 0.0) > self._clock()
+
+    def next_reopening(self) -> float | None:
+        """Seconds until the first paused route reopens, or None when none is paused."""
+        with self._pause_lock:
+            ends = [t for t in self._paused_until.values() if t > self._clock()]
+        return min(ends) - self._clock() if ends else None
+
     # -- cache --
 
     def _read_cache(self, video_id: str) -> TranscriptResult | None:
@@ -392,8 +588,16 @@ class TranscriptManager:
             logger.warning("Ignoring unreadable transcript cache %s: %s", path, exc)
             return None
         text = str(data.get("full_text", "")).strip()
+        if text and data.get("method") == MODEL_WRITTEN:
+            return None
         if text:
-            return TranscriptResult(video_id, text, "cache")
+            return TranscriptResult(
+                video_id,
+                text,
+                "cache",
+                published=str(data.get("published", "")),
+                method=str(data.get("method", "")),
+            )
         if data.get("unavailable"):
             try:
                 checked = datetime.fromisoformat(str(data.get("checked_at", "")))
@@ -403,17 +607,17 @@ class TranscriptManager:
                 return TranscriptResult(video_id, "", "unavailable", str(data.get("reason", "no captions")))
         return None
 
-    def _write_cache(self, video_id: str, title: str, text: str, *, reason: str = "") -> None:
+    def _write_cache(
+        self, video_id: str, title: str, text: str, *, reason: str = "", method: str = "", published: str = ""
+    ) -> None:
         path = self._cache_path(video_id)
         if path is None:
             return
         record: dict[str, Any] = {"video_id": video_id, "title": title, "full_text": text}
-        if not text:
-            record.update(
-                unavailable=True,
-                reason=reason,
-                checked_at=datetime.now(UTC).isoformat(),
-            )
+        if text:
+            record.update(method=method, published=published)
+        else:
+            record.update(unavailable=True, reason=reason, checked_at=datetime.now(UTC).isoformat())
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(record), encoding="utf-8")
@@ -432,17 +636,55 @@ class TranscriptManager:
         cached = self._read_cache(video_id)
         if cached:
             return cached
-        if self._blocked.is_set():
-            return TranscriptResult(video_id, "", "blocked", "YouTube blocked an earlier request in this run")
         return self._fetch_remote(video_id, title)
 
     def _fetch_remote(self, video_id: str, title: str) -> TranscriptResult:
+        """Each open route in turn. A final "no captions" is cached; a block is not."""
+        routes: list[tuple[str, Callable[[str, str], TranscriptResult]]] = [("api", self._via_api)]
+        if self.subtitles is not None:
+            routes.append(("subtitles", self._via_subtitles))
+        outcome: TranscriptResult | None = None
+        for route, fetch in routes:
+            # One remote request per route at a time, and the pause is checked under the lock, so a
+            # route closed by one worker is not called again by another already waiting.
+            with self._route_locks[route]:
+                if self._is_paused(route):
+                    result = None
+                else:
+                    self._pacer.wait()
+                    result = fetch(video_id, title)
+            if result is None:
+                outcome = outcome or TranscriptResult(
+                    video_id, "", "blocked", f"YouTube blocked an earlier {route} request in this run"
+                )
+                continue
+            if result.text:
+                self._write_cache(
+                    video_id, title, result.text, method=result.source, published=result.published
+                )
+                return result
+            if result.source == "unavailable" and result.detail in _FINAL_REASONS:
+                self._write_cache(video_id, title, "", reason=result.detail)
+                return result
+            # Blocked, or a reason another route may not share: keep the most telling, try the next.
+            if outcome is None or result.source == "blocked":
+                outcome = result
+        if outcome is None:
+            return TranscriptResult(video_id, "", "unavailable", "no route to YouTube")
+        if outcome.source == "unavailable" and not outcome.detail.startswith(
+            ("fetch failed", "subtitles failed")
+        ):
+            # Every route said the video has nothing to read (age-restricted, removed, no track):
+            # remembered for a week. A network failure is not remembered.
+            self._write_cache(video_id, title, "", reason=outcome.detail)
+        return outcome
+
+    def _via_api(self, video_id: str, title: str) -> TranscriptResult:
         import youtube_transcript_api as yta  # imported on use, like yt-dlp
 
         api = (self._api_factory or yta.YouTubeTranscriptApi)()
         # Blocked: this network is refused (an IP block, or a consent page that cannot be passed
-        # from here); every retry and every later video gets the same answer, so stop the run's
-        # caption requests and cache nothing about the video.
+        # from here). The route pauses; retrying now would get the same answer.
         blocked = (yta.RequestBlocked, yta.FailedToCreateConsentCookie)
         # Retried: the request or the page YouTube sent back failed.
         transient = (yta.YouTubeRequestFailed, yta.YouTubeDataUnparsable)
@@ -451,22 +693,21 @@ class TranscriptManager:
             try:
                 text = self._caption_text(api, video_id, yta.NoTranscriptFound)
                 if not text:
-                    self._write_cache(video_id, title, "", reason="EmptyTranscript")
-                    return TranscriptResult(video_id, "", "unavailable", "EmptyTranscript")
-                self._write_cache(video_id, title, text)
+                    return TranscriptResult(video_id, "", "unavailable", "TranscriptsDisabled")
                 return TranscriptResult(video_id, text, "youtube")
             except blocked as exc:
-                self._blocked.set()
+                self._pause("api")
                 return TranscriptResult(
                     video_id, "", "blocked", f"YouTube blocked the request ({type(exc).__name__})"
                 )
             except yta.PoTokenRequired as exc:
-                # YouTube can demand a proof-of-origin token for some videos only, so one demand
-                # is not cached; the run stops asking after a second.
-                with self._po_lock:
+                # YouTube can demand a proof-of-origin token for some videos only, so the route
+                # pauses after a second demand, not the first.
+                with self._pause_lock:
                     self._po_token_demands += 1
-                    if self._po_token_demands >= PO_TOKEN_STOP_AFTER:
-                        self._blocked.set()
+                    demands = self._po_token_demands
+                if demands >= PO_TOKEN_STOP_AFTER:
+                    self._pause("api")
                 return TranscriptResult(
                     video_id, "", "blocked", f"YouTube blocked the request ({type(exc).__name__})"
                 )
@@ -474,16 +715,35 @@ class TranscriptManager:
                 last_exc = exc
             except yta.CouldNotRetrieveTranscript as exc:
                 # No captions, disabled, private, age-restricted, removed, invalid id, and any
-                # reason a later library version adds: this video has no transcript to fetch.
-                reason = type(exc).__name__
-                self._write_cache(video_id, title, "", reason=reason)
-                return TranscriptResult(video_id, "", "unavailable", reason)
+                # reason a later library version adds.
+                return TranscriptResult(video_id, "", "unavailable", type(exc).__name__)
             except Exception as exc:  # noqa: BLE001 - network errors from the HTTP stack vary
                 last_exc = exc
             logger.debug("Transcript fetch for %s failed (attempt %d): %s", video_id, attempt + 1, last_exc)
             if attempt < 2:
                 self._sleep(2**attempt)
         return TranscriptResult(video_id, "", "unavailable", f"fetch failed: {type(last_exc).__name__}")
+
+    def _via_subtitles(self, video_id: str, title: str) -> TranscriptResult:
+        assert self.subtitles is not None  # noqa: S101 - only listed as a route when set
+        try:
+            text, published = self.subtitles.fetch(video_id)
+        except SubtitlesBlocked as exc:
+            self._pause("subtitles")
+            return TranscriptResult(video_id, "", "blocked", f"YouTube blocked yt-dlp ({exc})")
+        except SubtitlesUnavailable as exc:
+            return TranscriptResult(video_id, "", "unavailable", f"subtitles: {exc}")
+        except SubtitlesSetupError as exc:
+            # Every video would fail the same way: the route closes for this run, said once.
+            with self._pause_lock:
+                self._paused_until["subtitles"] = float("inf")
+                if str(exc) not in self.notices:
+                    self.notices.append(str(exc))
+            return TranscriptResult(video_id, "", "blocked", "yt-dlp route closed")
+        except Exception as exc:  # noqa: BLE001 - yt-dlp raises many kinds; the reason is kept
+            logger.debug("yt-dlp subtitles for %s failed: %s", video_id, exc)
+            return TranscriptResult(video_id, "", "unavailable", f"subtitles failed: {type(exc).__name__}")
+        return TranscriptResult(video_id, text, "subtitles", published=published)
 
     def _caption_text(self, api: Any, video_id: str, not_found: type[Exception]) -> str:
         """Captions in a preferred language, else the uploader's own track, else an automatic one."""
@@ -497,12 +757,23 @@ class TranscriptManager:
             fetched = tracks[0].fetch()
         return " ".join(" ".join(s.text for s in fetched).split())
 
+    @staticmethod
+    def _worth_another_route(result: TranscriptResult) -> bool:
+        """Blocked, or failed for a reason that is not "this video has no captions"."""
+        if result.text or result.source in ("skipped", "local", "cache"):
+            return False
+        return result.source == "blocked" or result.detail not in _FINAL_REASONS
+
     def fetch_many(
         self,
         items: list[tuple[str, str]],
         progress: Callable[[int, int], None] | None = None,
     ) -> dict[str, TranscriptResult]:
-        """Resolve many (video_id, title) pairs with a bounded worker pool."""
+        """Resolve many (video_id, title) pairs with a bounded worker pool.
+
+        Videos a block stopped are tried once more after the pass, when a paused route reopens
+        within `block_pause` seconds.
+        """
         results: dict[str, TranscriptResult] = {}
         total = len(items)
         if not total:
@@ -511,9 +782,25 @@ class TranscriptManager:
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             for result in pool.map(lambda pair: self.resolve(pair[0], pair[1]), items):
                 results[result.video_id] = result
-                if result.source == "blocked":
-                    self.blocked_total += 1  # counted here, on the caller's thread
                 done += 1
                 if progress:
                     progress(done, total)
+        missing = [(vid, title) for vid, title in items if self._worth_another_route(results[vid])]
+        if missing and self.bulk is not None:
+            texts = self.bulk(missing)
+            for vid, title in missing:
+                text = " ".join(str(texts.get(vid, "")).split())
+                if text:
+                    self._write_cache(vid, title, text, method="notebooklm")
+                    results[vid] = TranscriptResult(vid, text, "notebooklm")
+        retry = [(vid, title) for vid, title in items if results[vid].source == "blocked"]
+        wait = self.next_reopening()
+        if retry and wait is not None and wait <= self.block_pause:
+            logger.info("Waiting %.0f s for YouTube, then retrying %d blocked videos.", wait, len(retry))
+            self._sleep(wait)
+            for vid, title in retry:
+                results[vid] = self.resolve(vid, title)
+        for result in results.values():
+            self.by_source[result.source] = self.by_source.get(result.source, 0) + 1
+        self.blocked_total += sum(1 for r in results.values() if r.source == "blocked")
         return results

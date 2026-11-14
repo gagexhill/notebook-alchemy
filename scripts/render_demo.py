@@ -1,6 +1,6 @@
 """Render real notebook-alchemy output to an SVG, using Rich's own export.
 
-The command runs for real (network, Gemini and NotebookLM included when you pass such a command);
+The command runs for real (network, Claude and NotebookLM included when you pass such a command);
 this script only records what the terminal would have shown. Progress bars are replaced by the final
 state, because an SVG cannot animate them.
 
