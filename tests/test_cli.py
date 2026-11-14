@@ -1646,3 +1646,30 @@ def test_status_and_a_dry_run_never_open_a_notebooklm_session(
     assert runner.invoke(cli, ["status"]).exit_code == 0
     assert runner.invoke(cli, ["dry-run", "@my"]).exit_code == 0
     assert fake.opened == [] and fake.calls == []
+
+
+def test_signing_in_closes_the_open_session_so_the_new_sign_in_is_used(
+    monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    from notebook_alchemy.config import AlchemyConfig
+
+    from .conftest import FakeProcess
+
+    fake = FakeNotebookLM()
+    account = json.dumps({"status": "ok", "account": {"email": "owner@example.test"}, "checks": {}})
+    client = NotebookLMClient(AlchemyConfig(), api=fake, runner=FakeProcess(("auth check", 0, account, "")))
+    state = client.profile_state_path()
+    state.parent.mkdir(parents=True)
+    state.write_text("{}", encoding="utf-8")
+    client.list_notebooks()
+    assert client.session_is_open and len(fake.opened) == 1
+    seen: list[bool] = []
+
+    def signed_in(cmd: list[str], waiting: str, answer: str | None = None):
+        seen.append(client.session_is_open)  # closed before the sign-in window opens
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(cli_module, "_run_login", signed_in)
+    identity = cli_module._sign_in(client)
+    assert identity.email == "owner@example.test" and seen == [False]
+    assert len(fake.opened) == 2  # the check after signing in opened the new sign-in

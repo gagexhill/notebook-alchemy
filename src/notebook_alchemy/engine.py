@@ -116,7 +116,7 @@ def _run_pool(func: Callable[[Any], Any], items: list[Any]) -> list[Any]:
     """Map `func` over `items` on SYNC_WORKERS threads, in order.
 
     On Ctrl+C, calls not yet started are cancelled; the ones already running finish, because a
-    `notebooklm` process cannot be stopped half-way. The interrupt then propagates.
+    request NotebookLM has received cannot be taken back. The interrupt then propagates.
     """
     pool = ThreadPoolExecutor(max_workers=SYNC_WORKERS)
     try:

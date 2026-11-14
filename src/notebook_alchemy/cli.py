@@ -844,6 +844,9 @@ def _sign_in(
     reported in one line, and the captured text explains a failure.
     """
     cmd = client.login_command()
+    # Signing in replaces the file an open session read, and that session writes its own copy
+    # back when it closes. Closed first, so the new sign-in is the one that stays and is used.
+    client.close()
     override = client.storage_override()
     ui.detail(
         f"Signing in through {esc(f'session file {override}' if override else f'profile {client.profile}')}."
