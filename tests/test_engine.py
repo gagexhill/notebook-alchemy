@@ -912,3 +912,28 @@ def test_a_half_made_upload_is_recorded_so_the_next_run_removes_it(tmp_path: Pat
     fake.before = None
     engine.publish("Chan", _books())
     assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics"]  # the half-made copy is gone
+
+
+def test_a_copy_left_by_an_upload_that_gave_no_id_is_found_and_removed_next_run(tmp_path: Path) -> None:
+    import notebooklm.exceptions as lib
+
+    fake = FakeNotebookLM()
+    nb = fake.seed("Chan", ["My own notes", "Beta Topics"])  # the second is the user's own, same title
+    yours = {s["id"] for s in fake.sources[nb]}
+
+    def took_the_file_then_broke(words: list[str]) -> None:
+        if "add" in words and any("Beta" in part for part in words):
+            # NotebookLM kept the file under its file name, and the answer never arrived.
+            fake.sources[nb].append({"id": "src-lost", "title": "Beta_Topics.md", "status": "ready"})
+            raise lib.NetworkError("the connection dropped")
+
+    fake.before = took_the_file_then_broke
+    engine = _fake_engine(tmp_path, fake)
+    with pytest.raises(SyncError):
+        engine.publish("Chan", _books())
+    record = json.loads(engine._sync_state_path(nb).read_text(encoding="utf-8"))
+    assert record["orphans"] == ["src-lost"]  # the new copy only: what was there before is not this tool's
+    fake.before = None
+    engine.publish("Chan", _books())
+    left = {s["id"] for s in fake.sources[nb]}
+    assert "src-lost" not in left and yours <= left

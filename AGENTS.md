@@ -64,8 +64,10 @@ to propose a change; this file covers what a change must keep true.
   next run resumes.
 - Upload content goes to NotebookLM as a file, never as a command-line argument (Windows limits one
   argument to about 32,000 characters). NotebookLM errors are told apart by the library's error type,
-  never by words in a message: only its sign-in error is a sign-out. A sign-in closes the open
-  session first, so the new sign-in is the one used. NotebookLM can reset a source title to its file name after processing, so
+  never by words in a message: only its sign-in error, or a sign-in file that cannot be used, is a
+  sign-out. A sign-in closes the open session first, so the new sign-in is the one used, and a
+  command closes its session when it ends. A copy a failed upload left is adopted as the tool's own
+  only when it was not in the notebook before that upload and carries the failed book's title. NotebookLM can reset a source title to its file name after processing, so
   an upload waits, corrects titles, and reads the notebook back before it reports success. An upload
   replaces or removes only sources it recorded as its own (by id); a book whose text matches the
   recorded copy still in the notebook is not sent again (its title is corrected if NotebookLM changed

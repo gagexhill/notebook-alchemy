@@ -22,7 +22,7 @@
   `~/.notebooklm/profiles/<profile>/`. This tool opens it through that library, in its own process,
   only to talk to NotebookLM; the library keeps the file's cookies current. This tool's own code never
   reads, copies, logs or exports the file's contents.
-- Document content reaches NotebookLM as a temporary file, removed after each upload.
+- Document content reaches NotebookLM as a temporary file, removed when its upload ends.
 - `.gitignore` blocks `.env`, session and token files, and the `vault/` folder older versions wrote. A pre-push hook scans
   pushed commits with gitleaks, and GitHub secret scanning with push protection is enabled.
 

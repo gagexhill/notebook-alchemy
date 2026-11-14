@@ -550,6 +550,31 @@ class AlchemyEngine:
         except AlchemyError as exc:  # the next run removes it; said in the log
             logger.warning("Could not remove %s from the working notebook: %s", what, exc.message)
 
+    def _sources_left_by_failed_uploads(
+        self, nb_id: str, titles: list[str], before: list[dict[str, Any]], new_ids: dict[str, str]
+    ) -> list[str]:
+        """Ids of sources a failed upload left behind without naming them.
+
+        An upload that ran out of time, or broke after NotebookLM took the file, can leave a copy
+        this run has no id for. It is recognised narrowly: a source that was not in the notebook
+        when this upload began, is not one this run uploaded, and carries the failed book's title
+        or its file name. It is recorded as this tool's own, so the next run removes it.
+        """
+        wanted = {normalize_title(title) for title in titles}
+        known = {str(s["id"]) for s in before if s.get("id")} | set(new_ids.values())
+        try:
+            now = self.client.list_sources(nb_id)
+        except AlchemyError as exc:  # the upload's own failure is already reported; said in the log
+            logger.warning("Could not look for copies a failed upload left: %s", exc.message)
+            return []
+        return [
+            str(s["id"])
+            for s in now
+            if s.get("id")
+            and str(s["id"]) not in known
+            and normalize_title(str(s.get("title") or "")) in wanted
+        ]
+
     @staticmethod
     def _video_of(source: dict[str, Any], batch: list[str], titles: dict[str, str]) -> str:
         """Which queued video a working-notebook source is: by its URL, else by its title.
@@ -788,6 +813,7 @@ class AlchemyEngine:
         steps = _Counter(progress, "Uploading to NotebookLM", len(sending) * 2)
 
         half_made: list[str] = []  # sources NotebookLM registered for an upload that then failed
+        lost: list[str] = []  # books whose upload failed without saying whether a source was made
 
         def add(book: Book) -> tuple[str, str | None, str | None]:
             try:
@@ -798,8 +824,11 @@ class AlchemyEngine:
             except AlchemyError as exc:
                 if getattr(exc, "source_id", None):
                     half_made.append(str(exc.source_id))  # type: ignore[attr-defined]
+                else:
+                    lost.append(book.title)
                 return book.title, None, f"{book.title}: {exc.message}"
             except Exception as exc:  # noqa: BLE001 - reported per book, so the rest still reconcile
+                lost.append(book.title)
                 return book.title, None, f"{book.title}: {type(exc).__name__}: {exc}"
             finally:
                 steps.tick()
@@ -810,6 +839,8 @@ class AlchemyEngine:
                 new_ids[title] = source_id
             if error:
                 failed.append(error)
+        if lost:
+            half_made += self._sources_left_by_failed_uploads(nb_id, lost, before, new_ids)
         sizes = {b.title: b.words for b in books}
 
         def wait(item: tuple[str, str]) -> str | None:

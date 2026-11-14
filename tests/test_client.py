@@ -49,6 +49,15 @@ def _raising(error: Exception) -> FakeNotebookLM:
     return fake
 
 
+def _keep_library_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real opener changes the library's logger; put it back when the test ends."""
+    import logging
+
+    library = logging.getLogger("notebooklm")
+    monkeypatch.setattr(library, "propagate", library.propagate)
+    monkeypatch.setattr(library, "level", library.level)
+
+
 def _library(**parts: object):
     """A hand-made library, for answers the in-memory fake would never give."""
     return lambda profile, path: _FakeContext(SimpleNamespace(**parts))
@@ -132,8 +141,10 @@ def test_the_real_library_accepts_how_it_is_opened(monkeypatch: pytest.MonkeyPat
         return tokens.InlineLoadedAuth(auth=auth)
 
     monkeypatch.setattr(tokens, "_load_stored_auth", stored)
+    _keep_library_logging(monkeypatch)
     with warnings.catch_warnings():
-        warnings.simplefilter("error")  # a deprecated argument is a failure here
+        # A deprecated argument is a failure here; other packages' warnings are not this test's.
+        warnings.filterwarnings("error", message=".*NotebookLMClient.*", category=DeprecationWarning)
         built = asyncio.run(real_default_api()("work", None)._build())
     assert type(built).__name__ == "NotebookLMClient" and asked["profile"] == "work" and asked["path"] is None
     # No hidden-browser renewal: it made a signed-out check take minutes.
@@ -151,10 +162,12 @@ def test_an_upload_gets_a_longer_wait_than_the_librarys_usual_one(monkeypatch: p
     monkeypatch.setattr(
         notebooklm.NotebookLMClient, "from_storage", classmethod(lambda cls, **kw: seen.update(kw))
     )
+    _keep_library_logging(monkeypatch)
     real_default_api()(None, "session.json")
     assert seen["path"] == "session.json" and seen["profile"] is None and seen["allow_headless"] is False
     transfers = seen["config"].transfers  # type: ignore[attr-defined]
-    assert transfers.start_timeout.read == 180.0 and transfers.finalize_timeout.write == 180.0
+    assert transfers.start_timeout.read == 180.0
+    assert transfers.finalize_timeout is None  # sending the file keeps the library's own, longer wait
 
 
 def test_an_upload_without_a_source_id_is_an_error(tmp_path: Path) -> None:
@@ -201,10 +214,16 @@ def test_only_a_sign_in_file_problem_is_a_sign_out_when_opening(tmp_path: Path) 
     class RequiredCookieValidationError(ValueError):  # the library's name for cookies Google needs
         pass
 
+    class StorageStateValidationError(ValueError):  # its name for a file in the wrong shape
+        pass
+
     for error, words in (
         (FileNotFoundError("storage_state.json"), "missing"),
         (json.JSONDecodeError("not JSON", "{", 0), "unusable"),
         (RequiredCookieValidationError("no SID cookie; try --browser-cookies"), "unusable"),
+        (StorageStateValidationError("Storage state must contain a 'cookies' list."), "unusable"),
+        (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), "unusable"),
+        (PermissionError("storage_state.json"), "unusable"),
     ):
         with pytest.raises(SessionError) as gone:
             _client(tmp_path, api=opener(error)).list_notebooks()
@@ -257,16 +276,25 @@ def test_closing_while_a_request_is_under_way_ends_it_at_once(tmp_path: Path) ->
     assert len(client.list_notebooks()) == 2 and len(fake.opened) == 2  # a new session, tracked
 
 
-def test_a_source_registered_before_a_failure_is_named_on_the_error(tmp_path: Path) -> None:
+def test_a_source_registered_before_a_failed_upload_is_named_on_the_error(tmp_path: Path) -> None:
     import notebooklm.exceptions as lib
 
-    failure = lib.SourceProcessingError("src-half")
+    def failing(error: Exception) -> NotebookLMClient:
+        fake = _raising(error)
+        fake.seed("Chan", [])
+        return _client(tmp_path, api=fake)
+
+    document = SourceDocument("a", "Doc", "body")
     with pytest.raises(NotebookLMError) as err:
-        _client(tmp_path, api=_raising(failure)).list_notebooks()
+        failing(lib.SourceProcessingError("src-half")).add_source_document("nb-1", document)
     assert err.value.source_id == "src-half"
     with pytest.raises(NotebookLMError) as plain:
-        _client(tmp_path, api=_raising(lib.ServerError("HTTP 500"))).list_notebooks()
+        failing(lib.ServerError("HTTP 500")).add_source_document("nb-1", document)
     assert plain.value.source_id is None
+    # An id on any other call's error is not a source this tool made.
+    with pytest.raises(NotebookLMError) as other:
+        failing(lib.SourceNotFoundError("someone-elses")).delete_source("nb-1", "someone-elses")
+    assert other.value.source_id is None
 
 
 def _library_errors() -> list[tuple[Exception, type[NotebookLMError], str]]:
@@ -704,3 +732,113 @@ def test_the_librarys_own_warnings_are_shown_once_and_only_with_v(monkeypatch: p
     monkeypatch.setattr(root, "level", logging.INFO)  # -v
     real_default_api()("work", None)
     assert library.level == logging.WARNING
+    monkeypatch.setattr(root, "level", logging.DEBUG)  # -vv
+    real_default_api()("work", None)
+    assert library.level == logging.DEBUG
+
+
+def test_an_answer_that_arrives_just_after_the_time_ran_out_is_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    import contextlib
+
+    class Notebooks:
+        async def list(self) -> list[SimpleNamespace]:
+            # Told to stop, the library still finishes what NotebookLM already has.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.sleep(30)
+            return [SimpleNamespace(id="nb-late", title="Late")]
+
+    monkeypatch.setattr("notebook_alchemy.client.LIST_TIMEOUT", 0.05)
+    client = _client(tmp_path, api=_library(notebooks=Notebooks()))
+    assert client.list_notebooks() == [{"id": "nb-late", "title": "Late"}]
+
+
+def test_closing_frees_a_request_that_will_not_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    import time
+
+    started = threading.Event()
+
+    class Notebooks:
+        async def list(self) -> list[SimpleNamespace]:
+            started.set()
+            while True:  # ignores being told to stop
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    continue
+
+    monkeypatch.setattr("notebook_alchemy.client.CLOSE_TIMEOUT", 0.2)
+    client = _client(tmp_path, api=_library(notebooks=Notebooks()))
+    seen: list[BaseException] = []
+
+    def ask() -> None:
+        try:
+            client.list_notebooks()
+        except BaseException as exc:
+            seen.append(exc)
+
+    worker = threading.Thread(target=ask, daemon=True)
+    worker.start()
+    assert started.wait(5)
+    began = time.monotonic()
+    client.close()
+    worker.join(10)
+    assert not worker.is_alive() and time.monotonic() - began < 10  # not the 60 s it would wait
+    assert isinstance(seen[0], NotebookLMError) and "closed before" in seen[0].message
+
+
+def test_ctrl_c_while_waiting_tells_the_request_to_stop(tmp_path: Path) -> None:
+    from notebook_alchemy import client as client_module
+
+    fake = FakeNotebookLM(delay={"list": 30})
+    session = client_module._Session(lambda: fake("work", None))
+
+    async def ask(library: SimpleNamespace) -> int:
+        return len(await library.notebooks.list())
+
+    class Interrupted(client_module._Pending):
+        def __init__(self) -> None:
+            super().__init__()
+            real_wait = self.done.wait
+
+            def wait(timeout: float | None = None) -> bool:
+                real_wait(0.2)  # the request is under way
+                raise KeyboardInterrupt
+
+            self.done.wait = wait  # type: ignore[method-assign]
+
+    session._open()  # opened first, so the interruption lands on the request, not on opening
+    original = client_module._Pending
+    client_module._Pending = Interrupted  # type: ignore[misc]
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            session.run(ask, 60)
+    finally:
+        client_module._Pending = original  # type: ignore[misc]
+    assert fake.calls == [["list"]] or fake.active == 1  # the request had started
+    for _ in range(100):
+        if fake.active == 0:
+            break
+        threading.Event().wait(0.05)
+    assert fake.active == 0  # stopped, not left running for its 30 s
+    session.close()
+
+
+def test_a_call_that_arrives_as_the_session_closes_is_refused() -> None:
+    from notebook_alchemy import client as client_module
+
+    fake = FakeNotebookLM()
+    session = client_module._Session(lambda: fake("work", None))
+
+    async def ask(library: SimpleNamespace) -> int:
+        return len(await library.notebooks.list())
+
+    opened = session._open()
+    session.close()
+    session._open = lambda: opened  # type: ignore[method-assign]  # it got in just before the close
+    with pytest.raises(client_module._Closed):
+        session.run(ask, 5)
+    assert fake.calls == []  # nothing was started on the stopped loop

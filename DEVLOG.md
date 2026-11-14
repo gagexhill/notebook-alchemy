@@ -6,13 +6,16 @@ Completed material decisions, newest first. Current work is in GitHub issues.
 
 - **What was wrong.** Every NotebookLM call started a `notebooklm` process, 2.5 to 8 seconds each, and a failure was recognised by English words in its output. Any message with "login" in it counted as a sign-out.
 - **What changed.** `client.py` calls notebooklm-py's Python API. One session per client is opened on first use, on a background event loop, and shared by the upload threads. The public methods kept their names and results, so `engine.py` and `cli.py` barely changed.
-- **Errors by type.** Only the library's sign-in error, or a missing or unusable sign-in file, is a sign-out. A rate limit, a notebook limit, a source that failed or timed out, a network fault and an answer the library cannot read each get their own message and next step. An error that is not NotebookLM's is raised as it is.
+- **Errors by type.** Only the library's sign-in error, or a sign-in file that is missing, unreadable or in the wrong shape, is a sign-out. A rate limit, a notebook limit, a source that failed or timed out, a network fault and an answer the library cannot read each get their own message and next step. An error that is not NotebookLM's is raised as it is.
 - **What stays on the command line, and why.** The sign-in window (`login`), the scheduled `auth refresh`, and reading the account a profile recorded (`auth check`): the library has no public Python function for them.
 - **Session lifetime.**
   - A command closes its session when it ends. Left to the interpreter's exit, the library could no longer save the sign-in's refreshed cookies; the first live sign-in on this branch showed that.
   - Signing in closes the open session first, so the next request uses the new sign-in.
   - A call that runs out of time is stopped and has let go before the error is raised, so its temporary file is free and an answer that arrived meanwhile is used. Closing ends requests under way. A closed session is never reopened behind the client's back.
-- **Uploads.** A source NotebookLM registered before an upload failed is recorded as this tool's own, so the next run removes the half-made copy. Not covered: an upload stopped by this tool's own 300-second limit after NotebookLM took the file has no id to record, as before.
+- **Uploads.**
+  - A source NotebookLM registered before an upload failed is recorded as this tool's own, so the next run removes the half-made copy.
+  - An upload that fails without naming a source (it ran out of time, or the connection dropped after NotebookLM took the file) can still leave a copy. The run then looks once for a source that was not in the notebook when the upload began, is not one this run uploaded, and carries the failed book's title or file name, and records it the same way. A source that was already there is never adopted, whatever its title.
+  - Starting an upload waits up to 180 seconds for an answer; sending the file keeps the library's own 300 seconds. This tool's limit is 360 seconds, so the library reports a timeout first.
 - **The library is opened with its typed config.** The first version passed an upload timeout the real client rejects; no test saw it, because every test replaced the library. A test now builds the real client offline with synthetic tokens, and fails on a rejected or deprecated argument.
 - **Deviation from the plan.** The sign-in file's location is worked out here by the library's own rule (`NOTEBOOKLM_HOME`, and the older root file for the default profile), not by calling the library: importing it takes half a second and `status` asks on every start. A test holds the two rules together.
 - **Tests.** The fake is now the library's API in memory. The network block refuses every connection except a socket pair, which an event loop needs on Windows, and clears proxy settings.
@@ -21,8 +24,10 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   - A whole-channel rerun finished in 140 seconds: 754 of 768 videos read from earlier runs, 10 books uploaded, 10 earlier copies replaced, 4 unchanged and not sent again.
   - NotebookLM still reset an uploaded book's title to its file name, so the wait, title correction and read-back stay.
   - Not measured: the same rerun on the old process-per-call path, so there is no like-for-like total.
-- **Review before the PR (9 findings, all fixed).** The rejected upload timeout; a network failure while opening escaping as a raw error; every open-time `ValueError` treated as a sign-out; a timed-out upload leaving its file in use; a timeout check that could discard a finished answer; closing during a request; a test that removed the suite's isolation; the loopback allowance; stale wording in six files.
-- **Guards.** 27 guards, each checked by removing it: its test fails, and passes when it is restored.
+- **The library's own log lines.** It printed its warnings itself and also handed them to this tool's logging, so each showed twice, with ids. They now show once, only with `-v` (debug lines with `-vv`); errors always show.
+- **Second review (7 findings, all fixed).** A sign-in file in the wrong shape or unreadable was reported as a tool fault, not a sign-out; the timed-out upload's copy (above); a call that arrived as the session closed could wait its whole time; three guards had no failing test; Ctrl+C left the request running; a test that turned every warning into a failure and left the library's logger changed; wording.
+- **First review before the PR (9 findings, all fixed).** The rejected upload timeout; a network failure while opening escaping as a raw error; every open-time `ValueError` treated as a sign-out; a timed-out upload leaving its file in use; a timeout check that could discard a finished answer; closing during a request; a test that removed the suite's isolation; the loopback allowance; stale wording in six files.
+- **Guards.** 36 guards, each checked by removing it: its test fails, and passes when it is restored.
 
 ## The command line, audited against #32 (2026-11-14)
 

@@ -52,9 +52,9 @@ INSTALL_HINT = (
     "In a source checkout, run: pip install -e ."
 )
 WRITE_TIMEOUT = 120.0
-UPLOAD_TIMEOUT = 300.0
-# notebooklm's own HTTP timeout for an upload (its default is short for a large book); kept below
-# UPLOAD_TIMEOUT so notebooklm reports the timeout itself.
+UPLOAD_TIMEOUT = 360.0
+# notebooklm's own wait when starting an upload (its usual one is short for a large book). Its wait
+# while the file is sent is 300 s; UPLOAD_TIMEOUT is above both, so notebooklm reports a timeout itself.
 UPLOAD_HTTP_TIMEOUT = 180.0
 RETRY_HINT = "Run the same command again; `notebook-alchemy status` shows whether the sign-in works."
 
@@ -69,23 +69,26 @@ def default_api(profile: str | None, path: str | None) -> Any:
     from notebooklm import NotebookLMClient as _Library  # imported on use: it takes half a second
     from notebooklm.options import ClientConfig, TimeoutOptions, TransferOptions
 
-    # The library's usual wait for an answer is short for a large book, so both steps of an upload
-    # get a longer one. allow_headless stays off: renewing an ended sign-in through a hidden browser
-    # made a signed-out check take minutes; an ended sign-in is offered to the user instead.
+    # The library's usual wait for an answer is short for a large book, so starting an upload gets
+    # a longer one; sending the file keeps the library's own, longer still. allow_headless stays
+    # off: renewing an ended sign-in through a hidden browser made a signed-out check take
+    # minutes; an ended sign-in is offered to the user instead.
     _quiet_library_logging()
     window = TimeoutOptions(connect=10.0, read=UPLOAD_HTTP_TIMEOUT, write=UPLOAD_HTTP_TIMEOUT, pool=10.0)
-    config = ClientConfig(transfers=TransferOptions(start_timeout=window, finalize_timeout=window))
+    config = ClientConfig(transfers=TransferOptions(start_timeout=window))
     return _Library.from_storage(path=path, profile=profile, allow_headless=False, config=config)
 
 
 def _quiet_library_logging() -> None:
     """The library prints its own warnings (with ids, in its own terms) and also hands them to
     this tool's logging, so each showed twice. They are printed once, by the library's own
-    handler, which hides credentials, and only with -v; errors are always shown."""
+    handler, which hides credentials, and only with -v (its debug lines with -vv); errors are
+    always shown."""
     library = logging.getLogger("notebooklm")
     library.propagate = False
-    if logging.getLogger().getEffectiveLevel() > logging.INFO:
-        library.setLevel(logging.ERROR)
+    ours = logging.getLogger().getEffectiveLevel()
+    quiet = logging.ERROR if ours > logging.INFO else logging.WARNING
+    library.setLevel(logging.DEBUG if ours <= logging.DEBUG else quiet)
 
 
 class _NoSignIn(Exception):
@@ -171,15 +174,18 @@ def _cancel(loop: asyncio.AbstractEventLoop, pending: _Pending) -> None:
 
 
 def _is_sign_in_file_problem(exc: BaseException) -> bool:
-    """A missing sign-in file, one that is not JSON, or one without the cookies Google needs.
+    """A sign-in file that is missing, cannot be read, is not JSON, has the wrong shape, or lacks
+    the cookies Google needs.
 
     The library raises other ValueErrors while opening (a page it cannot read, a region block)
-    that signing in again would not fix; those are not sign-in problems. The cookie error is
-    matched by name because the library keeps that class in a private module.
+    that signing in again would not fix; those are not sign-in problems. The library's two
+    file errors are matched by name because it keeps those classes in private modules.
     """
-    if isinstance(exc, (FileNotFoundError, json.JSONDecodeError)):
+    unreadable = (FileNotFoundError, PermissionError, IsADirectoryError, UnicodeDecodeError)
+    if isinstance(exc, (*unreadable, json.JSONDecodeError)):
         return True
-    return any(kind.__name__ == "RequiredCookieValidationError" for kind in type(exc).__mro__)
+    names = {kind.__name__ for kind in type(exc).__mro__}
+    return bool(names & {"RequiredCookieValidationError", "StorageStateValidationError"})
 
 
 class _Session:
@@ -212,11 +218,12 @@ class _Session:
 
     def run(self, call: Callable[[Any], Awaitable[Any]], timeout: float) -> Any:
         loop, library = self._open()
-        try:
-            pending = _submit(loop, lambda: call(library))
-        except RuntimeError as exc:  # closed between opening and starting
-            raise _Closed() from exc
+        # Started and listed in one step, so a close that begins now either sees this call or has
+        # already marked the session closed: no call is left waiting on a loop that stopped.
         with self._waiting_lock:
+            if self._closed:
+                raise _Closed()
+            pending = _submit(loop, lambda: call(library))
             self._waiting.add(pending)
         try:
             if pending.done.wait(timeout):
@@ -233,6 +240,9 @@ class _Session:
             if pending.done.is_set() and pending.error is None:
                 return pending.value
             raise _CallTimeout()
+        except KeyboardInterrupt:
+            _cancel(loop, pending)  # Ctrl+C: the request is told to stop, not left running
+            raise
         finally:
             with self._waiting_lock:
                 self._waiting.discard(pending)
@@ -301,6 +311,8 @@ class _Session:
         elif closing.error is not None:  # closing is cleanup; the work is done, the reason is logged
             logger.info("Closing the NotebookLM session: %s", type(closing.error).__name__)
         _stop_loop(loop, thread)
+        with self._waiting_lock:
+            waiting = list(self._waiting)
         for pending in waiting:  # none is left waiting on a loop that no longer runs
             pending.finish(error=asyncio.CancelledError())
 
@@ -397,10 +409,6 @@ def _translate(exc: BaseException, what: str, timeout: float) -> NotebookLMError
         )
     elif isinstance(exc, (httpx.TransportError, TimeoutError)):
         error = _unreachable(exc, what)
-    if error is not None:
-        # A source NotebookLM registered before the failure: the caller records it, so the next
-        # run can remove the half-made copy.
-        error.source_id = str(getattr(exc, "source_id", "") or "") or None  # type: ignore[attr-defined]
     return error
 
 
@@ -827,11 +835,20 @@ class NotebookLMClient:
         with tempfile.TemporaryDirectory(prefix="notebook-alchemy-", ignore_cleanup_errors=True) as tmp:
             path = Path(tmp) / f"{safe[:80]}.md"
             path.write_text(document.content, encoding="utf-8")
-            made = self._call(
-                f"upload '{document.title}'",
-                lambda lib: lib.sources.add_file(notebook_id, path, "text/markdown", title=document.title),
-                timeout=UPLOAD_TIMEOUT,
-            )
+            try:
+                made = self._call(
+                    f"upload '{document.title}'",
+                    lambda lib: lib.sources.add_file(
+                        notebook_id, path, "text/markdown", title=document.title
+                    ),
+                    timeout=UPLOAD_TIMEOUT,
+                )
+            except NotebookLMError as exc:
+                # A source NotebookLM registered for this upload before it failed: the caller
+                # records it, so the next run can remove the half-made copy. Read here only: an
+                # id on any other call's error is not a source this tool made.
+                exc.source_id = str(getattr(exc.__cause__, "source_id", "") or "") or None
+                raise
         source_id = getattr(made, "id", None)
         if not source_id:
             # Without the new source's id it cannot be waited on, renamed or told apart from an
