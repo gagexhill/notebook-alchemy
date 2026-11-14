@@ -385,15 +385,18 @@ class Labeler:
                 pending.append(video)
         if not pending:
             return out
-        answers: dict[str, str] = {}
+        # Answers paid for by an earlier run that stopped before every video was stored.
+        answers = self._saved_answers()
         if self.use_batch:
-            done = self._run_batch(pending, out)
+            done = self._run_batch(pending, out, answered=set(answers))
             if done is None:  # still running: collected next run
                 out.waiting = [v.video_id for v in pending]
                 return out
             answers.update(done)
+            self._save_answers(answers)
         direct = [v for v in pending if not all(k in answers for k, _p, _s in self._requests(v))]
         answers.update(self._run_direct(direct, out))
+        self._save_answers(answers)  # paid for: kept on disk until every video is stored
         for count, video in enumerate(pending, 1):
             keys = [k for k, _p, _s in self._requests(video)]
             if not all(k in answers for k in keys):
@@ -408,6 +411,8 @@ class Labeler:
             out.labelled_now += 1
             if progress:
                 progress(count, len(pending))
+        if not out.waiting:
+            self._save_state({})  # every answer is in a stored label now
         if self._unusable:
             out.notices.append(
                 f"{len(self._unusable)} labelling answers could not be used ({self._unusable[0]}); those "
@@ -543,9 +548,15 @@ class Labeler:
 
     # -- batch --
 
-    def _run_batch(self, videos: list[VideoText], out: LabelRun) -> dict[str, str] | None:
-        """Answers by request key, {} when the batch could not be used, None when still running."""
+    def _run_batch(
+        self, videos: list[VideoText], out: LabelRun, *, answered: set[str] | None = None
+    ) -> dict[str, str] | None:
+        """Answers by request key, {} when the batch could not be used, None when still running.
+
+        Requests in `answered` are not sent again.
+        """
         requests = {key: (prompt, schema) for v in videos for key, prompt, schema in self._requests(v)}
+        unanswered = [k for k in requests if k not in (answered or set())]
         state = self._load_state()
         job = state.get("job") if state.get("model") == self.ai.model else None
         if job and not set(state.get("keys", [])) <= set(requests):
@@ -566,7 +577,9 @@ class Labeler:
                 )
             job = None
         if not job:
-            keys = list(requests)
+            keys = unanswered
+            if not keys:
+                return {}
             try:
                 job = self.ai.submit_batch([(k, *requests[k], SYSTEM, LABEL_MAX_OUTPUT_TOKENS) for k in keys])
             except ClaudeError as exc:
@@ -576,7 +589,7 @@ class Labeler:
                     f"The half-price batch could not be started ({exc.detail}); standard calls were used."
                 )
                 return {}
-            state = {"job": job, "keys": keys, "model": self.ai.model}
+            state = {**self._load_state(), "job": job, "keys": keys, "model": self.ai.model}
             self._save_state(state)
         deadline = self._clock() + self.batch_wait
         while True:
@@ -590,7 +603,8 @@ class Labeler:
                 )
                 return None
             if results is not None:
-                self._save_state({})
+                # The job is done; its answers are saved by `run` before anything else can fail.
+                self._save_state({k: v for k, v in self._load_state().items() if k not in ("job", "keys")})
                 if status == "gone":
                     out.notices.append(
                         "The earlier labelling batch is no longer available; its videos are asked again."
@@ -616,6 +630,15 @@ class Labeler:
                 )
                 return None
             self._sleep(self.poll_every)
+
+    def _saved_answers(self) -> dict[str, str]:
+        state = self._load_state()
+        saved = state.get("answers") if state.get("model") == self.ai.model else None
+        return {str(k): str(v) for k, v in saved.items()} if isinstance(saved, dict) else {}
+
+    def _save_answers(self, answers: dict[str, str]) -> None:
+        if answers:
+            self._save_state({**self._load_state(), "answers": answers, "model": self.ai.model})
 
     def _load_state(self) -> dict[str, Any]:
         try:

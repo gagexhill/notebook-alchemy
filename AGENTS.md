@@ -36,8 +36,12 @@ to propose a change; this file covers what a change must keep true.
 - The Claude API key reaches the API only through the official `anthropic` SDK, which sends it in a
   request header, to the fixed `claude.API_BASE_URL`. Never log, print or store it outside `.env`, and
   never put it in a URL. Every raised message passes through `claude.scrub`. A `.env` sets only the
-  names in `config.DOTENV_NAMES` and `ALCHEMY_*`, so it cannot redirect the key or change how
-  `notebooklm` runs.
+  names in `config.DOTENV_NAMES` and `ALCHEMY_*`, so it cannot redirect the key or set the
+  `notebooklm` command's own variables. (`ALCHEMY_SESSION_FILE` and `ALCHEMY_NOTEBOOKLM_PROFILE` choose
+  the sign-in that uploads; the first upload to an account asks first.)
+- An upload never quietly shrinks a notebook: unsorted books do not replace AI-sorted ones without
+  `--offline`, and books from under half the videos of the last upload need `--allow-fewer`. No
+  sorting is asked for while videos still wait for labels, and no topic map is made from no passages.
 - Nothing identifying the user is stored that a feature does not need. The upload confirmation keeps a
   salted hash of the account email, not the email; nothing is sent anywhere except YouTube, the Claude
   API and NotebookLM. No telemetry.
@@ -49,7 +53,7 @@ to propose a change; this file covers what a change must keep true.
   which keeps every original word in order and never takes a word the model added. A kept chunk the
   model leaves unlabelled is kept, never dropped.
 - Every paid answer is cached by what the request saw (transcript, chunking, prompt version and model;
-  passages and taxonomy; section contents and month), so a rerun pays only for what changed. A passage
+  passages and taxonomy; section contents and year), so a rerun pays only for what changed. A passage
   keeps its section (stored by name) across runs; only `--resort` rebuilds the map. Every request asks
   for JSON matching a schema (structured outputs) from the configured model only; a changed answer shape
   bumps `PROMPT_VERSION` or `LIBRARY_PROMPT_VERSION`. A key, credit balance, spend limit or rate limit

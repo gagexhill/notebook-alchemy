@@ -15,7 +15,9 @@
   reach nothing else and cost little.
 - The API address is fixed in the code, and `.env` is read only for this tool's own settings
   (`ANTHROPIC_API_KEY` and `ALCHEMY_*`), so a `.env` in the folder a run starts from cannot send the key
-  elsewhere or change how the `notebooklm` command runs.
+  elsewhere or set the `notebooklm` command's own variables. Two of its settings do choose the
+  sign-in that receives uploads (`ALCHEMY_SESSION_FILE`, `ALCHEMY_NOTEBOOKLM_PROFILE`); `status` names that
+  account, and the first upload to an account asks first.
 - The NotebookLM session is owned by the `notebooklm` CLI, which keeps it under
   `~/.notebooklm/profiles/<profile>/`. This tool reads the file's location, never its contents.
 - Document content reaches `notebooklm` as a temporary file, not on the command line.

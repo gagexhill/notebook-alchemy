@@ -34,6 +34,9 @@ NEGATIVE_CACHE_DAYS = 7
 # usually under a minute, so they are left out unless asked for.
 CHANNEL_TABS = ("videos", "streams", "shorts")
 DEFAULT_TABS = ("videos", "streams")
+# How 0.3 previews cached words that Gemini wrote down from a video (`--watch`, since removed). They are
+# not the speakers' own, so such a record counts as no record and the video is read again.
+MODEL_WRITTEN = "gemini-video"
 PO_TOKEN_STOP_AFTER = 2  # proof-of-origin demands before the run stops asking YouTube for captions
 _YOUTUBE_ID_RE = re.compile(r"^[\w-]{11}$")
 
@@ -585,6 +588,8 @@ class TranscriptManager:
             logger.warning("Ignoring unreadable transcript cache %s: %s", path, exc)
             return None
         text = str(data.get("full_text", "")).strip()
+        if text and data.get("method") == MODEL_WRITTEN:
+            return None
         if text:
             return TranscriptResult(
                 video_id,

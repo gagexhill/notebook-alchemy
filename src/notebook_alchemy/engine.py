@@ -24,7 +24,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .channel import ChannelScanner, ChannelVideo, TranscriptManager, YtDlpSubtitles, video_id_from_url
+from .channel import (
+    MODEL_WRITTEN,
+    ChannelScanner,
+    ChannelVideo,
+    TranscriptManager,
+    YtDlpSubtitles,
+    video_id_from_url,
+)
 from .claude import BATCH_PRICE_FACTOR, ClaudeClient, price_for
 from .cleanup import Chunk, chunk_video, is_punctuated, mark_duplicates
 from .client import NotebookLMClient, SourceDocument, normalize_title
@@ -56,8 +63,6 @@ SORTING_SHARE = 0.15  # sorting and consolidation, as a share of the labelling c
 
 # `notebooklm` processes run at once during an upload. Kept small to stay clear of rate limits.
 SYNC_WORKERS = 3
-# How 0.3 previews cached words that Gemini wrote down from a video (`--watch`, since removed).
-MODEL_WRITTEN = "gemini-video"
 # In the library cache: topic -> section -> the part of the topic book it is in.
 PARTS_KEY = "parts"
 
@@ -72,6 +77,7 @@ class SyncResult:
     source_limit: int | None = None
     freed_first: bool = False  # old copies were removed before uploading to stay within the limit
     unchanged: int = 0  # books whose text matched the copy already in the notebook, so not sent again
+    record_saved: bool = True  # False: the upload record could not be written (the next run warns)
 
 
 @dataclass
@@ -351,6 +357,22 @@ class AlchemyEngine:
                     passages += build_passages(
                         vid, titles.get(vid, ""), dated.get(vid, ""), cs, run.labels[vid]
                     )
+            if waiting:
+                # Sorting now would fix the topic map, placements and section orders from part of the
+                # channel, and pay for answers the next run replaces. The books wait for every label.
+                return BuildReport(
+                    channel=channel,
+                    videos=videos,
+                    read=read,
+                    labelled=labelled,
+                    waiting=waiting,
+                    library=Library(channel, []),
+                    books=[],
+                    notices=notices,
+                    by_source=by_source,
+                    is_mock=mock,
+                    used_ai=use_ai,
+                )
             # 5. library
             builder = LibraryBuilder(self.ai, RequestCache(self.library_cache_path(channel)), today, channel)
             try:
@@ -565,12 +587,14 @@ class AlchemyEngine:
             logger.warning("Ignoring unreadable record %s: %s", path, exc)
             return {}
 
-    def _write_json(self, path: Path, data: dict[str, Any], what: str) -> None:
+    def _write_json(self, path: Path, data: dict[str, Any], what: str) -> bool:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data), encoding="utf-8")
         except OSError as exc:
             logger.warning("Could not record %s (%s).", what, exc)
+            return False
+        return True
 
     def _sync_state_path(self, notebook_id: str) -> Path:
         return self.sync_records_dir() / f"{_safe_name(notebook_id)}.json"
@@ -585,7 +609,9 @@ class AlchemyEngine:
         """What this tool uploaded to a notebook.
 
         {"titles": [...], "ids": {title: source id}, "hashes": {title: hash of the text uploaded},
-        "orphans": [ids of earlier copies a failed run could not remove, removed by the next run]}.
+        "orphans": [ids of earlier copies a failed run could not remove, removed by the next run],
+        "sorted_by_ai": whether the books were sorted by the AI (None when unknown),
+        "videos_read": how many videos the uploaded books were built from (0 when unknown)}.
         A hash is recorded only for a book whose upload was confirmed, title included.
         """
         data = self._read_json(self._sync_state_path(notebook_id))
@@ -600,21 +626,30 @@ class AlchemyEngine:
             "ids": {str(k): str(v) for k, v in ids.items()},
             "hashes": {str(k): str(v) for k, v in hashes.items()},
             "orphans": [str(o) for o in orphans],
+            "sorted_by_ai": data.get("sorted_by_ai") if isinstance(data.get("sorted_by_ai"), bool) else None,
+            "videos_read": data.get("videos_read") if isinstance(data.get("videos_read"), int) else 0,
             # Titles a version 0.2 upload recorded under its own file name; matched by title until a
             # successful upload has replaced or removed them.
             "legacy_titles": [str(t) for t in legacy.get("titles", []) if isinstance(t, str)],
         }
 
     def _write_record(
-        self, notebook_id: str, ids: dict[str, str], hashes: dict[str, str], orphans: list[str] | None = None
-    ) -> None:
+        self,
+        notebook_id: str,
+        ids: dict[str, str],
+        hashes: dict[str, str],
+        orphans: list[str] | None = None,
+        *,
+        built: dict[str, Any],
+    ) -> bool:
         data = {
             "titles": sorted(ids),
             "ids": ids,
             "hashes": {t: h for t, h in hashes.items() if t in ids},
             "orphans": sorted(set(orphans or []) - set(ids.values())),
+            **built,
         }
-        self._write_json(self._sync_state_path(notebook_id), data, "this upload")
+        return self._write_json(self._sync_state_path(notebook_id), data, "this upload")
 
     def notebook_for(self, channel_key: str) -> str | None:
         return self._read_json(self.notebooks_path()).get(channel_key)
@@ -632,6 +667,11 @@ class AlchemyEngine:
         books: list[Book],
         *,
         channel_key: str | None = None,
+        old_channel_key: str | None = None,
+        sorted_by_ai: bool = True,
+        videos_read: int = 0,
+        allow_unsorted: bool = False,
+        allow_fewer: bool = False,
         progress: ProgressFn | None = None,
     ) -> SyncResult:
         """Upload the books to the channel's notebook, replacing earlier copies; nothing is kept on disk.
@@ -641,6 +681,13 @@ class AlchemyEngine:
 
         The notebook is the one recorded for `channel_key` when it still exists (so a new AI title
         does not start a second notebook), else one titled `notebook_title`, created if needed.
+        `old_channel_key` is an earlier key for the same channel (the link as it was typed), so a
+        notebook recorded under it is still found.
+
+        Nothing is uploaded, and nothing removed, when the build would quietly shrink the notebook:
+        books without AI sorting replacing AI-sorted ones (unless `allow_unsorted`), or books made from
+        under half the videos the last upload had (unless `allow_fewer`), which is what `--limit`, a
+        missing key or a mostly blocked new computer produce.
         """
         status = self.client.check_session()
         if not status.ok:
@@ -653,6 +700,8 @@ class AlchemyEngine:
         limit = limits.source_limit if limits else None
         nb_id, created = "", False
         recorded = self.notebook_for(channel_key) if channel_key else None
+        if not recorded and old_channel_key:
+            recorded = self.notebook_for(old_channel_key)
         if recorded and any(str(n.get("id")) == recorded for n in self.client.list_notebooks()):
             nb_id = recorded
         else:
@@ -665,6 +714,22 @@ class AlchemyEngine:
         # a record from version 0.2 (titles only), by those titles. A source of yours with the same
         # title as a book is left alone.
         record = self._read_record(nb_id)
+        if record["sorted_by_ai"] and not sorted_by_ai and not allow_unsorted:
+            raise AlchemyError(
+                "The notebook holds books the AI sorted, and these books have no AI sorting (no Claude API "
+                "key was found). Nothing was uploaded.",
+                hint="Run from the folder that holds your .env (`notebook-alchemy status` shows whether the "
+                "key is found), or add --offline to replace them with unsorted books.",
+            )
+        if record["videos_read"] and videos_read * 2 < record["videos_read"] and not allow_fewer:
+            raise AlchemyError(
+                f"These books come from {videos_read} videos; the notebook's come from "
+                f"{record['videos_read']}. Uploading would remove the rest. Nothing was uploaded.",
+                hint="Run without --limit to update the whole notebook, or add --save DIR to keep this build "
+                "locally. On a new computer, `import-state` brings the words already read. Add "
+                "--allow-fewer to replace the notebook's books anyway.",
+            )
+        built = {"sorted_by_ai": sorted_by_ai, "videos_read": videos_read}
         orphans = set(record["orphans"])
         mine_ids = set(record["ids"].values()) | orphans
         legacy = {normalize_title(t) for t in record["titles"]} if not record["ids"] else set()
@@ -817,18 +882,23 @@ class AlchemyEngine:
             displaced = [record["ids"][t] for t in new_ids if t in record["ids"]]
             left = [i for i in [*displaced, *stuck, *orphans] if i not in freed]
             hashes_kept = {t: h for t, h in record["hashes"].items() if t not in new_ids}
-            self._write_record(nb_id, ids, {**hashes_kept, **confirmed}, left)
+            old_built = {k: record[k] for k in ("sorted_by_ai", "videos_read") if record[k] not in (None, 0)}
+            self._write_record(nb_id, ids, {**hashes_kept, **confirmed}, left, built=old_built)
             raise SyncError(
                 f"{len(failed)} problems while uploading {len(books)} books.",
                 failed=failed,
                 hint="Fix the cause above and run the same command again; it replaces, not duplicates.",
             )
         # A kept old copy keeps its old hash (its text is not this build's), so the next run sends it.
-        self._write_record(nb_id, {**kept_old, **same, **new_ids}, {**record["hashes"], **confirmed})
+        saved = self._write_record(
+            nb_id, {**kept_old, **same, **new_ids}, {**record["hashes"], **confirmed}, built=built
+        )
         legacy_path = self._legacy_record_path(nb_id)
         if record["legacy_titles"] and legacy_path is not None:
             try:  # its sources are replaced or removed now, so the 0.2 record has done its job
                 legacy_path.unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning("Could not remove the old upload record %s (%s).", legacy_path, exc)
-        return SyncResult(nb_id, created, len(new_ids), replaced, pruned, limit, freed_first, len(same))
+        return SyncResult(
+            nb_id, created, len(new_ids), replaced, pruned, limit, freed_first, len(same), record_saved=saved
+        )

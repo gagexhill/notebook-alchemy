@@ -556,6 +556,9 @@ class LibraryBuilder:
         progress: Any = None,
     ) -> Library:
         kept, removed_old = apply_date_rules(passages, self.today)
+        if not kept:
+            # Nothing to sort: a map made from titles alone would be kept for good, so none is asked for.
+            return Library(self.channel, [], removed_outdated=removed_old)
         if resort:
             self.cache.put(self._map_key, None)
             self.cache.put(self._place_key, {})

@@ -569,3 +569,9 @@ def test_an_extension_is_bounded_and_asked_again_when_its_prompt_changes(tmp_pat
     monkeypatch.setattr(library_module, "EXTEND_VERSION", "next")
     _builder(tmp_path, ai).build(passages, ["T"])
     assert len(ai.asked("fit none of them")) == 2  # a changed prompt asks again
+
+
+def test_no_topic_map_is_asked_for_without_passages(tmp_path: Path) -> None:
+    ai = SortingAI()
+    library = _builder(tmp_path, ai).build([], ["a title", "another title"])
+    assert library.topics == [] and ai.prompts == []

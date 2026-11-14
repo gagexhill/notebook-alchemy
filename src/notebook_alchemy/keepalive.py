@@ -65,6 +65,7 @@ class KeepAliveState:
     last_detail: str = ""
     stale: bool = False  # on, but no refresh recorded for STALE_AFTER_MISSED intervals
     last_worked_at: str = ""  # the last refresh that worked, so a failure shows how long it has lasted
+    unreadable: str = ""  # why the record of refreshes could not be read, when it could not
 
 
 def task_name(profile: str) -> str:
@@ -353,6 +354,7 @@ class KeepAlive:
             on = any(ln.endswith(self._cron_marker()) for ln in self._crontab())
         last = read_status(self.home).get(self.profile, {})
         at = str(last.get("at", ""))
+        problem = status_problem(self.home)
         return KeepAliveState(
             on,
             kind if on else "",
@@ -361,6 +363,7 @@ class KeepAlive:
             str(last.get("detail", "")),
             stale=on and _older_than(at, INTERVAL_MINUTES * STALE_AFTER_MISSED),
             last_worked_at=str(last.get("worked_at", "")),
+            unreadable=problem,
         )
 
     # -- per-system details --
@@ -444,6 +447,17 @@ def read_status(home: Path) -> dict[str, Any]:
     except (OSError, ValueError):
         return {}  # an unreadable status file only means "no refresh recorded"; refresh rewrites it
     return data if isinstance(data, dict) else {}
+
+
+def status_problem(home: Path) -> str:
+    """Why the record of refreshes cannot be read, or "" when it can (or does not exist yet)."""
+    try:
+        data = json.loads((home / STATUS_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return ""
+    except (OSError, ValueError) as exc:
+        return str(exc)[:200]
+    return "" if isinstance(data, dict) else "it is not a JSON object"
 
 
 def _record(home: Path, profile: str, **fields: Any) -> None:
