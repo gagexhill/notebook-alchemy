@@ -25,6 +25,7 @@ from rich.table import Table
 
 from . import __version__, ui
 from .channel import CHANNEL_TABS, DEFAULT_TABS
+from .claude import price_for
 from .client import (
     AccountIdentity,
     NotebookLMClient,
@@ -35,6 +36,7 @@ from .client import (
 )
 from .config import (
     COOKIE_BROWSERS,
+    KEY_URL,
     LOG_LEVELS,
     AlchemyConfig,
     is_usable_api_key,
@@ -50,7 +52,7 @@ from .writer import OVERVIEW_TITLE
 
 MOCK_NOTE = "This is sample data for trying the tool. It is never uploaded to NotebookLM."
 NO_KEY_WARNING = (
-    "No Gemini API key is set, so the books hold every video's words without AI sorting or labels. "
+    "No Claude API key is set, so the books hold every video's words without AI sorting or labels. "
     "Add one with `notebook-alchemy setup`."
 )
 NOTEBOOKLM_URL = "https://notebooklm.google.com"
@@ -63,11 +65,10 @@ class OrderedGroup(click.Group):
         return [name for name, cmd in self.commands.items() if not cmd.hidden]
 
 
-SETUP_KEYS = ("GEMINI_API_KEY", "ALCHEMY_NOTEBOOKLM_PROFILE")
-KEY_URL = "https://aistudio.google.com/apikey"
+SETUP_KEYS = ("ANTHROPIC_API_KEY", "ALCHEMY_NOTEBOOKLM_PROFILE")
 KEY_BILLING_NOTE = (
-    "The key bills to the Google Cloud project it was created in (see aistudio.google.com/apikey). "
-    "A Google AI subscription plan does not change Gemini API quota or billing."
+    "The key bills to the Claude Console workspace it was made in. A Claude subscription (Pro, Max) "
+    "does not cover API use. A workspace of its own with a monthly spend limit caps what it can cost."
 )
 
 
@@ -260,17 +261,23 @@ def _same_account_as_confirmed(engine: AlchemyEngine, confirmed: AccountIdentity
         )
 
 
-def _show_gemini_cost(engine: AlchemyEngine) -> None:
-    """What Gemini actually used, as Google reported it, priced at today's listed rates."""
-    rows = engine.gemini.usage() if engine.gemini else []
+def _show_ai_cost(engine: AlchemyEngine) -> None:
+    """What the AI actually used, as the API reported it, priced at the listed rates."""
+    rows = engine.ai.usage() if engine.ai else []
     if not rows:
         return
-    ui.info(f"  Gemini cost: {_money(sum(cost for *_rest, cost in rows))}")
+    _warn_unlisted_price(engine.config.model)
+    ui.info(f"  AI cost: {_money(sum(cost for *_rest, cost in rows))}")
     for model, tokens_in, tokens_out, cost in rows:
-        ui.detail(
-            f"  {esc(model)}: {tokens_in:,} input and {tokens_out:,} output tokens (${cost:.4f}; "
-            "output includes thinking)"
-        )
+        ui.detail(f"  {esc(model)}: {tokens_in:,} input and {tokens_out:,} output tokens (${cost:.4f})")
+
+
+def _warn_unlisted_price(model: str) -> None:
+    """A model with no listed price is costed at the default model's rate, which is too low for a
+    larger model: say so wherever a cost is shown."""
+    note = price_for(model)[2]
+    if note:
+        ui.warn(note)
 
 
 def _parse_tabs(_ctx: click.Context, _param: click.Parameter, value: str) -> tuple[str, ...]:
@@ -331,7 +338,7 @@ def _removed(message: str) -> Callable[[click.Context, click.Parameter, Any], An
         "\b\nFirst run:\n"
         "  notebook-alchemy                         a guided first run: sign in, pick a channel, done\n"
         "  notebook-alchemy test                    check that everything installed correctly\n"
-        "  notebook-alchemy setup                   add a Gemini key and choose the Google account\n"
+        "  notebook-alchemy setup                   add a Claude API key and choose the Google account\n"
         "  notebook-alchemy dry-run <youtube-url>   preview videos, words and cost\n"
         "  notebook-alchemy run <youtube-url>       build the topic books and upload them\n"
         "\nDocs: https://github.com/gagexhill/notebook-alchemy"
@@ -347,7 +354,7 @@ def cli(ctx: click.Context, quiet: bool, verbose: int, no_color: bool, debug: bo
     """Notebook Alchemy: a YouTube channel's words, as topic books in a NotebookLM notebook.
 
     It reads what every video says, keeps each point once, sorts the points into topics and
-    sections with Gemini, drops or marks what is out of date, and uploads one book per topic.
+    sections with Claude, drops or marks what is out of date, and uploads one book per topic.
     Run it with no command for a guided first run.
     """
     ui.configure(quiet=quiet, no_color=no_color or bool(os.getenv("NO_COLOR")), debug=debug, verbose=verbose)
@@ -393,19 +400,12 @@ def cli(ctx: click.Context, quiet: bool, verbose: int, no_color: bool, debug: bo
 )
 @click.option("--limit", type=click.IntRange(min=1), help="Only read the first N videos.")
 @tabs_option
-@click.option("--offline", is_flag=True, help="No Gemini: every video's words, sorted by title words.")
+@click.option("--offline", is_flag=True, help="No AI: every video's words, sorted by title words.")
 @click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real channel.")
 @click.option(
-    "--now", is_flag=True, help="Use standard Gemini calls instead of batch mode (faster, full price)."
+    "--now", is_flag=True, help="Label with standard calls instead of a batch (faster, full price)."
 )
 @click.option("--resort", is_flag=True, help="Rebuild the topics and sections from scratch.")
-@click.option(
-    "--watch",
-    type=click.IntRange(min=1),
-    default=None,
-    metavar="N",
-    help="Let Gemini watch up to N videos no caption route could read (paid; about $0.15 per 30 minutes).",
-)
 @click.option(
     "--cookies",
     "cookies_browser",
@@ -435,6 +435,15 @@ def cli(ctx: click.Context, quiet: bool, verbose: int, no_color: bool, debug: bo
     hidden=True,
     expose_value=False,
     callback=_removed("--preview-only was removed: use `notebook-alchemy dry-run`."),
+)
+@click.option(
+    "--watch",
+    hidden=True,
+    expose_value=False,
+    callback=_removed(
+        "--watch was removed: Claude cannot watch a video, so a video no route can read stays listed as "
+        "unread in the overview, and the next run tries it again."
+    ),
 )
 @click.option(
     "-n",
@@ -477,19 +486,25 @@ def run_pipeline(
     mock: bool,
     now: bool,
     resort: bool,
-    watch: int | None,
     cookies_browser: str | None,
     yes: bool,
     profile: str | None,
 ) -> None:
     """Build topic books from a YouTube channel, playlist or video, and upload them to NotebookLM."""
     target = _source_or_mock(source, mock)
-    if watch and (offline or mock):
-        raise click.UsageError("--watch uses Gemini, so it cannot be combined with --offline or --mock.")
     config = _config(profile)
     if cookies_browser:
         config.cookies_browser = cookies_browser
     engine = AlchemyEngine(config)
+    if not engine.config.has_api_key and not offline and not mock and os.getenv("GEMINI_API_KEY"):
+        # A key from before the move to Claude: building without AI would replace a sorted notebook's
+        # books with unsorted ones, so stop instead of guessing.
+        raise ConfigError(
+            "GEMINI_API_KEY is set, but Notebook Alchemy now uses Claude, and ANTHROPIC_API_KEY is not set. "
+            "Nothing was read or uploaded.",
+            hint="Add a Claude API key with `notebook-alchemy setup`, or add --offline to build the books "
+            "without AI.",
+        )
     upload = save_dir is None and not mock  # sample data is never uploaded
     if mock and save_dir is None:
         raise click.UsageError("Sample data is never uploaded: add --save DIR to see the books it makes.")
@@ -502,7 +517,7 @@ def run_pipeline(
         _confirm_first_upload(confirmed, yes)
     if mock:
         ui.warn(MOCK_NOTE, always=True)
-    if not engine.config.has_gemini_key and not offline and not mock:
+    if not engine.config.has_api_key and not offline and not mock:
         ui.warn(NO_KEY_WARNING)
 
     total = 3 if upload else 2
@@ -516,8 +531,6 @@ def run_pipeline(
             offline=offline,
             resort=resort,
             use_batch=not now,
-            watch=watch or 0,
-            confirm_watch=_confirm_watch(yes),
             progress=reporter,
         )
     _show_build(report, engine)
@@ -528,7 +541,7 @@ def run_pipeline(
     ui.success(f"Wrote {_plural(len(topics), 'topic book')} and an overview, {words:,} words in all.")
     for book in topics:
         ui.detail(f"  {esc(book.title)}: {book.words:,} words")
-    _show_gemini_cost(engine)
+    _show_ai_cost(engine)
 
     if save_dir is not None:
         paths = engine.save_books(report.books, save_dir)
@@ -538,7 +551,7 @@ def run_pipeline(
     if report.waiting:
         # Uploading now would replace the notebook's books with ones missing these videos.
         ui.warn(
-            f"{_plural(len(report.waiting), 'video')} still wait for Gemini, so nothing was uploaded and "
+            f"{_plural(len(report.waiting), 'video')} still wait for labels, so nothing was uploaded and "
             "the notebook is unchanged. Run the same command again to finish; the work done is kept.",
             always=True,
         )
@@ -570,30 +583,9 @@ def run_pipeline(
     _show_sync_result(title, synced)
 
 
-def _confirm_watch(yes: bool) -> Callable[[int, int, float], bool]:
-    """Show what --watch will cost before anything is paid, and ask unless --yes."""
-
-    def confirm(videos: int, seconds: int, usd: float) -> bool:
-        ui.info(
-            f"  Gemini will watch {_plural(videos, 'video')} ({seconds / 3600:.1f} hours of video), "
-            f"for about ${usd:.2f}."
-        )
-        if yes:
-            return True
-        if not _interactive():
-            ui.warn("Not watching: add --yes to accept the cost when not in a terminal.")
-            return False
-        return _ask("Do you want to continue")
-
-    return confirm
-
-
 def _show_build(report: BuildReport, engine: AlchemyEngine) -> None:
     videos = len(report.videos)
     ui.info(f"  {esc(report.channel)}: read {len(report.read)} of {_plural(videos, 'video')}")
-    if report.by_source.get("gemini-video"):
-        watched = _plural(report.by_source["gemini-video"], "video")
-        ui.info(f"  Gemini watched {watched} no caption route could read")
     for route, count in sorted(report.by_source.items()):
         ui.detail(f"  {route}: {count}")
     if report.used_ai:
@@ -647,9 +639,10 @@ def _show_sync_result(name: str, synced) -> None:
 @click.option("--limit", type=click.IntRange(min=1), help="Only look at the first N videos.")
 @tabs_option
 @click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real channel.")
+@click.option("--now", is_flag=True, help="Price standard calls instead of the half-price batch.")
 @verbose_option
 @handle_errors
-def dry_run(source: str | None, limit: int | None, tabs: tuple[str, ...], mock: bool) -> None:
+def dry_run(source: str | None, limit: int | None, tabs: tuple[str, ...], mock: bool, now: bool) -> None:
     """Preview the videos, the words already read, and the cost. Spends nothing, uploads nothing."""
     target = _source_or_mock(source, mock)
     engine = _engine()
@@ -657,19 +650,24 @@ def dry_run(source: str | None, limit: int | None, tabs: tuple[str, ...], mock: 
     channel, videos = engine.scan(target, limit=limit, tabs=tabs, mock=mock)
     if mock:
         ui.warn(MOCK_NOTE, always=True)
-    est = engine.estimate(videos, mock=mock)
+    est = engine.estimate(videos, mock=mock, batch=not now)
+    if engine.config.has_api_key and not mock:
+        _warn_unlisted_price(est.model)
     console = ui.console
     console.print(f"\n[bold]{esc(channel)}[/bold]")
     console.print(f"  {_plural(est.videos, 'video')}; words already read for {est.videos_known}")
     console.print(f"  About {est.words_estimated:,} words in all")
-    if engine.config.has_gemini_key and not mock:
+    if engine.config.has_api_key and not mock:
         left = est.videos - est.labelled
         console.print(
-            f"  Estimated Gemini cost: {_money(est.cost_usd)} for {_plural(left, 'video')} not labelled yet"
+            f"  Estimated AI cost: {_money(est.cost_usd)} for {_plural(left, 'video')} not labelled yet"
         )
-        ui.detail(f"  Model {esc(est.model)}; batch mode halves it when the key's project has billing.")
+        ui.detail(
+            f"  Model {esc(est.model)}; "
+            + ("standard price (--now)." if now else "half-price batch (add --now for standard calls).")
+        )
     else:
-        console.print("  Cost: free without Gemini (every video's words, sorted by title words)")
+        console.print("  Cost: free without AI (every video's words, sorted by title words)")
         if not mock:
             ui.warn(NO_KEY_WARNING)
     if not mock:
@@ -684,13 +682,13 @@ def dry_run(source: str | None, limit: int | None, tabs: tuple[str, ...], mock: 
 @verbose_option
 @handle_errors
 def status(profile: str | None) -> None:
-    """Show whether everything is ready: sign-in and Gemini key."""
+    """Show whether everything is ready: sign-in and Claude API key."""
     engine = _engine(profile)
     facts = engine.status()
     identity = engine.client.upload_account()
     has_cli = not str(facts["notebooklm_cli"]).startswith("not found")
     has_session = not str(facts["session_file"]).startswith("none")
-    has_key = facts["gemini_api_key"] == "set"
+    has_key = facts["api_key"] == "set"
     console = ui.console
 
     def line(ok: bool, text: str) -> None:
@@ -716,11 +714,11 @@ def status(profile: str | None) -> None:
                 f"Could not read whether the sign-in is refreshed in the background: {esc(exc.message)}",
             )
     if has_key:
-        line(True, "AI sorting is on (a Gemini API key is set).")
+        line(True, "AI sorting is on (a Claude API key is set).")
     else:
         line(
             False,
-            "AI sorting is off (no Gemini API key): the books hold every video's words, sorted by title.",
+            "AI sorting is off (no Claude API key): the books hold every video's words, sorted by title.",
         )
 
     if ui.UiState.verbose:
@@ -733,8 +731,8 @@ def status(profile: str | None) -> None:
             (None, "NotebookLM profile", esc(facts["notebooklm_profile"])),
             (has_session, "Sign-in file", esc(facts["session_file"])),
             (bool(identity.email) if has_session else None, "Upload account", _who(identity)),
-            (has_key, "Gemini API key", esc(facts["gemini_api_key"])),
-            (None, "Gemini model", esc(facts["gemini_model"])),
+            (has_key, "Claude API key", esc(facts["api_key"])),
+            (None, "Model", esc(facts["model"])),
             (None, "Working files", esc(facts["cache_dir"])),
             (None, "Parallel downloads", esc(facts["max_concurrency"])),
             (None, "Environment", esc(facts["environment"])),
@@ -1066,7 +1064,7 @@ def keep_signed_in(off: bool, profile: str | None) -> None:
 
 
 def _prompt_for_key() -> str:
-    """A Gemini API key typed or pasted (hidden), or "" when skipped."""
+    """A Claude API key typed or pasted (hidden), or "" when skipped."""
     while True:
         entered = click.prompt(
             "  Paste a key, or press Enter to skip", default="", show_default=False, hide_input=True
@@ -1095,7 +1093,7 @@ def guided(ctx: click.Context) -> None:
         "Three steps; press Ctrl+C at any time to stop.\n"
     )
     # Read before .env is loaded: a key already in the process environment wins over .env.
-    key_from_process = bool(os.getenv("GEMINI_API_KEY"))
+    key_from_process = bool(os.getenv("ANTHROPIC_API_KEY"))
     config = _config()
 
     ui.step(1, 3, "Sign in to NotebookLM")
@@ -1108,28 +1106,29 @@ def guided(ctx: click.Context) -> None:
     ui.success(f"Signed in as {_who(engine.client.upload_account())}.")
 
     ui.step(2, 3, "Sorting into topics (optional)")
-    if config.has_gemini_key:
-        ui.success("AI sorting is on: Gemini sorts each point into a topic and section.")
+    if config.has_api_key:
+        ui.success("AI sorting is on: Claude sorts each point into a topic and section.")
     else:
         ui.info(
-            "  Without a key, the books hold every video's words, grouped by title. With a free Gemini\n"
-            "  API key, Gemini sorts each point into topics and sections, and drops what is out of date."
+            "  Without a key, the books hold every video's words, grouped by title. With a Claude API\n"
+            "  key, Claude sorts each point into topics and sections, and drops what is out of date.\n"
+            "  The API is paid: labelling costs a fraction of a cent per video."
         )
-        if _ask("Do you want to add a free Gemini API key now", default=False):
-            ui.info(f"  Opening {KEY_URL} - sign in, choose Create API key, and copy it.")
+        if _ask("Do you want to add a Claude API key now", default=False):
+            ui.info(f"  Opening {KEY_URL} - sign in, choose Create key, and copy it.")
             click.launch(KEY_URL)
             entered = _prompt_for_key()
             if entered:
-                update_dotenv({"GEMINI_API_KEY": entered}, Path(".env"))
-                os.environ["GEMINI_API_KEY"] = entered  # this process; .env keeps it for next time
+                update_dotenv({"ANTHROPIC_API_KEY": entered}, Path(".env"))
+                os.environ["ANTHROPIC_API_KEY"] = entered  # this process; .env keeps it for next time
                 config = _config()
                 ui.success("Key saved. AI sorting is on.")
                 if key_from_process:
                     ui.warn(
-                        "GEMINI_API_KEY is also set in your environment, and that value wins over .env "
+                        "ANTHROPIC_API_KEY is also set in your environment, and that value wins over .env "
                         "in later runs. Remove it from the environment to use the key you entered."
                     )
-        if not config.has_gemini_key:
+        if not config.has_api_key:
             ui.info("  Going on without AI sorting. Run `notebook-alchemy setup` to add a key later.")
 
     ui.step(3, 3, "Choose a channel")
@@ -1138,7 +1137,7 @@ def guided(ctx: click.Context) -> None:
         if _looks_like_youtube(source):
             break
         ui.warn("That does not look like a YouTube link (for example https://www.youtube.com/@name).")
-    ctx.invoke(run_pipeline, source=source, offline=not config.has_gemini_key)
+    ctx.invoke(run_pipeline, source=source, offline=not config.has_api_key)
     ui.next_command("add new videos when the channel posts", f"notebook-alchemy run {source}")
 
 
@@ -1151,7 +1150,7 @@ def guided(ctx: click.Context) -> None:
 @verbose_option
 @handle_errors
 def setup() -> None:
-    """Guided setup: Gemini API key and the Google account to upload to."""
+    """Guided setup: Claude API key and the Google account to upload to."""
     if not _interactive():
         raise click.UsageError("setup asks questions, so run it in a terminal.")
     env_file = Path(".env")  # the file AlchemyConfig.from_env reads
@@ -1178,24 +1177,24 @@ def setup() -> None:
 
     ui.step(1, 2, "AI sorting (optional)")
     ui.info(
-        "  Gemini picks what is worth keeping and sorts it into topics. Without a key, every video's "
+        "  Claude picks what is worth keeping and sorts it into topics. Without a key, every video's "
         "words are kept, sorted by title."
     )
     ui.info(
-        "  " + ("A Gemini API key is saved." if config.has_gemini_key else "No Gemini API key is saved yet.")
+        "  " + ("A Claude API key is saved." if config.has_api_key else "No Claude API key is saved yet.")
     )
-    ui.info(f"  Get a free key at {KEY_URL}")
+    ui.info(f"  Make a key at {KEY_URL}")
     ui.detail(f"  {esc(KEY_BILLING_NOTE)}")
     entered = _prompt_for_key()
     if entered:
-        save("GEMINI_API_KEY", entered)
+        save("ANTHROPIC_API_KEY", entered)
         ui.success("Key saved.")
         ui.detail(f"  Saved to {esc(_short(env_file))}; the key is never shown.")
 
     ui.step(2, 2, "Where to upload")
     ui.info(
-        "  Choose the Google account your notebooks go to. It can differ from the account that made "
-        "the Gemini key."
+        "  Choose the Google account your notebooks go to. It can differ from the account that owns "
+        "the Claude API key."
     )
     while True:
         try:
@@ -1245,7 +1244,7 @@ def setup() -> None:
         ui.next_command("sign in", f"notebook-alchemy login --profile {profile}")
     else:
         ui.info(f"  Uploads go to {_who(identity)}.")
-    ui.info("  AI sorting is " + ("on." if entered or config.has_gemini_key else "off (no Gemini key)."))
+    ui.info("  AI sorting is " + ("on." if entered or config.has_api_key else "off (no Claude API key)."))
     ui.detail(f"  Saved {esc(', '.join(saved))} to {esc(_short(env_file))}.")
     ui.next_command("preview a channel", "notebook-alchemy dry-run <youtube-url>")
 
@@ -1296,7 +1295,7 @@ def _state_counts(files: dict[str, int]) -> str:
 def export_state_command(file: Path) -> None:
     """Save the captions, labels and sorting to FILE, to carry on from another computer.
 
-    Sign-ins, the Gemini key and the upload confirmation are not included.
+    Sign-ins, the Claude API key and the upload confirmation are not included.
     """
     summary = export_state(AlchemyEngine(_config()), file)
     for item in summary.skipped:
@@ -1425,10 +1424,12 @@ def clean_pipeline(
         library = engine.home / "library"
         for f in sorted(library.glob("*.json")) if library.is_dir() else []:
             (targets.append(("labels", f)) if isinstance(_json(f), dict) else skipped.append(str(f)))
-        if (engine.home / "batch.json").is_file():  # a batch still running at Google is forgotten too
-            targets.append(("labels", engine.home / "batch.json"))
-        if engine.watched_path().is_file():  # videos Gemini watched without words: asked again
-            targets.append(("labels", engine.watched_path()))
+        batches = engine.home / "batches"  # labelling batches still running are forgotten too
+        for f in sorted(batches.glob("*.json")) if batches.is_dir() else []:
+            targets.append(("labels", f))
+        for name in ("batch.json", "watched.json"):  # left by 0.3 previews
+            if (engine.home / name).is_file():
+                targets.append(("labels", engine.home / name))
     if do_records:
         records_dir = engine.sync_records_dir()
         for f in sorted(records_dir.glob("*.json")) if records_dir.is_dir() else []:
@@ -1511,7 +1512,7 @@ def run_automated_test() -> None:
 
     with tempfile.TemporaryDirectory(prefix="notebook-alchemy-test-") as tmp:
         tmp_path = Path(tmp)
-        engine = AlchemyEngine(AlchemyConfig(env="test", cache_dir=tmp_path / "cache", gemini_api_key=""))
+        engine = AlchemyEngine(AlchemyConfig(env="test", cache_dir=tmp_path / "cache", api_key=""))
         try:
             report = engine.build("sample", mock=True)
             record(

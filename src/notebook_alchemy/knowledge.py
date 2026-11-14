@@ -1,4 +1,4 @@
-"""Labelling: Gemini reads each video's numbered chunks and returns labels, never rewritten text.
+"""Labelling: Claude reads each video's numbered chunks and returns labels, never rewritten text.
 
 For every run of chunks the model says keep or drop; for kept runs it adds a short headline, the
 kind of information (how long it stays true) and, only when a passage depends on context, a short
@@ -22,9 +22,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .claude import ClaudeResult
 from .cleanup import CHUNKING_VERSION, Chunk, is_punctuated
-from .errors import GeminiError
-from .gemini import GeminiResult
+from .errors import ClaudeError
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +39,43 @@ NOTE_MAX_WORDS = 25
 HEADLINE_MAX_WORDS = 14
 LABEL_MAX_OUTPUT_TOKENS = 16384
 LABEL_TIMEOUT = 300.0  # seconds; an answer that carries punctuated words is long
+# What a paid answer that cannot be used (refused, cut off) stands for: no labels, so every chunk the
+# model saw is kept, unlabelled. Saved like any answer, so the request is not paid for again.
+NO_LABELS = '{"segments": []}'
 
 SYSTEM = (
     "You label transcripts for a study library. You never rewrite or summarise the speaker's words; "
     "you only decide which numbered chunks are worth keeping, group them into points, and describe each "
     "point. Answer with JSON only."
 )
+
+
+def label_schema(*, punctuate: bool = False) -> dict[str, Any]:
+    """The JSON shape of a label answer (structured outputs: every object closed, every field
+    required). A dropped segment's headline and note are empty strings."""
+    fields: dict[str, Any] = {
+        "from": {"type": "integer"},
+        "to": {"type": "integer"},
+        "keep": {"type": "boolean"},
+        "headline": {"type": "string"},
+        "kind": {"type": "string", "enum": list(KINDS)},
+        "note": {"type": "string"},
+    }
+    if punctuate:
+        fields["text"] = {"type": "string"}
+    segment = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(fields),
+        "properties": fields,
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["segments"],
+        "properties": {"segments": {"type": "array", "items": segment}},
+    }
+
 
 RULES = """Keep (in the speaker's words):
 - step-by-step procedures and how-tos;
@@ -286,18 +317,6 @@ def windows(chunks: list[Chunk], limit: int = WINDOW_WORDS) -> list[list[Chunk]]
     return out
 
 
-def request_body(prompt: str) -> dict[str, Any]:
-    """A generateContent body for a label request (shared by direct and batch calls)."""
-    return {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "systemInstruction": {"parts": [{"text": SYSTEM}]},
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "maxOutputTokens": LABEL_MAX_OUTPUT_TOKENS,
-        },
-    }
-
-
 # --- the labelling run -----------------------------------------------------------------------------
 
 
@@ -315,23 +334,22 @@ class VideoText:
 @dataclass
 class LabelRun:
     labels: dict[str, VideoLabels] = field(default_factory=dict)
-    waiting: list[str] = field(default_factory=list)  # videos left for the next run (quota, batch)
+    waiting: list[str] = field(default_factory=list)  # videos left for the next run (a limit, a batch)
     notices: list[str] = field(default_factory=list)
     labelled_now: int = 0  # videos that cost a request this run (the rest came from the cache)
 
 
 class Labeler:
-    """Labels videos once: from the cache, else in a Gemini batch (half price), else directly.
+    """Labels videos once: from the cache, else in a batch (half price), else directly.
 
-    A project without billing cannot use batch mode; Google answers FAILED_PRECONDITION and the run
-    uses standard calls, saying so. A used-up daily quota stops the run cleanly: what was labelled
-    is kept and the rest waits for the next run. A batch still running after `batch_wait` seconds is
+    A key, credit or rate limit that stops every request stops the run cleanly: what was labelled is
+    kept and the rest waits for the next run. A batch still running after `batch_wait` seconds is
     remembered in `state_path`, and the next run collects it.
     """
 
     def __init__(
         self,
-        gemini: Any,
+        ai: Any,
         store: KnowledgeStore,
         today: str,
         *,
@@ -343,23 +361,26 @@ class Labeler:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self.gemini, self.store, self.today = gemini, store, today
+        self.ai, self.store, self.today = ai, store, today
         self.state_path = state_path
         self.use_batch = use_batch
         self.batch_wait, self.poll_every, self.workers = batch_wait, poll_every, workers
         self._sleep, self._clock = sleep, clock
+        self._unusable: list[str] = []  # why each paid answer that could not be used was set aside
+        self._lock = threading.Lock()
 
     # -- public --
 
     def run(self, videos: list[VideoText], progress: Callable[[int, int], None] | None = None) -> LabelRun:
         out = LabelRun()
+        self._unusable = []
         pending: list[VideoText] = []
         for video in videos:
             cached = self.store.get(video.video_id, self._key(video))
             if cached is not None:
                 out.labels[video.video_id] = cached
             elif not video.chunks:
-                out.labels[video.video_id] = VideoLabels(video.video_id, self._key(video), self.gemini.model)
+                out.labels[video.video_id] = VideoLabels(video.video_id, self._key(video), self.ai.model)
             else:
                 pending.append(video)
         if not pending:
@@ -367,14 +388,14 @@ class Labeler:
         answers: dict[str, str] = {}
         if self.use_batch:
             done = self._run_batch(pending, out)
-            if done is None:  # still running at Google: collected next run
+            if done is None:  # still running: collected next run
                 out.waiting = [v.video_id for v in pending]
                 return out
             answers.update(done)
-        direct = [v for v in pending if not all(k in answers for k, _ in self._requests(v))]
+        direct = [v for v in pending if not all(k in answers for k, _p, _s in self._requests(v))]
         answers.update(self._run_direct(direct, out))
         for count, video in enumerate(pending, 1):
-            keys = [k for k, _ in self._requests(video)]
+            keys = [k for k, _p, _s in self._requests(video)]
             if not all(k in answers for k in keys):
                 out.waiting.append(video.video_id)
                 continue
@@ -387,18 +408,26 @@ class Labeler:
             out.labelled_now += 1
             if progress:
                 progress(count, len(pending))
+        if self._unusable:
+            out.notices.append(
+                f"{len(self._unusable)} labelling answers could not be used ({self._unusable[0]}); those "
+                "parts of the videos keep every point, unlabelled, and are not asked about again."
+            )
         return out
 
     # -- requests --
 
     def _key(self, video: VideoText) -> str:
-        return label_key(video.video_id, video.transcript, self.gemini.model)
+        return label_key(video.video_id, video.transcript, self.ai.model)
 
-    def _requests(self, video: VideoText, *, keep_when_unsure: bool = False) -> list[tuple[str, str]]:
-        """(request key, prompt) for each window of the video. Unpunctuated captions come back
-        punctuated too, in smaller windows, because the answer then carries the words."""
+    def _requests(
+        self, video: VideoText, *, keep_when_unsure: bool = False
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        """(request key, prompt, answer schema) for each window of the video. Unpunctuated captions
+        come back punctuated too, in smaller windows, because the answer then carries the words."""
         punctuate = not is_punctuated(video.transcript)
         size = PUNCTUATE_WINDOW_WORDS if punctuate else WINDOW_WORDS
+        schema = label_schema(punctuate=punctuate)
         return [
             (
                 f"{self._key(video)}#{i}",  # tied to the transcript, so a changed one asks again
@@ -410,6 +439,7 @@ class Labeler:
                     keep_when_unsure=keep_when_unsure,
                     punctuate=punctuate,
                 ),
+                schema,
             )
             for i, window in enumerate(windows(video.chunks, size))
         ]
@@ -431,36 +461,45 @@ class Labeler:
         labels = VideoLabels(
             video.video_id,
             self._key(video),
-            self.gemini.model,
+            self.ai.model,
             segments,
             invalid,
             relabelled,
             sorted(numbers),
         )
         if not relabelled and labels.kept_share(sorted(numbers)) < LOW_KEEP_SHARE:
-            retry = self._direct_texts([p for _k, p in self._requests(video, keep_when_unsure=True)])
-            # A retry that failed (a quota, a bad answer) leaves the video waiting; the low-keep labels
-            # are not saved as if they were final.
+            retry = self._direct_texts([(p, s) for _k, p, s in self._requests(video, keep_when_unsure=True)])
+            # A retry that got no answer (a limit, a network error) leaves the video waiting; the
+            # low-keep labels are not saved as if they were final.
             return self._assemble(video, retry, relabelled=True) if retry is not None else None
         return labels
 
     # -- direct calls --
 
-    def _call(self, prompt: str) -> str:
-        result = self.gemini.generate(
-            prompt,
-            system=SYSTEM,
-            json_mode=True,
-            max_output_tokens=LABEL_MAX_OUTPUT_TOKENS,
-            allow_fallback=False,
-            timeout=LABEL_TIMEOUT,
-        )
-        return result.text
-
-    def _direct_texts(self, prompts: list[str]) -> list[str] | None:
+    def _call(self, prompt: str, schema: dict[str, Any]) -> str:
         try:
-            return [self._call(p) for p in prompts]
-        except GeminiError as exc:
+            result = self.ai.generate(
+                prompt,
+                schema=schema,
+                system=SYSTEM,
+                max_tokens=LABEL_MAX_OUTPUT_TOKENS,
+                timeout=LABEL_TIMEOUT,
+            )
+        except ClaudeError as exc:
+            if not exc.unusable:
+                raise
+            return self._set_aside(exc)
+        return str(result.text)
+
+    def _set_aside(self, exc: ClaudeError) -> str:
+        with self._lock:
+            self._unusable.append(exc.detail)
+        return NO_LABELS
+
+    def _direct_texts(self, prompts: list[tuple[str, dict[str, Any]]]) -> list[str] | None:
+        try:
+            return [self._call(p, s) for p, s in prompts]
+        except ClaudeError as exc:
             logger.info("Relabelling failed: %s", exc.detail)
             return None
 
@@ -468,17 +507,20 @@ class Labeler:
         answers: dict[str, str] = {}
         stop = threading.Event()
         failures: list[str] = []
+        stopped: list[ClaudeError] = []
         lock = threading.Lock()
 
-        def one(item: tuple[str, str]) -> None:
-            key, prompt = item
+        def one(item: tuple[str, str, dict[str, Any]]) -> None:
+            key, prompt, schema = item
             if stop.is_set():
                 return
             try:
-                text = self._call(prompt)
-            except GeminiError as exc:
-                if exc.quota:
+                text = self._call(prompt, schema)
+            except ClaudeError as exc:
+                if exc.stop_run:
                     stop.set()
+                    with lock:
+                        stopped.append(exc)
                 with lock:
                     failures.append(exc.detail)
                 return
@@ -488,10 +530,10 @@ class Labeler:
         items = [req for v in videos for req in self._requests(v)]
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             list(pool.map(one, items))
-        if stop.is_set():
+        if stopped:
+            first = stopped[0]
             out.notices.append(
-                "Gemini's daily request quota is used up, so some videos wait for the next run "
-                "(enable billing on the key's project to finish in one run)."
+                f"{first.message} Some videos wait for the next run. {first.hint or ''}".strip()
             )
         elif failures:
             out.notices.append(
@@ -502,50 +544,75 @@ class Labeler:
     # -- batch --
 
     def _run_batch(self, videos: list[VideoText], out: LabelRun) -> dict[str, str] | None:
-        """Answers by request key, {} when batch mode cannot be used, None when still running."""
-        requests = {key: request_body(prompt) for v in videos for key, prompt in self._requests(v)}
+        """Answers by request key, {} when the batch could not be used, None when still running."""
+        requests = {key: (prompt, schema) for v in videos for key, prompt, schema in self._requests(v)}
         state = self._load_state()
-        job = state.get("job") if state.get("model") == self.gemini.model else None
+        job = state.get("job") if state.get("model") == self.ai.model else None
         if job and not set(state.get("keys", [])) <= set(requests):
-            # A job for other videos or changed transcripts: its answers cannot be used. Said once.
-            out.notices.append(
-                "An earlier Gemini batch was for other videos or older transcripts; a new one was started."
-            )
+            # A batch for other videos or changed transcripts: its answers cannot be used, so it is
+            # stopped instead of left to bill. Said once.
+            try:
+                self.ai.cancel_batch(job)
+                out.notices.append(
+                    "An earlier labelling batch was for other videos or older transcripts; it was stopped "
+                    "and a new one was started."
+                )
+            except ClaudeError as exc:
+                if exc.stop_run:
+                    raise
+                out.notices.append(
+                    f"An earlier labelling batch was for other videos or older transcripts and could not be "
+                    f"stopped ({exc.detail}); a new one was started."
+                )
             job = None
         if not job:
+            keys = list(requests)
             try:
-                keys = list(requests)
-                job = self.gemini.submit_batch([(k, requests[k]) for k in keys], "notebook-alchemy labels")
-            except GeminiError as exc:
-                if self.gemini.batch_refused(exc):
-                    out.notices.append(
-                        "Gemini batch mode (half price) needs billing on the key's Google Cloud project, "
-                        "so standard calls were used."
-                    )
-                else:
-                    out.notices.append(f"Gemini batch mode failed ({exc.detail}); standard calls were used.")
+                job = self.ai.submit_batch([(k, *requests[k], SYSTEM, LABEL_MAX_OUTPUT_TOKENS) for k in keys])
+            except ClaudeError as exc:
+                if exc.stop_run:
+                    raise
+                out.notices.append(
+                    f"The half-price batch could not be started ({exc.detail}); standard calls were used."
+                )
                 return {}
-            state = {"job": job, "keys": keys, "model": self.gemini.model}
+            state = {"job": job, "keys": keys, "model": self.ai.model}
             self._save_state(state)
         deadline = self._clock() + self.batch_wait
         while True:
             try:
-                status, results = self.gemini.batch_results(job, state["keys"])
-            except GeminiError as exc:
+                status, results = self.ai.batch_results(job, state["keys"])
+            except ClaudeError as exc:
+                if exc.stop_run:
+                    raise
                 out.notices.append(
-                    f"Could not read the Gemini batch ({exc.detail}); it is checked again next run."
+                    f"Could not read the labelling batch ({exc.detail}); it is checked again next run."
                 )
                 return None
             if results is not None:
                 self._save_state({})
-                return {k: r.text for k, r in results.items() if isinstance(r, GeminiResult)}
-            if any(s in status for s in ("FAILED", "CANCELLED", "EXPIRED")):
-                self._save_state({})
-                out.notices.append(f"The Gemini batch ended as {status}; standard calls were used.")
-                return {}
+                if status == "gone":
+                    out.notices.append(
+                        "The earlier labelling batch is no longer available; its videos are asked again."
+                    )
+                answers: dict[str, str] = {}
+                failed: list[ClaudeError] = []
+                for key, result in results.items():
+                    if isinstance(result, ClaudeResult):
+                        answers[key] = result.text
+                    elif result.unusable:  # answered and billed: not asked again
+                        answers[key] = self._set_aside(result)
+                    else:
+                        failed.append(result)
+                if failed:
+                    out.notices.append(
+                        f"{len(failed)} batch requests were not answered ({failed[0].detail}); "
+                        "they were asked again directly."
+                    )
+                return answers
             if self._clock() >= deadline:
                 out.notices.append(
-                    "Gemini is still working on the batch; run the same command again to continue."
+                    "The labelling batch is still running; run the same command again to continue."
                 )
                 return None
             self._sleep(self.poll_every)

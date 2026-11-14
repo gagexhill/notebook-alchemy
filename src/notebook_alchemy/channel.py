@@ -329,7 +329,7 @@ class TranscriptResult:
     source: str = "none"  # local | cache | youtube | subtitles | unavailable | blocked | skipped
     detail: str = ""
     published: str = ""  # YYYY-MM-DD when a source reported the exact upload date
-    method: str = ""  # for cached words: how they were first got ("gemini-video" when Gemini watched)
+    method: str = ""  # for cached words: how they were first got
 
 
 class SubtitlesBlocked(Exception):

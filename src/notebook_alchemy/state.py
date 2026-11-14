@@ -4,8 +4,8 @@ The working files are what a rerun builds on: captions, the AI's labels and sort
 section layout, the upload records and which notebook belongs to which channel. Copying them lets
 another computer carry on without reading or paying for anything again.
 
-Left out on purpose: sign-in sessions, the Gemini key (`.env`), the upload confirmation (it belongs
-to an account, so the other computer confirms again) and a Gemini batch still running.
+Left out on purpose: sign-in sessions, the Claude API key (`.env`), the upload confirmation (it
+belongs to an account, so the other computer confirms again) and a labelling batch still running.
 """
 
 from __future__ import annotations

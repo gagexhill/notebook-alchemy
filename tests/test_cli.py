@@ -365,16 +365,16 @@ def test_status_shows_account_and_key_state_but_never_the_key(
     profile_dir = isolated_environment.home / ".notebooklm" / "profiles" / "personal"
     profile_dir.mkdir(parents=True)
     (profile_dir / "storage_state.json").write_text("{}", encoding="utf-8")
-    key = "AIzaSyTEST_ONLY_not_a_real_key_000"
-    monkeypatch.setenv("GEMINI_API_KEY", key)
+    key = "sk-ant-TEST-ONLY-not-a-real-key-000"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", key)
     monkeypatch.setattr(NotebookLMClient, "cli_version", lambda self: "0.8.6")
     result = runner.invoke(cli, ["status", "--profile", "personal"])
     assert result.exit_code == 0, result.output
     assert "[owner@example.test] (profile personal)" in result.output
     assert "AI sorting is on" in result.output
-    assert "subscription plan" not in result.output  # billing detail is shown with -v
+    assert "spend limit caps" not in result.output  # billing detail is shown with -v
     detailed = runner.invoke(cli, ["status", "--profile", "personal", "-v"])
-    assert detailed.exit_code == 0 and "subscription plan" in detailed.output
+    assert detailed.exit_code == 0 and "spend limit caps" in " ".join(detailed.output.split())
     for out in (result.output, detailed.output):
         assert key not in out and key[:10] not in out
 
@@ -456,21 +456,21 @@ def test_setup_writes_env_without_echoing_the_key_and_reruns(
     monkeypatch.setattr(cli_module, "_interactive", lambda: True)
     env = isolated_environment.work / ".env"
     env.write_text("# keep me\nALCHEMY_LOG_LEVEL=INFO\n", encoding="utf-8")
-    key = "AIzaSyTEST_ONLY_setup_key_00000000"
+    key = "sk-ant-TEST-ONLY-setup-key-0000000"
     # key, profile, sign-in choice, vault
     result = runner.invoke(cli, ["setup"], input=f"{key}\npersonal\nkeep\n")
     assert result.exit_code == 0, result.output
     assert key not in result.output and "Setup is complete" in result.output
     text = env.read_text(encoding="utf-8")
     assert text.startswith("# keep me\nALCHEMY_LOG_LEVEL=INFO\n")
-    assert f"GEMINI_API_KEY={key}" in text and "ALCHEMY_NOTEBOOKLM_PROFILE=personal" in text
+    assert f"ANTHROPIC_API_KEY={key}" in text and "ALCHEMY_NOTEBOOKLM_PROFILE=personal" in text
     assert "ALCHEMY_VAULT_PATH" not in text  # nothing is saved locally any more
 
-    for name in ("GEMINI_API_KEY", "ALCHEMY_NOTEBOOKLM_PROFILE"):
+    for name in ("ANTHROPIC_API_KEY", "ALCHEMY_NOTEBOOKLM_PROFILE"):
         os.environ.pop(name, None)  # loaded into this process by the first run
     rerun = runner.invoke(cli, ["setup"], input="\n\nkeep\n")  # Enter keeps everything
     assert rerun.exit_code == 0, rerun.output
-    assert "A Gemini API key is saved" in rerun.output and key not in rerun.output
+    assert "A Claude API key is saved" in rerun.output and key not in rerun.output
     assert env.read_text(encoding="utf-8") == text
 
 
@@ -495,7 +495,7 @@ def test_setup_rejects_a_bad_key_and_signs_in_with_cookies(
         ["notebooklm", "--profile", "default", "login", "--browser-cookies", "edge", "--account", ACCOUNT]
     ]
     text = (isolated_environment.work / ".env").read_text(encoding="utf-8")
-    assert "GEMINI_API_KEY" not in text and "ALCHEMY_NOTEBOOKLM_PROFILE=default" in text
+    assert "ANTHROPIC_API_KEY" not in text and "ALCHEMY_NOTEBOOKLM_PROFILE=default" in text
 
 
 # --- review fixes ------------------------------------------------------------------------------------
@@ -531,7 +531,7 @@ def test_setup_warns_when_the_environment_overrides_what_it_writes(
     result = runner.invoke(cli, ["setup"], input="\npersonal\nkeep\n")
     assert result.exit_code == 0, result.output
     assert "ALCHEMY_NOTEBOOKLM_PROFILE is also set in your environment" in result.output
-    assert "GEMINI_API_KEY is also set" not in result.output
+    assert "ANTHROPIC_API_KEY is also set" not in result.output
 
 
 def test_setup_repairs_a_bad_profile_in_env(
@@ -580,7 +580,7 @@ def test_tabs_option_rejects_unknown_tabs(runner: CliRunner) -> None:
 def test_dry_run_without_a_key_says_so(runner: CliRunner, fake_channel) -> None:
     fake_channel("Build a REST API", "CSS grid tricks")
     result = runner.invoke(cli, ["dry-run", "@my"])
-    assert result.exit_code == 0 and "No Gemini API key is set" in " ".join(result.output.split())
+    assert result.exit_code == 0 and "No Claude API key is set" in " ".join(result.output.split())
 
 
 def test_login_asks_before_replacing_another_account(
@@ -676,7 +676,7 @@ def test_dry_run_mock_is_labelled_sample(runner: CliRunner) -> None:
     result = runner.invoke(cli, ["dry-run", "--mock"])
     assert result.exit_code == 0
     flat = " ".join(result.output.split())
-    assert "sample data" in flat and "36 videos" in flat and "free without Gemini" in flat
+    assert "sample data" in flat and "36 videos" in flat and "free without AI" in flat
     assert "To build the books" not in flat  # nothing to run next on sample data
 
 
@@ -800,13 +800,13 @@ def test_build_notices_are_shown_without_v(
     def with_notice(self, *a, **kw):
         report = real(self, *a, **kw)
         report.notices.append(
-            "Gemini's daily request quota is used up, so some videos wait for the next run."
+            "The Claude API rate limit is still reached after waiting. Some videos wait for the next run."
         )
         return report
 
     monkeypatch.setattr(AlchemyEngine, "build", with_notice)
     flat = " ".join(runner.invoke(cli, [*RUN, "--save", "b"]).output.split())
-    assert "Warning: Gemini's daily request quota is used up" in flat
+    assert "Warning: The Claude API rate limit is still reached" in flat
 
 
 def test_clean_ignores_folders_that_are_not_old_vault_output(runner: CliRunner, isolated_environment) -> None:
@@ -1139,7 +1139,7 @@ def test_run_says_when_the_plan_is_unknown(
     assert "NotebookLM plan: unknown" in " ".join(detailed.output.split())  # never guessed
 
 
-def test_nothing_is_uploaded_while_videos_wait_for_gemini(
+def test_nothing_is_uploaded_while_videos_wait_for_labels(
     runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake_channel("a b c d")
@@ -1154,7 +1154,7 @@ def test_nothing_is_uploaded_while_videos_wait_for_gemini(
     monkeypatch.setattr(AlchemyEngine, "build", waiting)
     result = runner.invoke(cli, ["-q", *RUN, "-N", "chan", "--yes"])
     assert result.exit_code == 0 and uploads == []
-    assert "still wait for Gemini, so nothing was uploaded" in " ".join(result.output.split())  # even with -q
+    assert "still wait for labels, so nothing was uploaded" in " ".join(result.output.split())  # even with -q
 
 
 @pytest.mark.parametrize("flag", [["-n", "x"], ["--sync"], ["--write"]])
@@ -1163,13 +1163,18 @@ def test_the_other_removed_run_flags_say_what_replaced_them(runner: CliRunner, f
     assert result.exit_code == 2 and "was removed" in result.output
 
 
-def test_clean_records_keeps_a_running_batch_job(runner: CliRunner, isolated_environment) -> None:
+def test_clean_records_keeps_a_running_batch_and_clean_labels_forgets_it(
+    runner: CliRunner, isolated_environment
+) -> None:
     home = isolated_environment.home / ".notebook-alchemy"
-    home.mkdir(parents=True, exist_ok=True)
-    (home / "batch.json").write_text('{"job": "batches/1"}', encoding="utf-8")
+    (home / "batches").mkdir(parents=True, exist_ok=True)
+    batch = home / "batches" / "Chan.json"
+    batch.write_text('{"job": "msgbatch_test"}', encoding="utf-8")
     (home / "notebooks.json").write_text('{"@chan": "nb-1"}', encoding="utf-8")
     assert runner.invoke(cli, ["clean", "--records", "--yes"]).exit_code == 0
-    assert (home / "batch.json").exists() and not (home / "notebooks.json").exists()
+    assert batch.exists() and not (home / "notebooks.json").exists()
+    assert runner.invoke(cli, ["clean", "--labels", "--yes"]).exit_code == 0
+    assert not batch.exists()
 
 
 def test_setup_without_a_sign_in_says_so(
@@ -1225,18 +1230,18 @@ def test_the_guided_run_needs_only_a_channel_link_when_signed_in(
     assert "keep this sign-in fresh" not in flat and not isolated_environment.scheduler.tasks
 
 
-def test_the_guided_run_can_add_a_gemini_key(
+def test_the_guided_run_can_add_a_claude_api_key(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
 ) -> None:
     _guided(monkeypatch, signed_in=True)
     runs = _recorded_run(monkeypatch)
     opened: list[str] = []
     monkeypatch.setattr(click, "launch", lambda url, **kw: opened.append(url))
-    key = "AIzaSyTEST-not-a-real-key-000"
+    key = "sk-ant-TEST-ONLY-not-a-real-key-001"
     result = runner.invoke(cli, [], input=f"y\n{key}\nhttps://www.youtube.com/@kizzyparks\n")
     assert result.exit_code == 0, result.output
-    assert opened == ["https://aistudio.google.com/apikey"] and key not in result.output
-    assert f"GEMINI_API_KEY={key}" in (isolated_environment.work / ".env").read_text(encoding="utf-8")
+    assert opened == ["https://platform.claude.com/settings/keys"] and key not in result.output
+    assert f"ANTHROPIC_API_KEY={key}" in (isolated_environment.work / ".env").read_text(encoding="utf-8")
     assert runs == [{"source": "https://www.youtube.com/@kizzyparks", "offline": False}]
 
 
@@ -1255,16 +1260,11 @@ def test_the_guided_run_builds_and_uploads_for_real(
     _guided(monkeypatch, signed_in=True)
     fake_channel("Build a REST API", "CSS grid tricks")
     uploads = _record_uploads(monkeypatch)
-    # n: no Gemini key; the channel; y: the upload account; Enter: the notebook name
+    # n: no Claude API key; the channel; y: the upload account; Enter: the notebook name
     result = runner.invoke(cli, [], input="n\n@my\ny\n\n")
     assert result.exit_code == 0, result.output
     assert len(uploads) == 1 and "Created notebook" in result.output
     assert "does not look like a YouTube link" not in result.output  # every answer went where meant
-
-
-def test_watch_cannot_be_combined_with_offline(runner: CliRunner) -> None:
-    result = runner.invoke(cli, ["run", "@my", "--offline", "--watch", "3"])
-    assert result.exit_code == 2 and "--watch uses Gemini" in result.output
 
 
 def test_keep_signed_in_is_refused_with_a_session_file(
@@ -1279,19 +1279,14 @@ def test_keep_signed_in_is_refused_with_a_session_file(
     assert not isolated_environment.scheduler.tasks
 
 
-def test_the_watch_cost_is_shown_and_needs_yes_outside_a_terminal(capsys) -> None:
-    assert cli_module._confirm_watch(yes=True)(3, 5400, 0.42)
-    assert not cli_module._confirm_watch(yes=False)(3, 5400, 0.42)  # not a terminal, no --yes
-
-
 def test_the_guided_run_warns_when_the_environment_key_would_win(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
 ) -> None:
     _guided(monkeypatch, signed_in=True)
     _recorded_run(monkeypatch)
     monkeypatch.setattr(click, "launch", lambda url, **kw: None)
-    monkeypatch.setenv("GEMINI_API_KEY", "your_key_here")  # set, but not a usable key
-    key = "AIzaSyTEST-not-a-real-key-000"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "your_key_here")  # set, but not a usable key
+    key = "sk-ant-TEST-ONLY-not-a-real-key-001"
     result = runner.invoke(cli, [], input=f"y\n{key}\n@kizzyparks\n")
     assert result.exit_code == 0, result.output
     assert "also set in your environment" in " ".join(result.output.split())
@@ -1335,3 +1330,29 @@ def test_a_clean_window_that_still_fails_is_reported_not_retried_again(
     result = runner.invoke(cli, ["login"])
     assert result.exit_code == 1 and "the check that it works failed" in result.output
     assert len(logins) == 2  # the first sign-in and one clean retry
+
+
+def test_watch_says_it_was_removed(runner: CliRunner) -> None:
+    result = runner.invoke(cli, ["run", "@my", "--watch", "3"])
+    assert result.exit_code == 2 and "--watch was removed" in " ".join(result.output.split())
+
+
+def test_an_old_gemini_key_alone_stops_the_run_before_it_replaces_sorted_books(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "TEST-ONLY-old-gemini-key-0000")
+    result = runner.invoke(cli, ["run", "@my", "--save", "b"])
+    flat = " ".join(result.output.split())
+    assert result.exit_code != 0 and "now uses Claude" in flat and "notebook-alchemy setup" in flat
+    assert runner.invoke(cli, ["run", "--mock", "--save", "b"]).exit_code == 0  # sample data needs no key
+
+
+def test_dry_run_warns_when_the_model_has_no_listed_price(
+    runner: CliRunner, fake_channel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_channel("a b c")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-TEST-ONLY-not-a-real-key-002")
+    monkeypatch.setenv("ALCHEMY_MODEL", "claude-unlisted-test")
+    result = runner.invoke(cli, ["dry-run", "@my"])
+    assert result.exit_code == 0, result.output
+    assert "No listed price for 'claude-unlisted-test'" in " ".join(result.output.split())

@@ -31,7 +31,7 @@ def _seed(engine: AlchemyEngine) -> None:
     _put(engine.library_cache_path("Chan"), {"map:Chan": {"title": "T", "topics": []}})
     _put(engine.sync_records_dir() / "nb-test.json", {"titles": ["A"], "ids": {"A": "src-1"}})
     _put(engine.notebooks_path(), {"chan": "nb-test"})
-    _put(engine.home / "batch.json", {"name": "batches/running"})  # in flight at Google: not moved
+    _put(engine.batch_state_path("Chan"), {"job": "msgbatch_test"})  # still running: not moved
     _put(engine.home / "consent.json", {"account": "salted-hash"})  # belongs to an account: not moved
 
 
@@ -51,7 +51,7 @@ def test_the_working_files_move_to_another_computer(tmp_path: Path) -> None:
     imported = import_state(there, archive)
     assert imported.total == 5 and imported.kept == 0
     moved = _files(there)
-    assert moved == {k: v for k, v in _files(here).items() if k not in {"batch.json", "consent.json"}}
+    assert moved == {k: v for k, v in _files(here).items() if k not in {"batches/Chan.json", "consent.json"}}
 
 
 def test_import_keeps_what_is_here_unless_told_to_replace(tmp_path: Path) -> None:

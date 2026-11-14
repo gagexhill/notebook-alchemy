@@ -4,6 +4,30 @@ Completed material decisions, newest first. Current work is in GitHub issues.
 
 ## Topic books from every word (0.3.0, 2026-11-08)
 
+- **Claude replaces Gemini as the only AI (2026-11-13).**
+  - Why: Gemini's free tier stopped live run 2 after 10 videos (its daily request quota), and the Owner chose a paid API over enabling Google billing, asking for the cheapest option that still labels well.
+  - Measured on the same 3 channel videos, as keep/drop agreement per chunk with Gemini 3.8 Flash's labels:
+
+    | Labeller | Agreement |
+    |---|---|
+    | NotebookLM's own chat | 95.6%, 78.6%, 95.1% |
+    | Gemini 3.5 Flash-Lite | 88.9%, 77.4%, 95.1% |
+    | Gemini 3.1 Flash-Lite | 93.3%, 77.4%, 97.6% |
+    | **Claude Haiku 5.5, thinking off, effort low, structured outputs** | **95.6%, 85.7%, 95.1%** |
+    | Claude Haiku 5.5, adaptive thinking | 84.4%, 81.0%, 82.9% |
+
+    - NotebookLM's chat took about 4 minutes per video and spent the Owner's own chat allowance.
+    - Claude Haiku 5.5 took 7–12 s and about $0.0014 per video at list price ($0.10 / $0.50 per million tokens, read 2026-11-13), or half that in a batch.
+  - Every request now asks for JSON matching a schema (structured outputs), so every answer parses. Structured outputs need closed objects, so the two passage-number maps (placements, duplicates) became lists of pairs, and `LIBRARY_PROMPT_VERSION` moved to 2 so no answer cached in the old shape is reused.
+  - Batches use the Message Batches API at half price; one request builder serves batches and direct calls, so their settings cannot drift (the Gemini batch sent no thinking setting while direct calls did).
+  - A key, credit balance, spend limit or rate limit that would fail every request stops the run (`ClaudeError.stop_run`), keeping what was done; a refused or cut-off answer is handled like an unparseable one.
+  - Rejected:
+    - **A Claude subscription.** Anthropic does not let third-party tools use claude.ai sign-in or its rate limits.
+    - **Prompt caching.** The shared rules are about 1k tokens, below the smallest cacheable prompt, and every transcript differs.
+    - **A Gemini "agent".** It bills the same tokens plus the agent loop's own.
+  - `--watch` was removed: Claude cannot watch a video, and Gemini was the only route that could. Videos no route reads stay listed as unread in the overview.
+  - The maintainer's key belongs to a Console service account, scoped to a workspace kept for this tool, with a spend limit and rate limits that allow only Haiku 5.5 (a request for another model is refused with 429, checked live). The runbook is in `OPERATIONS.md`.
+
 - **Books grow without reshuffling.**
   - Before: new subjects fell into Miscellaneous until 20% growth rebuilt the topic map, which moved passages and re-uploaded every book.
   - Now: passages that fit nowhere extend the map once (new sections or topics; nothing existing is renamed); each passage's section is stored by name; a section past 200 passages is divided once into named subsections. Only `--resort` rebuilds.
@@ -22,7 +46,7 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   - `--watch`: only a complete answer (`STOP`) is kept; a video that gave no words for good is remembered (`watched.json`), so the next run moves on; a watch is not retried within a run (a timed-out one may still be billed); the cost is shown and needs a yes (or `--yes`).
   - State: channel names in any script were silently left out of exports; skipped files are now named. Import refuses device names (`NUL`, `COM1`), deep JSON and damaged members with a typed error, holds one member in memory at a time, and writes each atomically.
   - Guided run: warns when a `GEMINI_API_KEY` in the environment would override the key it saved.
-- **`--watch N` for videos no route can read.** NotebookLM itself failed on 4 of 15 test videos. Gemini reads a public YouTube URL directly (`fileData.fileUri`, about 100 tokens per second of video, read 2026-11-08), and is asked to write down what is said, word for word. It is opt-in and capped (N per run, 90 minutes per video, a quota stops it), cached like captions so a video is never paid for twice, and every such video is named in the overview because the words are Gemini's hearing, not captions.
+- **`--watch N` for videos no route can read** (removed 2026-11-13 with the move to Claude, above). NotebookLM itself failed on 4 of 15 test videos. Gemini reads a public YouTube URL directly (`fileData.fileUri`, about 100 tokens per second of video, read 2026-11-08), and is asked to write down what is said, word for word. It is opt-in and capped (N per run, 90 minutes per video, a quota stops it), cached like captions so a video is never paid for twice, and every such video is named in the overview because the words are Gemini's hearing, not captions.
 - **A guided first run.** `notebook-alchemy` with no command, in a terminal, signs in, offers a free Gemini key (it opens the AI Studio key page), asks for a channel link and runs `run`; outside a terminal it prints the help. The one-line installer's shortcut starts it.
 - **`export-state` / `import-state`** move the working files to another computer as a zip. Import checks every member (known folders, safe names, JSON objects, size) before writing any, and keeps this computer's files unless `--replace`.
 
@@ -35,7 +59,7 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   - Every paid answer is cached by what it saw: transcript + prompt version + model for labels; passages and taxonomy for placement; section contents + month for consolidation.
   - A rerun with no new videos makes no request.
   - Labels never come from the fallback model; a used-up daily quota stops the step and the next run resumes.
-- **Batch mode first, standard calls when Google refuses it.** Google answers FAILED_PRECONDITION for a key whose project has no billing (seen live); the run then uses standard calls and says so. The batch success path is tested with fakes only, because the test key has no billing; the request shape follows aistudio.google.com/docs/batch-api.
+- **Batch mode first, standard calls when Google refuses it** (superseded 2026-11-13: Claude's Message Batches, above). Google answers FAILED_PRECONDITION for a key whose project has no billing (seen live); the run then uses standard calls and says so. The batch success path is tested with fakes only, because the test key has no billing; the request shape follows aistudio.google.com/docs/batch-api.
 - **Words when YouTube refuses.**
   - From this network YouTube refused both the captions API and yt-dlp's subtitle download (HTTP 429).
   - yt-dlp cannot read Chrome or Edge cookies on Windows (copy lock, DPAPI).

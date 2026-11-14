@@ -30,7 +30,7 @@ python -m notebook_alchemy.cli test
 ```
 
 The test suite is hermetic. `tests/conftest.py` runs every test in a temporary working directory and
-home, and blocks real processes and network connections. Fake the `notebooklm` CLI and Gemini with the
+home, and blocks real processes and network connections. Fake the `notebooklm` CLI and the Claude client with the
 helpers in the existing tests instead of calling them. A new guard needs a test that fails when the guard
 is removed.
 
