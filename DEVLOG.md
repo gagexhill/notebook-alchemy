@@ -72,6 +72,41 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   - `--save DIR` writes a copy; `clean --vaults` removes 0.2 output for one release.
 - **Removed modules.** `analyzer.py`, `synthesizer.py` and `vault.py` are gone; the title-word grouping moved to `offline.py` for the no-key path.
 
+## One-line install (2026-11-08)
+
+- **One command, no prerequisites.** `install/install.ps1` (`irm | iex`) and `install/install.sh`
+  (`curl | sh`) install uv with Astral's installer if it is missing, install the tool with
+  `uv tool install` on a Python 3.12 that uv downloads if needed, install Playwright's Chromium, add a
+  shortcut and run `notebook-alchemy test`. The aim is the ease of a one-click browser extension for
+  people who have never used Python.
+- **The package source is the `main` source archive, not `git+https`,** so git is not a prerequisite
+  either. It becomes the PyPI name once the package is published.
+- **`--with-executables-from notebooklm-py` is required.** uv links only the package's own commands, and
+  without `notebooklm` on PATH sign-in and uploads fail. **`--reinstall-package`** makes a rerun pick up
+  new code even when the version number has not changed, so running the command again is the update.
+- **The shortcut opens in `~/Notebook Alchemy`,** because `.env` and output are read from the working
+  folder. It starts `notebook-alchemy` with no command, which is the guided first run, and keeps the
+  terminal open afterwards. Its icon is downloaded from `docs/brand/icons`; a failed download never
+  stops the install.
+- **Nothing outside the home folder.** The shell script refuses to run as root, a PATH change that fails
+  or that `UV_NO_MODIFY_PATH` forbids is a warning rather than a stop, and nothing asks for or stores an
+  account or key.
+
+## Icon (2026-11-08)
+
+- **The icon belongs to NotebookLM's family on purpose.** Three nested blue arches share the left edge
+  and face the same way as the NotebookLM mark, and a small gold alchemy bottle with a blue plus badge on its lower
+  right stands under the innermost one. The Owner chose this after rejecting a flat purple set, a Google-Workspace-style
+  emerald and amber set, and a mirrored set of arches. The geometry is drawn from scratch on a 192-unit
+  grid, not traced. The gold bottle is the main thing that tells it apart from Google's mark, so the
+  README's header now says the tool is unofficial and not affiliated with Google, and any listing
+  should say the same.
+- **One SVG, everything else generated.** `scripts/brand_icons.py` renders every size with Playwright's
+  Chromium, which the `notebooklm-py[browser]` dependency already installs, and packs the .ico files
+  itself from PNG entries, so the repository gains no image library. Opaque icons (apple-touch,
+  maskable) put the mark on white, scaled to stay inside iOS's rounded corners and Android's 80%
+  safe circle.
+
 ## Plain output, modelled on gcloud (2026-11-07)
 
 - **What people read uses everyday words.** Terminal output, help text and the generated documents say
