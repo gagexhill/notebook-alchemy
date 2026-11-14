@@ -555,3 +555,17 @@ def test_unusable_placement_and_order_answers_are_remembered(tmp_path: Path) -> 
     asked = len(order.prompts)
     _builder(tmp_path / "o", order).build(passages, ["T"])
     assert len(order.prompts) == asked
+
+
+def test_an_extension_is_bounded_and_asked_again_when_its_prompt_changes(tmp_path: Path, monkeypatch) -> None:
+    from notebook_alchemy.library import EXTEND_MAX_SECTIONS, extend_prompt
+
+    assert f"at most {EXTEND_MAX_SECTIONS} new sections" in extend_prompt("Chan", [], ["a point"])
+    passages = [_passage("s1:1"), _passage("p1:1")] + [_passage(f"x{i}:1") for i in range(1, 8)]
+    ai = SortingAI(new_section="Unrelated", places_x=False)  # the extension adds nothing that fits
+    _builder(tmp_path, ai).build(passages, ["T"])
+    _builder(tmp_path, ai).build(passages, ["T"])
+    assert len(ai.asked("fit none of them")) == 1  # remembered for these passages
+    monkeypatch.setattr(library_module, "EXTEND_VERSION", "next")
+    _builder(tmp_path, ai).build(passages, ["T"])
+    assert len(ai.asked("fit none of them")) == 2  # a changed prompt asks again
