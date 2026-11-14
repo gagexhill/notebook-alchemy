@@ -14,7 +14,7 @@ body:
       description: "Which architectural subsystem does this proposal relate to?"
       options:
         - "YouTube scanning and transcripts"
-        - "Cleanup, labelling and sorting (Gemini)"
+        - "Cleanup, labelling and sorting (Claude)"
         - "The topic books"
         - "NotebookLM upload and accounts"
         - "Command-line experience"
@@ -34,7 +34,7 @@ body:
     attributes:
       label: "Proposed Solution & Design"
       description: "Detailed description of how this feature should work."
-      placeholder: "Add an async RSS/Audio parser that fetches Whisper transcripts and batches them into the existing Gemini Flash pipeline..."
+      placeholder: "Add an async RSS/Audio parser that fetches Whisper transcripts and batches them into the existing labelling pipeline..."
     validations:
       required: true
   - type: textarea

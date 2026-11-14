@@ -21,7 +21,7 @@ from .conftest import FakeNotebookLM, FakeProcess
 
 
 def _config(tmp_path: Path) -> AlchemyConfig:
-    return AlchemyConfig(cache_dir=tmp_path / "cache", gemini_api_key="")
+    return AlchemyConfig(cache_dir=tmp_path / "cache", api_key="")
 
 
 @pytest.fixture
@@ -42,9 +42,9 @@ def test_status_reports_facts_without_network(engine: AlchemyEngine, monkeypatch
     monkeypatch.setattr(NotebookLMClient, "cli_version", lambda self: "notebooklm 9.9")
     facts = engine.status()
     assert facts["notebooklm_cli"] == "notebooklm 9.9"
-    assert facts["gemini_api_key"] == "unset"
+    assert facts["api_key"] == "unset"
     assert facts["session_file"].startswith("none")
-    assert "key" not in json.dumps(facts).lower().replace("gemini_api_key", "")  # no secret values
+    assert "key" not in json.dumps(facts).lower().replace("api_key", "")  # no secret values
 
 
 def _books(names: tuple[str, ...] = ("Alpha_Topics", "Beta_Topics")) -> list[Book]:
@@ -189,8 +189,8 @@ def test_sync_needs_a_working_session(tmp_path: Path) -> None:
 # --- append ---------------------------------------------------------------------------------------
 
 
-def test_no_gemini_client_without_a_key(engine: AlchemyEngine) -> None:
-    assert engine.gemini is None
+def test_no_ai_client_without_a_key(engine: AlchemyEngine) -> None:
+    assert engine.ai is None
 
 
 def test_a_later_run_with_different_domains_prunes_the_earlier_runs_sources(tmp_path: Path) -> None:
@@ -315,18 +315,18 @@ def test_notebooklm_route_needs_a_sign_in(tmp_path: Path) -> None:
 # --- the whole pipeline ----------------------------------------------------------------------------
 
 
-class PipelineGemini:
+class PipelineAI:
     """Answers every request the pipeline makes: labels, the topics, placement, consolidation."""
 
-    model = "gemini-test"
+    model = "claude-test"
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def generate(self, prompt: str, **kw):
+    def generate(self, prompt: str, *, schema: dict, **kw):
         import re as _re
 
-        from notebook_alchemy.gemini import GeminiResult
+        from notebook_alchemy.claude import ClaudeResult
 
         self.prompts.append(prompt)
         if prompt.startswith("Video:"):
@@ -334,7 +334,7 @@ class PipelineGemini:
             segs = [
                 {"from": nums[0], "to": nums[-1], "keep": True, "headline": "Registering", "kind": "rule"}
             ]
-            return GeminiResult(json.dumps({"segments": segs}), "STOP")
+            return ClaudeResult(json.dumps({"segments": segs}), "end_turn")
         if "study library" in prompt:
             topics = [
                 {
@@ -342,27 +342,24 @@ class PipelineGemini:
                     "sections": [{"name": "SAM.gov", "about": "the federal register"}],
                 }
             ]
-            return GeminiResult(json.dumps({"notebook_title": "GovCon Basics", "topics": topics}), "STOP")
+            return ClaudeResult(json.dumps({"notebook_title": "GovCon Basics", "topics": topics}), "end_turn")
         if "Place each numbered passage" in prompt:
             nums = _re.findall(r"^(\d+): ", prompt, _re.MULTILINE)
-            return GeminiResult(json.dumps({"assignments": {n: 0 for n in nums}}), "STOP")
+            pairs = [{"passage": int(n), "section": 0} for n in nums]
+            return ClaudeResult(json.dumps({"assignments": pairs}), "end_turn")
         nums = [int(n) for n in _re.findall(r"^(\d+): \[", prompt, _re.MULTILINE)]
-        return GeminiResult(json.dumps({"intro": "How to register.", "order": nums}), "STOP")
+        return ClaudeResult(json.dumps({"intro": "How to register.", "order": nums}), "end_turn")
 
-    def submit_batch(self, requests, name):
-        from notebook_alchemy.errors import GeminiError
+    def submit_batch(self, requests):
+        from notebook_alchemy.errors import ClaudeError
 
-        raise GeminiError("refused", status=400, detail="Precondition check failed.")
-
-    @staticmethod
-    def batch_refused(exc) -> bool:
-        return True
+        raise ClaudeError("batch", status=500, detail="HTTP 500: internal error")
 
     def usage(self):
         return []
 
 
-def test_a_channel_becomes_topic_books_and_a_rerun_asks_gemini_nothing(
+def test_a_channel_becomes_topic_books_and_a_rerun_asks_the_ai_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from notebook_alchemy.channel import (
@@ -389,16 +386,16 @@ def test_a_channel_becomes_topic_books_and_a_rerun_asks_gemini_nothing(
         },
     )
     engine = AlchemyEngine(_config(tmp_path))
-    engine.gemini = PipelineGemini()  # type: ignore[assignment]
+    engine.ai = PipelineAI()  # type: ignore[assignment]
     report = engine.build("@chan")
     assert report.library.notebook_title == "GovCon Basics" and report.used_ai
     book = next(b for b in report.books if b.title == "Getting Registered")
     assert book.content.count("takes ten days") == 1  # said in all three videos, kept once
     assert all(f"vid0000000{i} adds its own fact" in book.content for i in range(3))  # what is new stays
     assert "Welcome back" not in book.content and not book.content.startswith("---")
-    asked = len(engine.gemini.prompts)
+    asked = len(engine.ai.prompts)
     engine.build("@chan")
-    assert len(engine.gemini.prompts) == asked  # labels, topics, placement and sections all cached
+    assert len(engine.ai.prompts) == asked  # labels, topics, placement and sections all cached
     stored = RequestCache(engine.library_cache_path("Chan")).get("parts")
     assert stored and all(part == 1 for sections in stored.values() for part in sections.values())
 
@@ -422,9 +419,14 @@ def test_the_estimate_counts_cached_words_and_spends_nothing(tmp_path: Path) -> 
     )
     assert est.videos_known == 1 and est.words_known == 1000
     assert est.words_estimated == 1000 + int(600 * 2.5) and est.cost_usd > 0
+    standard = engine.estimate(
+        [ChannelVideo("vid00000001", "t", "u", 600), ChannelVideo("vid00000002", "t", "u", 600)], batch=False
+    )
+    # Labels at half price in a batch; sorting (15% of labelling) always at the standard price.
+    assert standard.cost_usd / est.cost_usd == pytest.approx((1 + 0.15) / (0.5 + 0.15))
 
 
-def test_a_used_up_quota_while_sorting_says_how_far_it_got_and_keeps_the_labels(
+def test_a_spend_limit_while_sorting_says_how_far_it_got_and_keeps_the_labels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from notebook_alchemy.channel import (
@@ -434,7 +436,7 @@ def test_a_used_up_quota_while_sorting_says_how_far_it_got_and_keeps_the_labels(
         TranscriptManager,
         TranscriptResult,
     )
-    from notebook_alchemy.errors import AlchemyError, GeminiError
+    from notebook_alchemy.errors import AlchemyError, ClaudeError
 
     videos = [ChannelVideo("vid00000001", "One", "u", 600, "2026-03-01")]
     monkeypatch.setattr(
@@ -448,17 +450,22 @@ def test_a_used_up_quota_while_sorting_says_how_far_it_got_and_keeps_the_labels(
         },
     )
 
-    class QuotaWhenSorting(PipelineGemini):
+    class LimitWhenSorting(PipelineAI):
         def generate(self, prompt: str, **kw):
             if "study library" in prompt:
-                raise GeminiError("quota", status=429, detail="daily request quota exhausted", quota=True)
+                raise ClaudeError(
+                    "The Claude API account has no credit left, or its spend limit is reached.",
+                    hint="Check Billing and Limits in the Claude Console; the same command continues "
+                    "from here.",
+                    stop_run=True,
+                )
             return super().generate(prompt, **kw)
 
     engine = AlchemyEngine(_config(tmp_path))
-    engine.gemini = QuotaWhenSorting()  # type: ignore[assignment]
+    engine.ai = LimitWhenSorting()  # type: ignore[assignment]
     with pytest.raises(AlchemyError, match="1 of 1 videos are labelled and saved") as err:
         engine.build("@chan")
-    assert "carries on from here" in (err.value.hint or "")
+    assert "continues from here" in (err.value.hint or "")
     assert list((tmp_path / "knowledge").glob("*.json"))  # the label survived for the next run
 
 
@@ -535,97 +542,6 @@ def test_the_working_notebook_only_ever_loses_videos_and_titles_must_be_unique(t
     assert engine.notebook_for("__workspace__") == ws
 
 
-# --- --watch: Gemini watches videos no route could read ---------------------------------------------
-
-
-class WatchingGemini:
-    model = "gemini-test"
-
-    def __init__(self, answers: dict[str, object]) -> None:
-        self.answers = answers  # video id -> text, or a GeminiError to raise
-        self.watched: list[str] = []
-
-    def watch(self, url: str, prompt: str, **kw):
-        from notebook_alchemy.gemini import GeminiResult
-
-        vid = url.rsplit("=", 1)[1]
-        self.watched.append(vid)
-        answer = self.answers.get(vid, "words")
-        if isinstance(answer, Exception):
-            raise answer
-        if isinstance(answer, tuple):  # (text, finish reason)
-            return GeminiResult(answer[0], answer[1])
-        return GeminiResult(str(answer), "STOP")
-
-
-def _watch_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, durations: list[int]):
-    from notebook_alchemy.channel import ChannelScanner, ChannelScanResult, ChannelVideo, TranscriptManager
-
-    videos = [
-        ChannelVideo(f"vid0000000{i}", f"Video {i}", "u", d, "2026-03-01") for i, d in enumerate(durations)
-    ]
-    monkeypatch.setattr(
-        ChannelScanner, "scan", lambda self, url, limit=None, **kw: ChannelScanResult("Chan", videos)
-    )
-    monkeypatch.setattr(TranscriptManager, "fetch_many", lambda self, items, progress=None: {})  # all blocked
-    engine = AlchemyEngine(_config(tmp_path))
-    return engine, videos
-
-
-def test_watch_reads_unread_videos_once_and_caches_the_words(tmp_path: Path, monkeypatch) -> None:
-    engine, _videos = _watch_setup(tmp_path, monkeypatch, [600, 600, 600])
-    gemini = WatchingGemini({"vid00000000": "first we register in sam dot gov and wait ten days"})
-    engine.gemini = gemini  # type: ignore[assignment]
-    report = engine.build("@chan", offline=True, watch=2)
-    assert gemini.watched == ["vid00000000", "vid00000001"]  # the cap
-    assert report.read == {"vid00000000", "vid00000001"} and report.by_source["gemini-video"] == 2
-    cached = json.loads((tmp_path / "cache" / "vid00000000.json").read_text(encoding="utf-8"))
-    assert cached["method"] == "gemini-video" and "sam dot gov" in cached["full_text"]
-    overview = report.books[0].content
-    assert "Words written down by Gemini from the video itself (2)" in overview and "  - Video 0" in overview
-    # A later run reads those words from the cache, still names them, and pays for nothing.
-    from notebook_alchemy.channel import TranscriptManager
-
-    def from_cache(self, items, progress=None):
-        return {vid: r for vid, _t in items if (r := self._read_cache(vid))}
-
-    monkeypatch.setattr(TranscriptManager, "fetch_many", from_cache)
-    again = engine.build("@chan", offline=True)
-    assert gemini.watched == ["vid00000000", "vid00000001"]  # nothing watched again
-    assert "Words written down by Gemini from the video itself (2)" in again.books[0].content
-
-
-def test_watch_skips_videos_it_cannot_bound_and_stops_on_quota(tmp_path: Path, monkeypatch) -> None:
-    from notebook_alchemy.errors import GeminiError
-
-    engine, _ = _watch_setup(tmp_path, monkeypatch, [0, 4 * 3600, 600, 600, 600, 600])
-    quota = GeminiError("quota", status=429, quota=True)
-    gemini = WatchingGemini(
-        {
-            "vid00000002": GeminiError("not public", status=403),
-            "vid00000003": "NO_SPEECH",
-            "vid00000004": quota,
-        }
-    )
-    engine.gemini = gemini  # type: ignore[assignment]
-    report = engine.build("@chan", offline=True, watch=10)
-    # unknown and 4-hour videos skipped; after the quota runs out, vid00000005 is not tried
-    assert gemini.watched == ["vid00000002", "vid00000003", "vid00000004"]
-    notes = " ".join(report.notices)
-    assert "2 unread videos were not watched" in notes and "not public" in notes
-    assert "no speech" in notes and "quota ran out" in notes and not report.read
-    assert not (tmp_path / "cache" / "vid00000003.json").exists()  # silence is not cached as words
-
-
-def test_watch_needs_a_gemini_key(tmp_path: Path, monkeypatch) -> None:
-    engine, _ = _watch_setup(tmp_path, monkeypatch, [600])
-    engine.gemini = None
-    from notebook_alchemy.errors import AlchemyError
-
-    with pytest.raises(AlchemyError, match="--watch needs a Gemini API key"):
-        engine.build("@chan", offline=True, watch=1)
-
-
 # --- review findings: unchanged books whose upload was never confirmed ------------------------------
 
 
@@ -673,52 +589,6 @@ def test_an_old_copy_that_could_not_be_removed_is_removed_next_time(tmp_path: Pa
     result = engine.publish("Chan", [alpha, *_edited([beta])])
     assert result.uploaded == 0 and sorted(fake.titles("Chan")) == ["Alpha Topics", "Beta Topics"]
     assert old_beta not in _ids_by_title(fake).values()
-
-
-def test_a_cut_off_watch_is_not_kept(tmp_path: Path, monkeypatch) -> None:
-    engine, _ = _watch_setup(tmp_path, monkeypatch, [600])
-    engine.gemini = WatchingGemini({"vid00000000": ("first we register and", "RECITATION")})  # type: ignore[assignment]
-    report = engine.build("@chan", offline=True, watch=1)
-    assert not report.read and "stopped before the end" in " ".join(report.notices)
-    assert not (tmp_path / "cache" / "vid00000000.json").exists()
-
-
-def test_a_video_that_gave_no_words_is_not_paid_for_again(tmp_path: Path, monkeypatch) -> None:
-    from notebook_alchemy.errors import GeminiError
-
-    engine, _ = _watch_setup(tmp_path, monkeypatch, [600, 600, 600])
-    gemini = WatchingGemini({"vid00000000": "NO_SPEECH", "vid00000001": GeminiError("private", status=403)})
-    engine.gemini = gemini  # type: ignore[assignment]
-    engine.build("@chan", offline=True, watch=2)
-    report = engine.build("@chan", offline=True, watch=2)
-    assert gemini.watched == ["vid00000000", "vid00000001", "vid00000002"]  # the next run moved on
-    assert report.read == {"vid00000002"}
-
-
-def test_a_transient_watch_error_is_tried_again_next_run(tmp_path: Path, monkeypatch) -> None:
-    from notebook_alchemy.errors import GeminiError
-
-    engine, _ = _watch_setup(tmp_path, monkeypatch, [600])
-    gemini = WatchingGemini({"vid00000000": GeminiError("overloaded", status=503)})
-    engine.gemini = gemini  # type: ignore[assignment]
-    engine.build("@chan", offline=True, watch=1)
-    engine.build("@chan", offline=True, watch=1)
-    assert gemini.watched == ["vid00000000", "vid00000000"]
-
-
-def test_watching_waits_for_the_cost_to_be_accepted(tmp_path: Path, monkeypatch) -> None:
-    engine, _ = _watch_setup(tmp_path, monkeypatch, [1800, 1800])
-    gemini = WatchingGemini({})
-    engine.gemini = gemini  # type: ignore[assignment]
-    asked: list[tuple[int, int, float]] = []
-
-    def decline(videos: int, seconds: int, usd: float) -> bool:
-        asked.append((videos, seconds, usd))
-        return False
-
-    report = engine.build("@chan", offline=True, watch=5, confirm_watch=decline)
-    assert gemini.watched == [] and asked[0][:2] == (2, 3600) and asked[0][2] > 0
-    assert "2 unread videos were not watched" in " ".join(report.notices)
 
 
 def test_books_a_0_2_upload_recorded_under_its_own_file_name_are_replaced(tmp_path: Path) -> None:
@@ -894,3 +764,69 @@ def test_old_videos_are_not_deleted_one_by_one_after_a_sign_out(tmp_path: Path) 
     fake._handle = refuse_deletes  # type: ignore[method-assign]
     engine.transcripts_via_notebooklm([("vid00000001", "One")])
     assert len(refused) == 1  # the first refusal; the other four wait for the next run
+
+
+def test_a_limit_while_labelling_stops_with_a_typed_error_and_uploads_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_alchemy.channel import (
+        ChannelScanner,
+        ChannelScanResult,
+        ChannelVideo,
+        TranscriptManager,
+        TranscriptResult,
+    )
+    from notebook_alchemy.errors import AlchemyError, ClaudeError
+
+    videos = [ChannelVideo("vid00000001", "One", "u", 600, "2026-03-01")]
+    monkeypatch.setattr(
+        ChannelScanner, "scan", lambda self, url, limit=None, **kw: ChannelScanResult("Chan", videos)
+    )
+    monkeypatch.setattr(
+        TranscriptManager,
+        "fetch_many",
+        lambda self, items, progress=None: {
+            v: TranscriptResult(v, "Registering takes ten days.", "youtube") for v, _ in items
+        },
+    )
+
+    class LimitOnBatch(PipelineAI):
+        def submit_batch(self, requests):
+            raise ClaudeError("The spend limit is reached.", hint="Check Billing.", stop_run=True)
+
+    engine = AlchemyEngine(_config(tmp_path))
+    engine.ai = LimitOnBatch()  # type: ignore[assignment]
+    with pytest.raises(AlchemyError, match=r"spend limit is reached. Labels made so far are saved") as err:
+        engine.build("@chan")
+    assert not isinstance(err.value, ClaudeError) and err.value.hint == "Check Billing."
+
+
+def test_words_a_model_wrote_down_are_not_used_as_the_speakers_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_alchemy.channel import (
+        ChannelScanner,
+        ChannelScanResult,
+        ChannelVideo,
+        TranscriptManager,
+        TranscriptResult,
+    )
+    from notebook_alchemy.engine import MODEL_WRITTEN
+
+    videos = [ChannelVideo("vid00000001", "One", "u", 600), ChannelVideo("vid00000002", "Two", "u", 600)]
+    monkeypatch.setattr(
+        ChannelScanner, "scan", lambda self, url, limit=None, **kw: ChannelScanResult("Chan", videos)
+    )
+    monkeypatch.setattr(
+        TranscriptManager,
+        "fetch_many",
+        lambda self, items, progress=None: {
+            "vid00000001": TranscriptResult("vid00000001", "captions said this", "youtube"),
+            "vid00000002": TranscriptResult(
+                "vid00000002", "a model wrote this", "cache", method=MODEL_WRITTEN
+            ),
+        },
+    )
+    report = AlchemyEngine(_config(tmp_path)).build("@chan", offline=True)
+    assert report.read == {"vid00000001"}
+    assert all("a model wrote this" not in b.content for b in report.books)

@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 import notebook_alchemy.library as library_module
+from notebook_alchemy.claude import ClaudeResult
 from notebook_alchemy.cleanup import Chunk
-from notebook_alchemy.errors import GeminiError
-from notebook_alchemy.gemini import GeminiResult
+from notebook_alchemy.errors import ClaudeError
 from notebook_alchemy.knowledge import Segment, VideoLabels
 from notebook_alchemy.library import (
     MISC,
@@ -26,6 +26,7 @@ from notebook_alchemy.library import (
     apply_date_rules,
     build_passages,
     merge_map,
+    parse_assignments,
     parse_extension,
 )
 from notebook_alchemy.writer import OVERVIEW_TITLE, SOURCE_WORD_LIMIT, render_library, render_topic
@@ -101,7 +102,12 @@ def test_consolidation_orders_removes_duplicates_and_superseded_and_loses_nothin
     ps = [_passage(f"v{i}:1") for i in range(5)]
     ps[2].kind, ps[2].published = "rule", "2024-01-01"  # an older rule that the others, newer, replace
     answer = json.dumps(
-        {"intro": "Start here.", "order": [3, 0, 99, 3], "duplicates": {"1": 0}, "superseded": [2]}
+        {
+            "intro": "Start here.",
+            "order": [3, 0, 99, 3],
+            "duplicates": [{"passage": 1, "keep": 0}],
+            "superseded": [2],
+        }
     )
     intro, ordered, dupes, superseded = apply_consolidation(answer, ps)
     assert intro == "Start here." and dupes == 1 and [p.id for p in superseded] == ["v2:1"]
@@ -111,17 +117,19 @@ def test_consolidation_orders_removes_duplicates_and_superseded_and_loses_nothin
 
 def test_a_duplicate_loop_keeps_one_passage() -> None:
     ps = [_passage("a:1"), _passage("b:1")]
-    _intro, ordered, _d, _s = apply_consolidation(json.dumps({"duplicates": {"0": 1, "1": 0}}), ps)
+    _intro, ordered, _d, _s = apply_consolidation(
+        json.dumps({"duplicates": [{"passage": 0, "keep": 1}, {"passage": 1, "keep": 0}]}), ps
+    )
     assert len(ordered) >= 1
 
 
 # --- the builder ------------------------------------------------------------------------------------
 
 
-class SortingGemini:
+class SortingAI:
     """Places "p*" videos in Pricing and "s*" in SAM.gov; "x*" fit nowhere until the map is extended."""
 
-    model = "gemini-test"
+    model = "claude-test"
 
     def __init__(
         self, new_section: str = "Extras", places_x: bool = True, subsections: list[str] | None = None
@@ -129,19 +137,22 @@ class SortingGemini:
         self.prompts: list[str] = []
         self.new_section, self.places_x = new_section, places_x
         self.subsections = ["Alpha", "Beta"] if subsections is None else subsections
-        self.quota_on: str | None = None  # a prompt phrase that answers with a used-up quota
+        self.limit_on: str | None = None  # a prompt phrase answered with a run-stopping limit
+        self.refuse_on: str | None = None  # a prompt phrase answered with a refusal (unusable)
 
     def asked(self, phrase: str) -> list[str]:
         return [p for p in self.prompts if phrase in p]
 
-    def generate(self, prompt: str, **kw) -> GeminiResult:
-        assert kw.get("allow_fallback") is False
+    def generate(self, prompt: str, *, schema: dict, **kw) -> ClaudeResult:
+        assert schema["additionalProperties"] is False  # every request asks for a closed JSON shape
         self.prompts.append(prompt)
+        if self.refuse_on and self.refuse_on in prompt:
+            raise ClaudeError("Unusable answer.", detail="refused", unusable=True)
         if "fit none of them" in prompt:
             added = {"name": "Bidding", "sections": [{"name": self.new_section, "about": "the rest"}]}
-            return GeminiResult(json.dumps({"topics": [added]}), "STOP")
+            return ClaudeResult(json.dumps({"topics": [added]}), "end_turn")
         if "study library" in prompt:
-            return GeminiResult(
+            return ClaudeResult(
                 json.dumps(
                     {
                         "notebook_title": "GovCon Library",
@@ -154,17 +165,17 @@ class SortingGemini:
                         ],
                     }
                 ),
-                "STOP",
+                "end_turn",
             )
-        if self.quota_on and self.quota_on in prompt:
-            raise GeminiError("quota", status=429, quota=True)
+        if self.limit_on and self.limit_on in prompt:
+            raise ClaudeError("limit", status=429, stop_run=True)
         if "has grown to" in prompt:
-            return GeminiResult(json.dumps({"subsections": self.subsections}), "STOP")
+            return ClaudeResult(json.dumps({"subsections": self.subsections}), "end_turn")
         if "Place each numbered passage" in prompt:
             points = re.findall(r"^(\d+): Point (\w+):", prompt, re.MULTILINE)
             if "0: Alpha" in prompt:  # subsections: odd-numbered videos go to Beta
-                out = {n: int(pid[1:]) % 2 for n, pid in points}
-                return GeminiResult(json.dumps({"assignments": out}), "STOP")
+                pairs = [{"passage": int(n), "section": int(pid[1:]) % 2} for n, pid in points]
+                return ClaudeResult(json.dumps({"assignments": pairs}), "end_turn")
             sections = re.findall(r"^(\d+): \w+ / (.+?) —", prompt, re.MULTILINE)
             index = {name: int(i) for i, name in sections}
             out = {}
@@ -174,30 +185,31 @@ class SortingGemini:
                         out[n] = index["Extras"]
                 else:
                     out[n] = index["Pricing"] if pid.startswith("p") else index["SAM.gov"]
-            return GeminiResult(json.dumps({"assignments": out}), "STOP")
+            pairs = [{"passage": int(n), "section": s} for n, s in out.items()]
+            return ClaudeResult(json.dumps({"assignments": pairs}), "end_turn")
         nums = re.findall(r"^(\d+): \[", prompt, re.MULTILINE)
-        return GeminiResult(json.dumps({"intro": "About this.", "order": [int(n) for n in nums]}), "STOP")
+        return ClaudeResult(json.dumps({"intro": "About this.", "order": [int(n) for n in nums]}), "end_turn")
 
 
 def test_the_builder_sorts_consolidates_and_reuses_every_answer(tmp_path: Path) -> None:
     passages = [_passage("s1:1"), _passage("s2:1"), _passage("p1:1"), _passage("p2:1"), _passage("x9:1")]
-    gemini = SortingGemini()
+    ai = SortingAI()
     cache = RequestCache(tmp_path / "library.json")
-    library = LibraryBuilder(gemini, cache, TODAY, "Example Channel").build(passages, ["t1", "t2"])
+    library = LibraryBuilder(ai, cache, TODAY, "Example Channel").build(passages, ["t1", "t2"])
     assert library.notebook_title == "GovCon Library"
     names = {t.name: [p.id for s in t.sections for p in s.passages] for t in library.topics}
     assert names["Registration"] == ["s1:1", "s2:1"] and names["Bidding"] == ["p1:1", "p2:1"]
     assert names[MISC] == ["x9:1"] and library.unplaced == 1
-    asked = len(gemini.prompts)
-    again = LibraryBuilder(gemini, RequestCache(tmp_path / "library.json"), TODAY, "Example Channel").build(
+    asked = len(ai.prompts)
+    again = LibraryBuilder(ai, RequestCache(tmp_path / "library.json"), TODAY, "Example Channel").build(
         [_passage(p.id) for p in passages], ["t1", "t2"]
     )
-    assert len(gemini.prompts) == asked and len(again.topics) == 3  # a rerun asks nothing
+    assert len(ai.prompts) == asked and len(again.topics) == 3  # a rerun asks nothing
 
 
-def _build(tmp_path: Path, gemini: SortingGemini, ids: list[str]) -> Library:
+def _build(tmp_path: Path, ai: SortingAI, ids: list[str]) -> Library:
     cache = RequestCache(tmp_path / "library.json")
-    return LibraryBuilder(gemini, cache, TODAY, "Example Channel").build([_passage(i) for i in ids], ["t1"])
+    return LibraryBuilder(ai, cache, TODAY, "Example Channel").build([_passage(i) for i in ids], ["t1"])
 
 
 def _ids(library: Library) -> dict[str, list[str]]:
@@ -208,36 +220,36 @@ XS = [f"x{i}:1" for i in range(1, 7)]  # more unplaced passages than EXTEND_AT_L
 
 
 def test_passages_that_fit_nowhere_extend_the_map_and_nothing_else_moves(tmp_path: Path) -> None:
-    gemini = SortingGemini()
-    library = _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
+    ai = SortingAI()
+    library = _build(tmp_path, ai, ["s1:1", "p1:1", *XS])
     assert _ids(library) == {
         "Registration/SAM.gov": ["s1:1"],
         "Bidding/Pricing": ["p1:1"],
         "Bidding/Extras": XS,
     }
-    assert len(gemini.asked("fit none of them")) == 1 and len(gemini.asked("You are organising")) == 1
-    replaced = gemini.asked("Place each numbered passage")[-1]
+    assert len(ai.asked("fit none of them")) == 1 and len(ai.asked("You are organising")) == 1
+    replaced = ai.asked("Place each numbered passage")[-1]
     assert "Point s1:1" not in replaced and "Point x1:1" in replaced  # only the unplaced are asked again
-    asked = len(gemini.prompts)
-    _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
-    assert len(gemini.prompts) == asked  # a rerun asks nothing
+    asked = len(ai.prompts)
+    _build(tmp_path, ai, ["s1:1", "p1:1", *XS])
+    assert len(ai.prompts) == asked  # a rerun asks nothing
 
 
 def test_passages_that_still_fit_nowhere_do_not_extend_the_map_again(tmp_path: Path) -> None:
-    gemini = SortingGemini(new_section="Unrelated", places_x=False)
-    library = _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
+    ai = SortingAI(new_section="Unrelated", places_x=False)
+    library = _build(tmp_path, ai, ["s1:1", "p1:1", *XS])
     assert _ids(library)[f"{MISC}/{MISC}"] == XS
-    asked = len(gemini.prompts)
-    _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
-    assert len(gemini.prompts) == asked and len(gemini.asked("fit none of them")) == 1
+    asked = len(ai.prompts)
+    _build(tmp_path, ai, ["s1:1", "p1:1", *XS])
+    assert len(ai.prompts) == asked and len(ai.asked("fit none of them")) == 1
 
 
 def test_a_new_video_is_placed_without_moving_or_re_sorting_the_rest(tmp_path: Path) -> None:
-    gemini = SortingGemini()
-    _build(tmp_path, gemini, ["s1:1", "p1:1"])
-    before = len(gemini.prompts)
-    library = _build(tmp_path, gemini, ["s1:1", "p1:1", "s2:1"])
-    new = gemini.prompts[before:]
+    ai = SortingAI()
+    _build(tmp_path, ai, ["s1:1", "p1:1"])
+    before = len(ai.prompts)
+    library = _build(tmp_path, ai, ["s1:1", "p1:1", "s2:1"])
+    new = ai.prompts[before:]
     assert not any("study library" in p for p in new)  # the map is kept
     placed = [p for p in new if "Place each numbered passage" in p]
     assert len(placed) == 1 and "Point s2:1" in placed[0] and "Point s1:1" not in placed[0]
@@ -247,24 +259,24 @@ def test_a_new_video_is_placed_without_moving_or_re_sorting_the_rest(tmp_path: P
 
 
 def test_resort_rebuilds_the_map(tmp_path: Path) -> None:
-    gemini = SortingGemini()
-    _build(tmp_path, gemini, ["s1:1", "p1:1"])
+    ai = SortingAI()
+    _build(tmp_path, ai, ["s1:1", "p1:1"])
     cache = RequestCache(tmp_path / "library.json")
-    LibraryBuilder(gemini, cache, TODAY, "Example Channel").build([_passage("s1:1")], ["t1"], resort=True)
-    assert len(gemini.asked("You are organising")) == 2
+    LibraryBuilder(ai, cache, TODAY, "Example Channel").build([_passage("s1:1")], ["t1"], resort=True)
+    assert len(ai.asked("You are organising")) == 2
 
 
 def test_a_large_section_is_divided_into_subsections_once(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(library_module, "SUBSECTION_AT", 3)
-    gemini = SortingGemini()
-    library = _build(tmp_path, gemini, [f"s{i}:1" for i in range(1, 6)])
+    ai = SortingAI()
+    library = _build(tmp_path, ai, [f"s{i}:1" for i in range(1, 6)])
     assert _ids(library) == {
         "Registration/SAM.gov: Alpha": ["s2:1", "s4:1"],
         "Registration/SAM.gov: Beta": ["s1:1", "s3:1", "s5:1"],
     }
-    before = len(gemini.prompts)
-    library = _build(tmp_path, gemini, [f"s{i}:1" for i in range(1, 7)])
-    new = gemini.prompts[before:]
+    before = len(ai.prompts)
+    library = _build(tmp_path, ai, [f"s{i}:1" for i in range(1, 7)])
+    new = ai.prompts[before:]
     assert not any("has grown to" in p for p in new)  # the names are kept
     assert _ids(library)["Registration/SAM.gov: Alpha"] == ["s2:1", "s4:1", "s6:1"]
     assert sum("0: Alpha" in p for p in new) == 1 and "Point s1:1" not in next(
@@ -420,10 +432,10 @@ def test_the_library_cache_is_saved_as_each_answer_arrives(tmp_path: Path) -> No
 
 
 def test_an_extension_that_adds_nothing_asks_nothing_more(tmp_path: Path) -> None:
-    gemini = SortingGemini(new_section="Pricing")  # names only a section that already exists
-    builder = LibraryBuilder(gemini, RequestCache(tmp_path / "library.json"), TODAY, "Example Channel")
+    ai = SortingAI(new_section="Pricing")  # names only a section that already exists
+    builder = LibraryBuilder(ai, RequestCache(tmp_path / "library.json"), TODAY, "Example Channel")
     builder.build([_passage(i) for i in ["s1:1", "p1:1", *XS]], ["t1"])
-    assert len(gemini.asked("Place each numbered passage")) == 1
+    assert len(ai.asked("Place each numbered passage")) == 1
     assert any("No new topics" in n for n in builder.notices)
 
 
@@ -431,51 +443,115 @@ def test_an_extension_that_adds_nothing_asks_nothing_more(tmp_path: Path) -> Non
 
 
 def test_an_unusable_extension_answer_is_not_paid_for_again(tmp_path: Path) -> None:
-    gemini = SortingGemini(new_section="")  # an answer with no usable section
-    _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
-    _build(tmp_path, gemini, ["s1:1", "p1:1", *XS])
-    assert len(gemini.asked("fit none of them")) == 1
+    ai = SortingAI(new_section="")  # an answer with no usable section
+    _build(tmp_path, ai, ["s1:1", "p1:1", *XS])
+    _build(tmp_path, ai, ["s1:1", "p1:1", *XS])
+    assert len(ai.asked("fit none of them")) == 1
 
 
 def test_an_unusable_subsection_answer_is_not_paid_for_again(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(library_module, "SUBSECTION_AT", 3)
-    gemini = SortingGemini(subsections=["Only one"])
+    ai = SortingAI(subsections=["Only one"])
     ids = [f"s{i}:1" for i in range(1, 6)]
-    _build(tmp_path, gemini, ids)
-    _build(tmp_path, gemini, ids)
-    assert len(gemini.asked("has grown to")) == 1
-    _build(tmp_path, gemini, [*ids, "s6:1"])  # the section changed: asked again
-    assert len(gemini.asked("has grown to")) == 2
+    _build(tmp_path, ai, ids)
+    _build(tmp_path, ai, ids)
+    assert len(ai.asked("has grown to")) == 1
+    _build(tmp_path, ai, [*ids, "s6:1"])  # the section changed: asked again
+    assert len(ai.asked("has grown to")) == 2
 
 
-def test_subsection_names_survive_a_quota_stop(tmp_path: Path, monkeypatch) -> None:
+def test_subsection_names_survive_a_run_stopping_limit(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(library_module, "SUBSECTION_AT", 3)
-    gemini = SortingGemini()
-    gemini.quota_on = "0: Alpha"
+    ai = SortingAI()
+    ai.limit_on = "0: Alpha"
     ids = [f"s{i}:1" for i in range(1, 6)]
-    with pytest.raises(GeminiError):
-        _build(tmp_path, gemini, ids)
-    gemini.quota_on = None
-    library = _build(tmp_path, gemini, ids)
-    assert len(gemini.asked("has grown to")) == 1 and "Registration/SAM.gov: Alpha" in _ids(library)
+    with pytest.raises(ClaudeError):
+        _build(tmp_path, ai, ids)
+    ai.limit_on = None
+    library = _build(tmp_path, ai, ids)
+    assert len(ai.asked("has grown to")) == 1 and "Registration/SAM.gov: Alpha" in _ids(library)
 
 
 def test_resort_forgets_subsections(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(library_module, "SUBSECTION_AT", 3)
-    gemini = SortingGemini()
+    ai = SortingAI()
     ids = [f"s{i}:1" for i in range(1, 6)]
-    _build(tmp_path, gemini, ids)
+    _build(tmp_path, ai, ids)
     cache = RequestCache(tmp_path / "library.json")
-    LibraryBuilder(gemini, cache, TODAY, "Example Channel").build([_passage(i) for i in ids], ["t1"], resort=True)
-    assert len(gemini.asked("has grown to")) == 2
+    LibraryBuilder(ai, cache, TODAY, "Example Channel").build([_passage(i) for i in ids], ["t1"], resort=True)
+    assert len(ai.asked("has grown to")) == 2
 
 
 def test_a_passage_placed_nowhere_is_asked_about_again_with_new_videos(tmp_path: Path) -> None:
-    gemini = SortingGemini()
-    first = _build(tmp_path, gemini, ["s1:1", "x9:1"])  # one unplaced: too few to extend the map
+    ai = SortingAI()
+    first = _build(tmp_path, ai, ["s1:1", "x9:1"])  # one unplaced: too few to extend the map
     assert _ids(first)[f"{MISC}/{MISC}"] == ["x9:1"]
-    _build(tmp_path, gemini, ["s1:1", "x9:1"])
-    assert len(gemini.asked("Place each numbered passage")) == 1  # nothing new: nothing asked
-    _build(tmp_path, gemini, ["s1:1", "x9:1", "s2:1"])
-    again = gemini.asked("Place each numbered passage")[-1]
+    _build(tmp_path, ai, ["s1:1", "x9:1"])
+    assert len(ai.asked("Place each numbered passage")) == 1  # nothing new: nothing asked
+    _build(tmp_path, ai, ["s1:1", "x9:1", "s2:1"])
+    again = ai.asked("Place each numbered passage")[-1]
     assert "Point s2:1" in again and "Point x9:1" in again and "Point s1:1" not in again
+
+
+def test_placements_are_read_from_pairs_and_a_number_map_is_refused() -> None:
+    answer = json.dumps(
+        {"assignments": [{"passage": 0, "section": 1}, {"passage": 7, "section": 0}, {"x": 1}]}
+    )
+    assert parse_assignments(answer, {0, 1}, 2) == {0: 1}  # 7 is no passage; the malformed pair is skipped
+    with pytest.raises(ValueError):
+        parse_assignments(json.dumps({"assignments": {"0": 1}}), {0}, 2)  # the old shape
+
+
+def test_answers_cached_for_an_older_prompt_version_are_not_reused(monkeypatch) -> None:
+    before = RequestCache.key("consolidate", "T", "S")
+    monkeypatch.setattr(library_module, "LIBRARY_PROMPT_VERSION", "older")
+    assert RequestCache.key("consolidate", "T", "S") != before
+
+
+def test_a_refused_answer_is_remembered_like_an_unusable_one(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(library_module, "SUBSECTION_AT", 3)
+    passages = [_passage(f"p{i}:1") for i in range(1, 6)]
+    ai = SortingAI()
+    ai.refuse_on = "has grown to"
+    cache = RequestCache(tmp_path / "library.json")
+    LibraryBuilder(ai, cache, "2026-11-08", "Chan").build(passages, ["T"])
+    LibraryBuilder(ai, RequestCache(tmp_path / "library.json"), "2026-11-08", "Chan").build(passages, ["T"])
+    assert len(ai.asked("has grown to")) == 1  # paid once, not asked again for the same passages
+
+
+def _builder(tmp_path: Path, ai: SortingAI) -> LibraryBuilder:
+    return LibraryBuilder(ai, RequestCache(tmp_path / "library.json"), "2026-11-08", "Chan")
+
+
+def test_an_unusable_topic_map_stops_with_a_next_step_and_is_not_paid_for_again(tmp_path: Path) -> None:
+    from notebook_alchemy.errors import AlchemyError
+
+    passages = [_passage("s1:1"), _passage("p1:1")]
+    ai = SortingAI()
+    ai.refuse_on = "study library"
+    for _ in range(2):
+        with pytest.raises(AlchemyError, match="could not be used") as err:
+            _builder(tmp_path, ai).build(passages, ["T"])
+        assert "--resort" in (err.value.hint or "")
+    assert len(ai.asked("study library")) == 1
+    ai.refuse_on = None
+    library = _builder(tmp_path, ai).build(passages, ["T"], resort=True)  # --resort asks again
+    assert library.notebook_title == "GovCon Library"
+
+
+def test_unusable_placement_and_order_answers_are_remembered(tmp_path: Path) -> None:
+    passages = [_passage("s1:1"), _passage("s2:1"), _passage("p1:1")]
+    ai = SortingAI()
+    ai.refuse_on = "Place each numbered passage"
+    first = _builder(tmp_path, ai).build(passages, ["T"])
+    assert [t.name for t in first.topics] == [MISC]  # placed nowhere, kept visible
+    asked = len(ai.prompts)
+    _builder(tmp_path, ai).build(passages, ["T"])
+    assert len(ai.prompts) == asked  # the paid answers were remembered
+
+    order = SortingAI()
+    order.refuse_on = "The numbered passages below"
+    _builder(tmp_path / "o", order).build(passages, ["T"])
+    asked = len(order.prompts)
+    _builder(tmp_path / "o", order).build(passages, ["T"])
+    assert len(order.prompts) == asked

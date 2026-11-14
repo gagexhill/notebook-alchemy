@@ -22,12 +22,13 @@ from pathlib import Path
 from typing import Any
 
 from .cleanup import Chunk
-from .errors import GeminiError
+from .errors import AlchemyError, ClaudeError
 from .knowledge import VideoLabels, apply_punctuation
 
 logger = logging.getLogger(__name__)
 
-LIBRARY_PROMPT_VERSION = "1"
+# 2: answers are JSON matching a schema, and passage-number maps became lists of pairs.
+LIBRARY_PROMPT_VERSION = "2"
 MISC = "Miscellaneous"
 OTHER_POINTS = "Other points from this video"
 ASSIGN_BATCH = 300
@@ -202,7 +203,7 @@ class RequestCache:
         self.save()
 
     def put(self, key: str, value: Any) -> None:
-        """Store an answer and save at once: a run stopped part-way (a quota) keeps what it paid for."""
+        """Store an answer and save at once: a run stopped part-way (a limit) keeps what it paid for."""
         self.data[key] = value
         self.save()
 
@@ -224,6 +225,36 @@ def _sample(items: list[str], size: int) -> list[str]:
     return [items[int(i * step)] for i in range(size)]
 
 
+def _obj(**properties: Any) -> dict[str, Any]:
+    """A JSON schema object whose properties are all required (structured outputs need this)."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(properties),
+        "properties": properties,
+    }
+
+
+def _list(items: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "array", "items": items}
+
+
+_STR = {"type": "string"}
+_INT = {"type": "integer"}
+_SECTION = _obj(name=_STR, about=_STR)
+_TOPICS = _list(_obj(name=_STR, sections=_list(_SECTION)))
+TAXONOMY_SCHEMA = _obj(notebook_title=_STR, topics=_TOPICS)
+EXTENSION_SCHEMA = _obj(topics=_TOPICS)
+ASSIGN_SCHEMA = _obj(assignments=_list(_obj(passage=_INT, section=_INT)))
+SUBSECTION_SCHEMA = _obj(subsections=_list(_STR))
+CONSOLIDATE_SCHEMA = _obj(
+    intro=_STR,
+    order=_list(_INT),
+    duplicates=_list(_obj(passage=_INT, keep=_INT)),
+    superseded=_list(_INT),
+)
+
+
 def taxonomy_prompt(channel: str, titles: list[str], headlines: list[str]) -> str:
     return (
         f"You are organising everything the YouTube channel '{channel}' teaches into a small study "
@@ -231,7 +262,7 @@ def taxonomy_prompt(channel: str, titles: list[str], headlines: list[str]) -> st
         "Name the notebook (a short, specific title), then 3 to 12 topics that together cover the "
         "channel, each with 3 to 15 sections. Names are specific to this channel's subject (not "
         "generic labels like 'Tips' or 'General'); each section has a one-line description.\n"
-        'Return only JSON: {"notebook_title": "...", "topics": [{"name": "...", "sections": '
+        'Return JSON: {"notebook_title": "...", "topics": [{"name": "...", "sections": '
         '[{"name": "...", "about": "..."}]}]}\n\n'
         "Video titles (a sample):\n"
         + "\n".join(f"- {t[:120]}" for t in _sample(titles, 200))
@@ -269,21 +300,21 @@ def assign_prompt(listing: str, passages: list[tuple[int, Passage]]) -> str:
     return (
         "Place each numbered passage in exactly one section of the library.\n"
         f"Sections:\n{listing}\n\nPassages:\n{lines}\n\n"
-        'Return only JSON: {"assignments": {"<passage number>": <section number>, ...}} covering '
-        "every passage number."
+        'Return JSON: {"assignments": [{"passage": <passage number>, "section": <section number>}, ...]} '
+        "with one entry for every passage number."
     )
 
 
 def parse_assignments(text: str, passage_numbers: set[int], section_count: int) -> dict[int, int]:
     data = json.loads(text)
-    mapping = data.get("assignments") if isinstance(data, dict) else None
-    if not isinstance(mapping, dict):
-        raise ValueError("no 'assignments' object")
+    pairs = data.get("assignments") if isinstance(data, dict) else None
+    if not isinstance(pairs, list):
+        raise ValueError("no 'assignments' list")
     out: dict[int, int] = {}
-    for key, value in mapping.items():
+    for pair in pairs:
         try:
-            p, s = int(key), int(value)
-        except (TypeError, ValueError):
+            p, s = int(pair["passage"]), int(pair["section"])
+        except (KeyError, TypeError, ValueError):
             continue
         if p in passage_numbers and 0 <= s < section_count:
             out[p] = s
@@ -307,12 +338,13 @@ def consolidate_prompt(topic: str, section: Section, today: str, passages: list[
         "The numbered passages below are in the speakers' own words; you will not rewrite them.\n"
         "1. Write a 2 to 3 sentence introduction to the section, in plain words, for a reader new to it.\n"
         "2. Give the passage numbers in teaching order: basics before details, steps in sequence.\n"
-        "3. Mark duplicates: a passage that makes the same point as another adds nothing. Map it to "
+        "3. Mark duplicates: a passage that makes the same point as another adds nothing. Pair it with "
         "the one to keep, preferring the newer and more complete one. A passage that adds any fact the "
         "other lacks is not a duplicate.\n"
         "4. Mark superseded passages: an older rule, figure or news item that a newer passage on the "
         "same point replaces.\n"
-        'Return only JSON: {"intro": "...", "order": [numbers], "duplicates": {"<n>": <kept n>}, '
+        'Return JSON: {"intro": "...", "order": [numbers], "duplicates": [{"passage": <n>, "keep": '
+        "<kept n>}], "
         '"superseded": [numbers]}\n\n'
         f"Passages:\n{lines}"
     )
@@ -326,10 +358,10 @@ def apply_consolidation(text: str, passages: list[Passage]) -> tuple[str, list[P
         raise ValueError("not an object")
     count = len(passages)
     dupes: dict[int, int] = {}
-    for k, v in (data.get("duplicates") or {}).items():
+    for pair in data.get("duplicates") or []:
         try:
-            a, b = int(k), int(v)
-        except (TypeError, ValueError):
+            a, b = int(pair["passage"]), int(pair["keep"])
+        except (KeyError, TypeError, ValueError):
             continue
         if 0 <= a < count and 0 <= b < count and a != b:
             dupes[a] = b
@@ -408,7 +440,7 @@ def extend_prompt(channel: str, topics: list[Topic], headlines: list[str]) -> st
         "The points below fit none of them. Add only what they need: new sections inside an existing "
         "topic (use its exact name), or a new topic with its sections. Do not rename, remove or repeat "
         "anything that exists. Each new section has a one-line description.\n"
-        'Return only JSON: {"topics": [{"name": "...", "sections": [{"name": "...", "about": "..."}]}]}\n\n'
+        'Return JSON: {"topics": [{"name": "...", "sections": [{"name": "...", "about": "..."}]}]}\n\n'
         "Points:\n" + "\n".join(f"- {h[:120]}" for h in _sample(headlines, HEADLINE_SAMPLE))
     )
 
@@ -457,7 +489,7 @@ def subsection_prompt(topic: str, section: Section) -> str:
         f"The section '{section.name}' of the topic '{topic}' ({section.about}) has grown to "
         f"{len(section.passages)} points. Divide it into 3 to 10 subsections that together cover them; "
         "names are 2 to 6 words, specific, and do not repeat the section's name.\n"
-        'Return only JSON: {"subsections": ["...", ...]}\n\n'
+        'Return JSON: {"subsections": ["...", ...]}\n\n'
         "Points (a sample):\n" + "\n".join(f"- {h[:120]}" for h in sample)
     )
 
@@ -492,17 +524,21 @@ class LibraryBuilder:
     - **Only sections whose passages changed** are consolidated again.
     """
 
-    def __init__(self, gemini: Any, cache: RequestCache, today: str, channel: str) -> None:
-        self.gemini, self.cache, self.today, self.channel = gemini, cache, today, channel
+    def __init__(self, ai: Any, cache: RequestCache, today: str, channel: str) -> None:
+        self.ai, self.cache, self.today, self.channel = ai, cache, today, channel
         self.notices: list[str] = []
         self.requests = 0
 
-    def _ask(self, prompt: str, max_tokens: int = 16384) -> str:
+    def _ask(self, prompt: str, schema: dict[str, Any], max_tokens: int = 16384) -> str:
+        """The answer's JSON text. An answer that arrived but cannot be used (refused or cut off)
+        raises ValueError, like one that does not parse, so both are handled the same way."""
         self.requests += 1
-        result = self.gemini.generate(
-            prompt, json_mode=True, max_output_tokens=max_tokens, allow_fallback=False
-        )
-        return result.text
+        try:
+            return str(self.ai.generate(prompt, schema=schema, max_tokens=max_tokens).text)
+        except ClaudeError as exc:
+            if exc.unusable:
+                raise ValueError(exc.detail) from None
+            raise
 
     def build(
         self,
@@ -564,12 +600,31 @@ class LibraryBuilder:
         return f"placed:{self.channel}"
 
     def _topic_map(self, passages: list[Passage], titles: list[str]) -> tuple[str, list[Topic]]:
+        """The notebook's title and topics, asked for once. An answer that cannot be used is remembered
+        for the passages it saw, so it is not paid for again until they change or `--resort`."""
         stored = self.cache.get(self._map_key)
-        if stored is None:
-            text = self._ask(taxonomy_prompt(self.channel, titles, [p.headline for p in passages]), 8192)
-            name, topics = parse_taxonomy(text)  # raises on an unusable answer before it is cached
-            stored = {"title": name or self.channel, "topics": _map_to_json(topics)}
-            self.cache.put(self._map_key, stored)
+        digest = self._digest(passages)
+        if stored is None or (stored.get("unusable_for") and stored["unusable_for"] != digest):
+            try:
+                text = self._ask(
+                    taxonomy_prompt(self.channel, titles, [p.headline for p in passages]),
+                    TAXONOMY_SCHEMA,
+                    8192,
+                )
+                name, topics = parse_taxonomy(text)
+            except (ValueError, TypeError) as exc:
+                stored = {"unusable_for": digest, "reason": str(exc)[:200]}
+                self.cache.put(self._map_key, stored)
+            else:
+                stored = {"title": name or self.channel, "topics": _map_to_json(topics)}
+                self.cache.put(self._map_key, stored)
+        if "topics" not in stored:
+            raise AlchemyError(
+                f"The AI's topic map for {self.channel} could not be used ({stored.get('reason', '')}). "
+                "The labels are saved; nothing was uploaded.",
+                hint="Run the same command with --resort to ask again, or with --offline to build the books "
+                "without AI.",
+            )
         return str(stored.get("title") or self.channel), _map_from_json(stored["topics"])
 
     @staticmethod
@@ -595,10 +650,12 @@ class LibraryBuilder:
         None when no answer came (a network or server error), so the next run asks again.
         """
         try:
-            text = self._ask(extend_prompt(self.channel, topics, [p.headline for p in unplaced]), 8192)
+            text = self._ask(
+                extend_prompt(self.channel, topics, [p.headline for p in unplaced]), EXTENSION_SCHEMA, 8192
+            )
             additions = parse_extension(text)
-        except GeminiError as exc:
-            if exc.quota:
+        except ClaudeError as exc:
+            if exc.stop_run:
                 raise
             self.notices.append(
                 f"New topics could not be added ({exc.detail}); those passages wait in {MISC}."
@@ -654,19 +711,20 @@ class LibraryBuilder:
     ) -> dict[int, int] | None:
         try:
             return parse_assignments(
-                self._ask(assign_prompt(listing, numbered)), {n for n, _ in numbered}, count
+                self._ask(assign_prompt(listing, numbered), ASSIGN_SCHEMA), {n for n, _ in numbered}, count
             )
-        except GeminiError as exc:
-            if exc.quota:
+        except ClaudeError as exc:
+            if exc.stop_run:
                 raise
             self.notices.append(
                 f"{len(batch)} passages could not be placed ({exc.detail}); they are retried next run."
             )
+            return None
         except (ValueError, TypeError) as exc:
-            self.notices.append(
-                f"{len(batch)} passages could not be placed ({exc}); they are retried next run."
-            )
-        return None
+            # The answer arrived and was paid for: its passages are remembered as placed nowhere and
+            # asked about again only with the next new passages.
+            self.notices.append(f"{len(batch)} passages could not be placed ({exc}); they wait in {MISC}.")
+            return {}
 
     # -- subsections --
 
@@ -685,9 +743,11 @@ class LibraryBuilder:
             if stored.get("unusable_for") == digest:
                 return [section]  # asked already for these passages; the answer was unusable
             try:
-                names = parse_subsections(self._ask(subsection_prompt(topic.name, section)))
-            except GeminiError as exc:
-                if exc.quota:
+                names = parse_subsections(
+                    self._ask(subsection_prompt(topic.name, section), SUBSECTION_SCHEMA)
+                )
+            except ClaudeError as exc:
+                if exc.stop_run:
                     raise
                 self.notices.append(f"'{section.name}' was not divided ({exc.detail}).")
                 return [section]
@@ -695,7 +755,7 @@ class LibraryBuilder:
                 self.notices.append(f"'{section.name}' was not divided ({exc}).")
                 self.cache.put(key, {"unusable_for": digest})
                 return [section]
-            self.cache.put(key, {"names": names, "placed": {}})  # paid for: kept even if a quota stops
+            self.cache.put(key, {"names": names, "placed": {}})  # paid for: kept even if a limit stops
         placed: dict[str, int] = dict(stored.get("placed") or {})
         todo = [p for p in section.passages if p.id not in placed]
         listing = "\n".join(f"{i}: {name}" for i, name in enumerate(names))
@@ -730,12 +790,19 @@ class LibraryBuilder:
             [(p.id, p.headline, p.kind, p.published[:4]) for p in passages],
         )
         text = self.cache.get(key)
+        if isinstance(text, dict):  # an answer paid for earlier that could not be used
+            self.notices.append(
+                f"'{section.name}' kept its passages in their found order ({text.get('unusable')})."
+            )
+            return
         if text is None:
             try:
-                text = self._ask(consolidate_prompt(topic.name, section, self.today, passages))
+                text = self._ask(
+                    consolidate_prompt(topic.name, section, self.today, passages), CONSOLIDATE_SCHEMA
+                )
                 apply_consolidation(text, list(passages))  # check it parses before caching
-            except GeminiError as exc:
-                if exc.quota:
+            except ClaudeError as exc:
+                if exc.stop_run:
                     raise
                 self.notices.append(
                     f"'{section.name}' kept its passages in their found order ({exc.detail})."
@@ -743,6 +810,7 @@ class LibraryBuilder:
                 return
             except (ValueError, TypeError) as exc:
                 self.notices.append(f"'{section.name}' kept its passages in their found order ({exc}).")
+                self.cache.put(key, {"unusable": str(exc)[:200]})  # paid for: not asked again
                 return
             self.cache.put(key, text)
         intro, ordered, duplicates, superseded = apply_consolidation(text, passages)

@@ -13,13 +13,11 @@ from .errors import ConfigError
 
 logger = logging.getLogger(__name__)
 
-# Default model: Google's most capable Flash model. Cheaper choices (gemini-3.5-flash-lite,
-# gemini-2.5-flash-lite) are one ALCHEMY_GEMINI_MODEL setting away; gemini-2.5-flash shuts down
-# on 2026-12-01.
-DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
-# Used when the default is overloaded or unavailable; set ALCHEMY_GEMINI_FALLBACK_MODEL to an empty
-# value to turn the fallback off.
-DEFAULT_GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+# Default model: Claude Haiku 5.5, which matched careful labels best of the models measured on this
+# task (DEVLOG 0.3.0) and is the lowest-cost Claude model. ALCHEMY_MODEL chooses another.
+DEFAULT_MODEL = "claude-haiku-5-5"
+# Where a Claude API key is made.
+KEY_URL = "https://platform.claude.com/settings/keys"
 DEFAULT_NOTEBOOKLM_PROFILE = "default"
 # notebooklm-py 0.8.6 accepts ^[a-zA-Z0-9][a-zA-Z0-9_-]*$; the name is also a folder, so Windows
 # device names are refused too.
@@ -168,9 +166,8 @@ class AlchemyConfig:
     env: str = "development"
     session_file: Path | None = None
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".notebook-alchemy" / "cache")
-    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
-    gemini_model: str = DEFAULT_GEMINI_MODEL
-    gemini_fallback_model: str = DEFAULT_GEMINI_FALLBACK_MODEL
+    api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
+    model: str = DEFAULT_MODEL
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     notebooklm_profile: str = DEFAULT_NOTEBOOKLM_PROFILE
     caption_languages: tuple[str, ...] = ("en", "en-US", "en-GB")
@@ -178,8 +175,8 @@ class AlchemyConfig:
     cookies_browser: str | None = None  # a browser yt-dlp may read the YouTube sign-in from
 
     @property
-    def has_gemini_key(self) -> bool:
-        return is_usable_api_key(self.gemini_api_key)
+    def has_api_key(self) -> bool:
+        return is_usable_api_key(self.api_key)
 
     @classmethod
     def from_env(cls) -> AlchemyConfig:
@@ -201,11 +198,8 @@ class AlchemyConfig:
             env=os.getenv("ALCHEMY_ENV", "development"),
             session_file=_path("ALCHEMY_SESSION_FILE", None),
             cache_dir=_path("ALCHEMY_CACHE_DIR", Path.home() / ".notebook-alchemy" / "cache"),  # type: ignore[arg-type]
-            gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
-            gemini_model=os.getenv("ALCHEMY_GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL,
-            gemini_fallback_model=os.getenv(
-                "ALCHEMY_GEMINI_FALLBACK_MODEL", DEFAULT_GEMINI_FALLBACK_MODEL
-            ).strip(),
+            api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            model=os.getenv("ALCHEMY_MODEL", "").strip() or DEFAULT_MODEL,
             max_concurrency=_int_env(
                 "ALCHEMY_MAX_CONCURRENCY",
                 DEFAULT_MAX_CONCURRENCY,

@@ -1,6 +1,6 @@
 """The no-key path: topics from the words that set video titles apart, no AI involved.
 
-Without a Gemini key the books hold each video's cleaned, deduplicated words, grouped by title
+Without a Claude API key the books hold each video's cleaned, deduplicated words, grouped by title
 words. They say plainly that no AI sorted or edited them.
 """
 

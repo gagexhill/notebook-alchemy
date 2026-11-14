@@ -2,7 +2,7 @@
 
 Captions are cleaned of caption noise and filler, split into short numbered chunks, and checked for
 passages that repeat across videos (stock intros, pitches, reused segments) or within one. Only what
-survives is sent to Gemini, so the paid step reads less; nothing here rewrites what was said.
+survives is sent to Claude, so the paid step reads less; nothing here rewrites what was said.
 """
 
 from __future__ import annotations

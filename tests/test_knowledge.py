@@ -1,4 +1,4 @@
-"""Labelling: prompts, parsing, the per-video cache, quotas and batch mode."""
+"""Labelling: prompts, parsing, the per-video cache, run-stopping limits and batches."""
 
 from __future__ import annotations
 
@@ -8,15 +8,16 @@ from pathlib import Path
 
 import pytest
 
+from notebook_alchemy.claude import ClaudeResult
 from notebook_alchemy.cleanup import Chunk
-from notebook_alchemy.errors import GeminiError
-from notebook_alchemy.gemini import GeminiResult
+from notebook_alchemy.errors import ClaudeError
 from notebook_alchemy.knowledge import (
     KnowledgeStore,
     Labeler,
     VideoText,
     label_key,
     label_prompt,
+    label_schema,
     parse_labels,
     windows,
 )
@@ -44,56 +45,80 @@ def _labels_for(prompt: str, keep_all: bool = False) -> str:
     return json.dumps({"segments": segs})
 
 
-class FakeGemini:
-    model = "gemini-test"
+LIMIT = ClaudeError("spend limit", status=400, detail="workspace usage limit reached", stop_run=True)
+
+
+class FakeAI:
+    """Stands in for ClaudeClient: answers label requests, and batches when asked."""
+
+    model = "claude-test"
 
     def __init__(
-        self, *, quota_after: int | None = None, batch: str = "refused", drop_all: bool = False
+        self, *, limit_after: int | None = None, batch: str = "failed", drop_all: bool = False
     ) -> None:
         self.calls: list[str] = []
-        self.quota_after = quota_after
+        self.attempts = 0  # every request made, answered or not
+        self.cancelled: list[str] = []
+        self.unusable_on: str | None = None  # a prompt phrase answered with a refusal
+        self.schemas: list[dict] = []
+        self.limit_after = limit_after
         self.batch = batch
         self.drop_all = drop_all
         self.batches: list[list[str]] = []
         self.polls = 0
 
-    def generate(self, prompt: str, **kw) -> GeminiResult:
-        assert kw.get("allow_fallback") is False  # labels are never made by a fallback model
-        if self.quota_after is not None and len(self.calls) >= self.quota_after:
-            raise GeminiError("quota", status=429, detail="daily request quota exhausted", quota=True)
+    def generate(self, prompt: str, *, schema: dict, **kw) -> ClaudeResult:
+        self.attempts += 1
+        if self.limit_after is not None and len(self.calls) >= self.limit_after:
+            raise LIMIT
+        if self.unusable_on and self.unusable_on in prompt:
+            self.calls.append(prompt)
+            raise ClaudeError(
+                "Unusable answer.", detail="Claude declined to answer this request", unusable=True
+            )
         self.calls.append(prompt)
+        self.schemas.append(schema)
         if self.drop_all and "almost everything was dropped" not in prompt:
             nums = re.findall(r"^\[(\d+)\]", prompt, re.MULTILINE)
-            return GeminiResult(
-                json.dumps({"segments": [{"from": int(nums[0]), "to": int(nums[-1]), "keep": False}]}), "STOP"
+            return ClaudeResult(
+                json.dumps({"segments": [{"from": int(nums[0]), "to": int(nums[-1]), "keep": False}]}),
+                "end_turn",
             )
-        return GeminiResult(_labels_for(prompt), "STOP")
+        return ClaudeResult(_labels_for(prompt), "end_turn")
 
-    def submit_batch(self, requests, name):
-        if self.batch == "refused":
-            raise GeminiError("refused", status=400, detail="HTTP 400: Precondition check failed.")
-        self.batches.append([k for k, _ in requests])
-        self._bodies = dict(requests)
-        return "batches/1"
+    def submit_batch(self, requests):
+        if self.batch == "failed":
+            raise ClaudeError("batch", status=500, detail="HTTP 500: internal error")
+        if self.batch == "limit":
+            raise LIMIT
+        self.batches.append([r[0] for r in requests])
+        self._prompts = {r[0]: r[1] for r in requests}
+        return "msgbatch_1"
 
-    def batch_results(self, name, keys):
+    def cancel_batch(self, batch_id):
+        self.cancelled.append(batch_id)
+
+    def batch_results(self, batch_id, keys):
         self.polls += 1
+        if self.batch == "gone":
+            return "gone", {}
         if self.batch == "running":
-            return "JOB_STATE_RUNNING", None
-        out = {}
+            return "in_progress", None
+        out: dict = {}
         for k in keys:
-            prompt = self._bodies[k]["contents"][0]["parts"][0]["text"]
-            out[k] = GeminiResult(_labels_for(prompt), "STOP")
-        return "JOB_STATE_SUCCEEDED", out
+            if self.batch == "one_errored" and k == keys[0]:
+                out[k] = ClaudeError("batch item", detail="api_error: overloaded")
+                continue
+            if self.batch == "one_refused" and k == keys[0]:
+                out[k] = ClaudeError("Unusable answer.", detail="refused", unusable=True)
+                continue
+            out[k] = ClaudeResult(_labels_for(self._prompts[k]), "end_turn")
+        return "ended", out
 
-    @staticmethod
-    def batch_refused(exc: GeminiError) -> bool:
-        return "precondition" in exc.detail.lower()
 
-
-def _labeler(tmp_path: Path, gemini: FakeGemini, **kw) -> Labeler:
+def _labeler(tmp_path: Path, ai: FakeAI, **kw) -> Labeler:
     return Labeler(
-        gemini,
+        ai,
         KnowledgeStore(tmp_path / "knowledge"),
         TODAY,
         state_path=tmp_path / "batch.json",
@@ -129,60 +154,84 @@ def test_labels_outside_the_chunks_or_overlapping_are_dropped_and_counted() -> N
 
 
 def test_a_video_is_labelled_once_then_read_from_the_cache(tmp_path: Path) -> None:
-    gemini = FakeGemini()
-    first = _labeler(tmp_path, gemini).run([_video()])
-    assert first.labelled_now == 1 and len(gemini.calls) == 1
+    ai = FakeAI()
+    first = _labeler(tmp_path, ai).run([_video()])
+    assert first.labelled_now == 1 and len(ai.calls) == 1
     labels = first.labels["abcdefghijk"]
     assert [(s.start, s.end, s.keep) for s in labels.segments] == [(1, 1, False), (2, 6, True)]
-    again = _labeler(tmp_path, gemini).run([_video()])
-    assert again.labelled_now == 0 and len(gemini.calls) == 1  # no request the second time
+    again = _labeler(tmp_path, ai).run([_video()])
+    assert again.labelled_now == 0 and len(ai.calls) == 1  # no request the second time
 
 
 def test_a_changed_transcript_or_model_labels_again(tmp_path: Path) -> None:
-    gemini = FakeGemini()
-    _labeler(tmp_path, gemini).run([_video()])
-    _labeler(tmp_path, gemini).run([_video(transcript="edited")])
-    assert len(gemini.calls) == 2
+    ai = FakeAI()
+    _labeler(tmp_path, ai).run([_video()])
+    _labeler(tmp_path, ai).run([_video(transcript="edited")])
+    assert len(ai.calls) == 2
     assert label_key("v", "t", "m1") != label_key("v", "t", "m2")
 
 
-def test_a_used_up_quota_keeps_what_was_done_and_leaves_the_rest_for_next_run(tmp_path: Path) -> None:
-    gemini = FakeGemini(quota_after=2)
-    run = _labeler(tmp_path, gemini, workers=1).run([_video(f"vid{i:08d}") for i in range(4)])
+def test_a_spend_limit_keeps_what_was_done_and_leaves_the_rest_for_next_run(tmp_path: Path) -> None:
+    ai = FakeAI(limit_after=2)
+    run = _labeler(tmp_path, ai, workers=1).run([_video(f"vid{i:08d}") for i in range(4)])
     assert run.labelled_now == 2 and len(run.waiting) == 2
-    assert any("quota is used up" in n for n in run.notices)
-    resumed = _labeler(tmp_path, FakeGemini(), workers=1).run([_video(f"vid{i:08d}") for i in range(4)])
+    assert any("spend limit" in n and "wait for the next run" in n for n in run.notices)
+    assert ai.attempts == 3  # the third request met the limit; the fourth was never made
+    resumed = _labeler(tmp_path, FakeAI(), workers=1).run([_video(f"vid{i:08d}") for i in range(4)])
     assert resumed.labelled_now == 2 and not resumed.waiting
 
 
 def test_almost_everything_dropped_is_labelled_once_more_keeping_when_unsure(tmp_path: Path) -> None:
-    gemini = FakeGemini(drop_all=True)
-    labels = _labeler(tmp_path, gemini).run([_video()]).labels["abcdefghijk"]
-    assert labels.relabelled and any(s.keep for s in labels.segments) and len(gemini.calls) == 2
+    ai = FakeAI(drop_all=True)
+    labels = _labeler(tmp_path, ai).run([_video()]).labels["abcdefghijk"]
+    assert labels.relabelled and any(s.keep for s in labels.segments) and len(ai.calls) == 2
 
 
-def test_batch_mode_without_billing_falls_back_to_standard_calls_and_says_so(tmp_path: Path) -> None:
-    gemini = FakeGemini(batch="refused")
-    run = _labeler(tmp_path, gemini).run([_video()])
-    assert run.labelled_now == 1 and len(gemini.calls) == 1
-    assert any("needs billing" in n for n in run.notices)
+def test_a_batch_that_cannot_start_falls_back_to_standard_calls_and_says_so(tmp_path: Path) -> None:
+    ai = FakeAI(batch="failed")
+    run = _labeler(tmp_path, ai).run([_video()])
+    assert run.labelled_now == 1 and len(ai.calls) == 1
+    assert any("could not be started" in n for n in run.notices)
+
+
+def test_a_spend_limit_on_the_batch_stops_the_run_instead_of_paying_full_price(tmp_path: Path) -> None:
+    ai = FakeAI(batch="limit")
+    with pytest.raises(ClaudeError) as caught:
+        _labeler(tmp_path, ai).run([_video()])
+    assert caught.value.stop_run and ai.calls == []
+
+
+def test_a_batch_request_that_was_not_answered_is_asked_again_directly(tmp_path: Path) -> None:
+    ai = FakeAI(batch="one_errored")
+    run = _labeler(tmp_path, ai).run([_video("vid00000001"), _video("vid00000002")])
+    assert run.labelled_now == 2 and len(ai.calls) == 1  # only the unanswered one, at full price
+    assert any("were not answered" in n for n in run.notices)
+
+
+def test_each_request_asks_for_the_label_shape_with_text_only_when_punctuating(tmp_path: Path) -> None:
+    ai = FakeAI()
+    _labeler(tmp_path, ai).run([_video(transcript="Punctuated. Sentences here. ")])
+    _labeler(tmp_path, ai).run([_video("vid00000009", transcript="no punctuation at all here")])
+    first, second = (s["properties"]["segments"]["items"] for s in ai.schemas)
+    assert "text" not in first["required"] and "text" in second["required"]
+    assert first["additionalProperties"] is False and label_schema()["additionalProperties"] is False
 
 
 def test_a_finished_batch_labels_without_standard_calls(tmp_path: Path) -> None:
-    gemini = FakeGemini(batch="ok")
-    run = _labeler(tmp_path, gemini).run([_video("vid00000001"), _video("vid00000002")])
+    ai = FakeAI(batch="ok")
+    run = _labeler(tmp_path, ai).run([_video("vid00000001"), _video("vid00000002")])
     assert (
         run.labelled_now == 2
-        and gemini.calls == []
-        and len(gemini.batches) == 1
-        and len(gemini.batches[0]) == 2  # one request per video, one batch
+        and ai.calls == []
+        and len(ai.batches) == 1
+        and len(ai.batches[0]) == 2  # one request per video, one batch
     )
     assert not (tmp_path / "batch.json").read_text(encoding="utf-8").strip("{}")  # job cleared
 
 
 def test_a_batch_still_running_is_remembered_and_collected_next_run(tmp_path: Path) -> None:
     clock = {"t": 0.0}
-    running = FakeGemini(batch="running")
+    running = FakeAI(batch="running")
     first = Labeler(
         running,
         KnowledgeStore(tmp_path / "knowledge"),
@@ -193,10 +242,10 @@ def test_a_batch_still_running_is_remembered_and_collected_next_run(tmp_path: Pa
         sleep=lambda s: clock.update(t=clock["t"] + s),
         clock=lambda: clock["t"],
     ).run([_video()])
-    assert first.waiting == ["abcdefghijk"] and any("still working" in n for n in first.notices)
-    assert json.loads((tmp_path / "batch.json").read_text(encoding="utf-8"))["job"] == "batches/1"
-    finished = FakeGemini(batch="ok")
-    finished._bodies = running._bodies
+    assert first.waiting == ["abcdefghijk"] and any("still running" in n for n in first.notices)
+    assert json.loads((tmp_path / "batch.json").read_text(encoding="utf-8"))["job"] == "msgbatch_1"
+    finished = FakeAI(batch="ok")
+    finished._prompts = running._prompts
     second = _labeler(tmp_path, finished).run([_video()])
     assert second.labelled_now == 1 and finished.batches == []  # collected, not submitted again
 
@@ -210,23 +259,63 @@ def test_long_videos_are_labelled_in_windows_with_numbering_carried_on() -> None
 def test_batch_requests_are_tied_to_the_transcript() -> None:
     from notebook_alchemy.knowledge import Labeler
 
-    labeler = Labeler(FakeGemini(), KnowledgeStore(Path("unused")), TODAY, state_path=Path("unused"))
+    labeler = Labeler(FakeAI(), KnowledgeStore(Path("unused")), TODAY, state_path=Path("unused"))
     same = labeler._requests(_video())[0][0]
     assert same == labeler._requests(_video())[0][0] != labeler._requests(_video(transcript="edited"))[0][0]
 
 
 def test_a_relabel_that_fails_leaves_the_video_waiting_instead_of_saving_poor_labels(tmp_path: Path) -> None:
-    class DropsThenQuota(FakeGemini):
-        def generate(self, prompt: str, **kw) -> GeminiResult:
+    class DropsThenLimit(FakeAI):
+        def generate(self, prompt: str, **kw) -> ClaudeResult:
             if "almost everything was dropped" in prompt:
-                raise GeminiError("quota", status=429, detail="daily request quota exhausted", quota=True)
+                raise LIMIT
             return super().generate(prompt, **kw)
 
-    gemini = DropsThenQuota(drop_all=True)
-    run = _labeler(tmp_path, gemini).run([_video()])
+    ai = DropsThenLimit(drop_all=True)
+    run = _labeler(tmp_path, ai).run([_video()])
     assert run.waiting == ["abcdefghijk"] and not list((tmp_path / "knowledge").glob("*.json"))
 
 
 def test_labels_record_which_chunks_the_model_saw(tmp_path: Path) -> None:
-    labels = _labeler(tmp_path, FakeGemini()).run([_video(n=4)]).labels["abcdefghijk"]
+    labels = _labeler(tmp_path, FakeAI()).run([_video(n=4)]).labels["abcdefghijk"]
     assert labels.seen == [1, 2, 3, 4] and labels.covers(3) and not labels.covers(9)
+
+
+def test_a_refused_answer_is_saved_as_no_labels_and_not_paid_for_again(tmp_path: Path) -> None:
+    ai = FakeAI()
+    ai.unusable_on = "Title vid00000001"
+    run = _labeler(tmp_path, ai).run([_video("vid00000001"), _video("vid00000002")])
+    assert run.labelled_now == 2 and not run.waiting  # nothing waits, so the upload is not blocked
+    assert run.labels["vid00000001"].segments == [] and any("could not be used" in n for n in run.notices)
+    again = FakeAI()
+    _labeler(tmp_path, again).run([_video("vid00000001"), _video("vid00000002")])
+    assert again.attempts == 0  # both came from the cache
+
+
+def test_a_refused_batch_answer_is_not_asked_again_directly(tmp_path: Path) -> None:
+    ai = FakeAI(batch="one_refused")
+    run = _labeler(tmp_path, ai).run([_video("vid00000001"), _video("vid00000002")])
+    assert run.labelled_now == 2 and ai.attempts == 0
+
+
+def test_a_batch_for_other_videos_is_stopped_before_a_new_one_starts(tmp_path: Path) -> None:
+    (tmp_path / "batch.json").write_text(
+        json.dumps({"job": "msgbatch_old", "keys": ["someone-else#0"], "model": "claude-test"}),
+        encoding="utf-8",
+    )
+    ai = FakeAI(batch="ok")
+    run = _labeler(tmp_path, ai).run([_video()])
+    assert ai.cancelled == ["msgbatch_old"] and run.labelled_now == 1
+    assert any("it was stopped" in n for n in run.notices)
+
+
+def test_a_batch_that_is_gone_is_asked_again_directly(tmp_path: Path) -> None:
+    (tmp_path / "batch.json").write_text(
+        json.dumps({"job": "msgbatch_old", "keys": [], "model": "claude-test"}), encoding="utf-8"
+    )
+    ai = FakeAI(batch="gone")
+    run = _labeler(tmp_path, ai).run([_video()])
+    assert (
+        run.labelled_now == 1 and len(ai.calls) == 1 and any("no longer available" in n for n in run.notices)
+    )
+    assert not (tmp_path / "batch.json").read_text(encoding="utf-8").strip("{}")

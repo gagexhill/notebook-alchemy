@@ -3,7 +3,7 @@
 1. Find every video (with a date).
 2. Get every video's words: captions, yt-dlp subtitles, then NotebookLM on Google's side.
 3. Clean them locally and keep each repeated passage once.
-4. Label each video once with Gemini (keep or drop, headline, kind); cached.
+4. Label each video once with Claude (keep or drop, headline, kind); cached.
 5. Sort passages into topics and sections, consolidate each section, apply the date rules.
 6. Write one book per topic plus an overview, and upload them; nothing is kept on disk.
 
@@ -25,11 +25,11 @@ from pathlib import Path
 from typing import Any
 
 from .channel import ChannelScanner, ChannelVideo, TranscriptManager, YtDlpSubtitles, video_id_from_url
+from .claude import BATCH_PRICE_FACTOR, ClaudeClient, price_for
 from .cleanup import Chunk, chunk_video, is_punctuated, mark_duplicates
 from .client import NotebookLMClient, SourceDocument, normalize_title
 from .config import CAPTION_BLOCK_PAUSE, AlchemyConfig
-from .errors import AlchemyError, ChannelScanError, GeminiError, SessionError, SyncError
-from .gemini import GeminiClient, price_for, watch_cost
+from .errors import AlchemyError, ChannelScanError, ClaudeError, SessionError, SyncError
 from .knowledge import KnowledgeStore, Labeler, VideoText, label_key
 from .library import Library, LibraryBuilder, Passage, RequestCache, build_passages
 from .mock_data import MOCK_NOTEBOOK_TITLE, get_mock_sources, sample_transcript
@@ -56,16 +56,8 @@ SORTING_SHARE = 0.15  # sorting and consolidation, as a share of the labelling c
 
 # `notebooklm` processes run at once during an upload. Kept small to stay clear of rate limits.
 SYNC_WORKERS = 3
-# --watch: Gemini watches a video no route could read and writes down what is said.
-WATCH_MAX_MINUTES = 90
-NO_SPEECH = "NO_SPEECH"
-WATCHED = "gemini-video"  # the cache's method for words Gemini wrote down from the video
-WATCH_PROMPT = (
-    "Write down everything that is said in this video, word for word, in the order it is said. "
-    "Plain text only: no timestamps, no speaker names, no description of what is shown, no summary, "
-    "and nothing added. Keep the speakers' own words, including how they phrase things. "
-    f"If nobody speaks, answer only {NO_SPEECH}."
-)
+# How 0.3 previews cached words that Gemini wrote down from a video (`--watch`, since removed).
+MODEL_WRITTEN = "gemini-video"
 # In the library cache: topic -> section -> the part of the topic book it is in.
 PARTS_KEY = "parts"
 
@@ -171,15 +163,7 @@ class AlchemyEngine:
     def __init__(self, config: AlchemyConfig | None = None) -> None:
         self.config = config or AlchemyConfig.from_env()
         self.client = NotebookLMClient(self.config)
-        self.gemini = (
-            GeminiClient(
-                self.config.gemini_api_key,
-                self.config.gemini_model,
-                fallback_model=self.config.gemini_fallback_model,
-            )
-            if self.config.has_gemini_key
-            else None
-        )
+        self.ai = ClaudeClient(self.config.api_key, self.config.model) if self.config.has_api_key else None
         self.route_notices: list[str] = []  # said once per build by the NotebookLM transcript route
         self.transcripts = TranscriptManager(
             cache_dir=self.config.cache_dir,
@@ -205,6 +189,10 @@ class AlchemyEngine:
     def library_cache_path(self, channel: str) -> Path:
         return self.home / "library" / f"{_safe_name(channel)}.json"
 
+    def batch_state_path(self, channel: str) -> Path:
+        """The labelling batch still running for a channel, collected by the next run."""
+        return self.home / "batches" / f"{_safe_name(channel)}.json"
+
     def sync_records_dir(self) -> Path:
         """Per notebook: the titles the last upload added (`clean --records` empties it)."""
         return self.home / "sync"
@@ -221,8 +209,8 @@ class AlchemyEngine:
             "notebooklm_cli": self.client.cli_version() or "not found (pip install notebooklm-py)",
             "notebooklm_profile": self.client.profile,
             "session_file": _home_relative(session) if session else "none (run: notebook-alchemy login)",
-            "gemini_api_key": "set" if self.config.has_gemini_key else "unset",
-            "gemini_model": self.config.gemini_model,
+            "api_key": "set" if self.config.has_api_key else "unset",
+            "model": self.config.model,
             "cache_dir": f"{_home_relative(self.home)} ({_dir_size(self.home) / 1024:.0f} KB)",
             "max_concurrency": self.config.max_concurrency,
         }
@@ -245,9 +233,12 @@ class AlchemyEngine:
         scan = ChannelScanner().scan(source, limit=limit, tabs=tabs)
         return scan.channel_name, scan.videos
 
-    def estimate(self, videos: list[ChannelVideo], *, mock: bool = False) -> Estimate:
-        """Words already read and an estimated cost for the rest, from durations. Spends nothing."""
-        model = self.config.gemini_model
+    def estimate(self, videos: list[ChannelVideo], *, mock: bool = False, batch: bool = True) -> Estimate:
+        """Words already read and an estimated cost for the rest, from durations. Spends nothing.
+
+        `batch` prices the labelling at the half-price batch rate, as a run without --now pays.
+        """
+        model = self.config.model
         price_in, price_out, _note = price_for(model)
         known_words = known_videos = labelled = 0
         words_total = 0
@@ -271,7 +262,8 @@ class AlchemyEngine:
             tokens = words * TOKENS_PER_WORD
             share = LABEL_OUTPUT_SHARE + (0 if punctuated else PUNCTUATED_OUTPUT_SHARE)
             cost += (tokens * price_in + tokens * share * price_out) / 1e6
-        cost *= 1 + SORTING_SHARE
+        # Labels can be made in a half-price batch; sorting and consolidation always use standard calls.
+        cost = cost * (BATCH_PRICE_FACTOR if batch else 1.0) + cost * SORTING_SHARE
         return Estimate(len(videos), known_words, known_videos, words_total, labelled, cost, model)
 
     # -- 2.-6. build --
@@ -286,8 +278,6 @@ class AlchemyEngine:
         offline: bool = False,
         resort: bool = False,
         use_batch: bool = True,
-        watch: int = 0,
-        confirm_watch: Callable[[int, int, float], bool] | None = None,
         progress: ProgressFn | None = None,
     ) -> BuildReport:
         self.route_notices = []
@@ -296,7 +286,6 @@ class AlchemyEngine:
         notices: list[str] = []
 
         # 2. words
-        watched: set[str] = set()  # words Gemini wrote down by watching the video, named in the overview
         if mock:
             texts = {v.id: sample_transcript({"title": v.title}) for v in videos}
             exact: set[str] = set()
@@ -306,9 +295,10 @@ class AlchemyEngine:
                 [(v.id, v.title) for v in videos],
                 progress=(lambda d, t: progress("Reading what each video says", d, t)) if progress else None,
             )
-            texts = {vid: r.text for vid, r in results.items() if r.text}
+            # Words a model wrote down from a video (the removed `--watch`) are not the speakers' own, so
+            # such a cached record is not used: the video counts as unread.
+            texts = {vid: r.text for vid, r in results.items() if r.text and r.method != MODEL_WRITTEN}
             exact = {vid for vid, r in results.items() if r.published}
-            watched = {vid for vid, r in results.items() if r.text and r.method == WATCHED}
             for v in videos:  # an exact date from yt-dlp replaces the listing's approximate one
                 if results.get(v.id) and results[v.id].published:
                     v.published = results[v.id].published
@@ -319,10 +309,6 @@ class AlchemyEngine:
                     f"YouTube wouldn't share words for {self.transcripts.blocked_total} videos this time. "
                     "Run the same command later to fill them in; words already read are kept."
                 )
-        if watch and not mock:
-            before = set(texts)
-            notices += self._watch_unread(videos, texts, by_source, watch, confirm_watch)
-            watched |= set(texts) - before
         read = set(texts)
 
         # 3. clean and dedupe
@@ -330,28 +316,34 @@ class AlchemyEngine:
         dated = {v.id: v.published for v in videos}
         mark_duplicates([(dated.get(vid, ""), cs) for vid, cs in chunks.items()])
 
-        use_ai = self.gemini is not None and not offline and not mock
+        use_ai = self.ai is not None and not offline and not mock
         waiting: list[str] = []
         labelled = 0
         passages: list[Passage] = []
         titles = {v.id: v.title for v in videos}
         if use_ai:
-            assert self.gemini is not None  # noqa: S101 - use_ai implies it
+            assert self.ai is not None  # noqa: S101 - use_ai implies it
             # 4. labels
             labeler = Labeler(
-                self.gemini,
+                self.ai,
                 KnowledgeStore(self.knowledge_dir()),
                 today,
-                state_path=self.home / "batch.json",
+                state_path=self.batch_state_path(channel),
                 use_batch=use_batch,
             )
             to_label = [
                 VideoText(vid, titles.get(vid, ""), dated.get(vid, ""), texts[vid], [c for c in cs if c.kept])
                 for vid, cs in chunks.items()
             ]
-            run = labeler.run(
-                to_label, progress=(lambda d, t: progress("Labelling", d, t)) if progress else None
-            )
+            try:
+                run = labeler.run(
+                    to_label, progress=(lambda d, t: progress("Labelling", d, t)) if progress else None
+                )
+            except ClaudeError as exc:  # a key, credit or rate limit stopped the batch
+                raise AlchemyError(
+                    f"{exc.message} Labels made so far are saved; nothing was uploaded.",
+                    hint=exc.hint or "Run the same command again; it carries on from here.",
+                ) from exc
             notices += run.notices
             waiting, labelled = run.waiting, run.labelled_now
             for vid, cs in chunks.items():
@@ -360,19 +352,16 @@ class AlchemyEngine:
                         vid, titles.get(vid, ""), dated.get(vid, ""), cs, run.labels[vid]
                     )
             # 5. library
-            builder = LibraryBuilder(
-                self.gemini, RequestCache(self.library_cache_path(channel)), today, channel
-            )
+            builder = LibraryBuilder(self.ai, RequestCache(self.library_cache_path(channel)), today, channel)
             try:
                 library = builder.build(passages, list(titles.values()), resort=resort, progress=progress)
-            except GeminiError as exc:
-                if not exc.quota:
+            except ClaudeError as exc:
+                if not exc.stop_run:
                     raise
                 raise AlchemyError(
-                    f"Gemini's daily request quota is used up. {len(run.labels)} of {len(chunks)} videos are "
-                    "labelled and saved; nothing was uploaded.",
-                    hint="Run the same command again after the quota resets; it carries on from here. Enable "
-                    "billing on the key's Google Cloud project to finish in one run.",
+                    f"{exc.message} {len(run.labels)} of {len(chunks)} videos are labelled and saved; "
+                    "nothing was uploaded.",
+                    hint=exc.hint or "Run the same command again; it carries on from here.",
                 ) from exc
             notices += builder.notices
         else:
@@ -388,9 +377,7 @@ class AlchemyEngine:
         # move between "Part 1" and "Part 2" (and both get re-uploaded) whenever another one grows.
         layout = None if mock else RequestCache(self.library_cache_path(channel))
         parts = dict(layout.get(PARTS_KEY) or {}) if layout else {}
-        books = render_library(
-            library, channel, titles, read - set(waiting), exact, dated, parts, watched=watched & read
-        )
+        books = render_library(library, channel, titles, read - set(waiting), exact, dated, parts)
         if layout:
             layout.put(PARTS_KEY, parts)
         return BuildReport(
@@ -406,86 +393,6 @@ class AlchemyEngine:
             is_mock=mock,
             used_ai=use_ai,
         )
-
-    def watched_path(self) -> Path:
-        """Videos Gemini watched that gave no words (silence, private, refused), never paid for again."""
-        return self.home / "watched.json"
-
-    def _watch_unread(
-        self,
-        videos: list[ChannelVideo],
-        texts: dict[str, str],
-        by_source: dict[str, int],
-        limit: int,
-        confirm: Callable[[int, int, float], bool] | None = None,
-    ) -> list[str]:
-        """Gemini watches up to `limit` videos no route could read, and writes down what is said.
-
-        - The words are cached like captions (method "gemini-video"), so a video is never paid for
-          twice; a watch that gave no words for good (no speech, a refusal) is recorded in
-          `watched.json`, so the next run moves on to other videos instead of paying again.
-        - Longer than WATCH_MAX_MINUTES, or of unknown length, a video is left in the overview's
-          unread list: its cost cannot be bounded first.
-        - `confirm(videos, seconds, usd)` sees the estimate before anything is paid.
-        - Only a complete answer (finish reason STOP) is kept; a cut-off one is not cached.
-        """
-        if self.gemini is None:
-            raise AlchemyError(
-                "--watch needs a Gemini API key: Gemini watches the videos.",
-                hint="Add a key with `notebook-alchemy setup`, or run without --watch.",
-            )
-        done_before = self._read_json(self.watched_path())
-        unread = [v for v in videos if v.id not in texts and v.id not in done_before]
-        bounded = [v for v in unread if 0 < v.duration_seconds <= WATCH_MAX_MINUTES * 60]
-        fits = bounded[:limit]
-        notices: list[str] = []
-        too_long = len(unread) - len(bounded)
-        if too_long:
-            notices.append(
-                f"{too_long} unread videos were not watched: longer than {WATCH_MAX_MINUTES} minutes or "
-                "of unknown length."
-            )
-        if not fits:
-            return notices
-        seconds = sum(v.duration_seconds for v in fits)
-        cost = watch_cost(seconds, self.gemini.model)
-        if confirm is not None and not confirm(len(fits), seconds, cost):
-            notices.append(f"{len(fits)} unread videos were not watched.")
-            return notices
-        outcomes: dict[str, Any] = dict(done_before)
-        watched = 0
-        for v in fits:
-            try:
-                answer = self.gemini.watch(f"https://www.youtube.com/watch?v={v.id}", WATCH_PROMPT)
-            except GeminiError as exc:
-                if exc.quota:
-                    notices.append(
-                        "Gemini's daily quota ran out while watching videos; the rest wait for the next run."
-                    )
-                    break
-                notices.append(f'Gemini could not watch "{v.title}": {exc.detail}')
-                if exc.status is not None and 400 <= exc.status < 500 and exc.status != 429:
-                    outcomes[v.id] = f"refused: {exc.detail}"[:200]  # private, removed: not paid again
-                continue
-            text = answer.text.strip()
-            if answer.finish_reason != "STOP":
-                notices.append(
-                    f'Gemini stopped before the end of "{v.title}" ({answer.finish_reason}); its words '
-                    "were not kept."
-                )
-                continue
-            if not text or text.upper().startswith(NO_SPEECH):
-                notices.append(f'Gemini heard no speech in "{v.title}".')
-                outcomes[v.id] = "no speech"
-                continue
-            self.transcripts._write_cache(v.id, v.title, text, method=WATCHED)
-            texts[v.id] = text
-            watched += 1
-        if outcomes != done_before:
-            self._write_json(self.watched_path(), outcomes, "videos Gemini watched without words")
-        if watched:
-            by_source[WATCHED] = by_source.get(WATCHED, 0) + watched
-        return notices
 
     @staticmethod
     def save_books(books: list[Book], folder: Path) -> list[Path]:

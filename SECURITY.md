@@ -9,8 +9,10 @@
 
 ## How Credentials Are Handled
 
-- The Gemini API key is read from the environment or a git-ignored `.env`, sent only in the
-  `x-goog-api-key` request header, and removed from any error text before it is shown or logged.
+- The Claude API key is read from the environment or a git-ignored `.env`, sent only in a request
+  header by the official `anthropic` SDK, and removed from any error text before it is shown or logged.
+  Use a key scoped to a Console workspace of its own, with a monthly spend limit, so a leaked key can
+  reach nothing else and cost little.
 - The NotebookLM session is owned by the `notebooklm` CLI, which keeps it under
   `~/.notebooklm/profiles/<profile>/`. This tool reads the file's location, never its contents.
 - Document content reaches `notebooklm` as a temporary file, not on the command line.
