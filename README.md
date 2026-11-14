@@ -6,6 +6,8 @@
 
 <div align="center">
 
+<img src="docs/brand/icon.svg" width="96" height="96" alt="Notebook Alchemy icon: three nested blue arches with a gold alchemy bottle carrying a blue plus badge under the innermost one">
+
 ![Notebook Alchemy](https://img.shields.io/badge/Notebook%20Alchemy-0.3.0-5B3FD0?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Click](https://img.shields.io/badge/Click-8.1%2B-4EAA25?style=for-the-badge)
@@ -14,7 +16,7 @@
 ![Claude](https://img.shields.io/badge/Claude-Haiku%205.5-D97757?style=for-the-badge&logo=claude&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
-**Maintainer:** [gagexhill](https://github.com/gagexhill) — open source, MIT licensed
+**Maintainer:** [gagexhill](https://github.com/gagexhill) — open source, MIT licensed, unofficial and not affiliated with Google
 **Runtime:** A Python command-line tool on your machine; the Claude API and Google NotebookLM only when you opt in
 **Status:** Alpha — [audit remediation #16](https://github.com/gagexhill/notebook-alchemy/issues/16) owns current progress
 
@@ -242,6 +244,34 @@ with tempfile.TemporaryDirectory(prefix="notebook-alchemy-", ignore_cleanup_erro
 
 ## 🚀 Getting Started
 
+### Install
+
+One command installs everything: [uv](https://docs.astral.sh/uv/) (if it is missing), Notebook Alchemy, and the Chromium browser it uses for Google sign-in. It then adds a **Notebook Alchemy** shortcut and runs the self-test. It asks for no password or key, and writes only inside your home folder.
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/gagexhill/notebook-alchemy/main/install/install.ps1 | iex
+```
+
+macOS and Linux:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/gagexhill/notebook-alchemy/main/install/install.sh | sh
+```
+
+The shortcut is on the desktop on Windows and macOS, and in the applications menu (and on the desktop, if there is one) on Linux. It opens a terminal in the `Notebook Alchemy` folder in your home folder, where your settings and output are kept, and starts `notebook-alchemy`, which walks you through signing in to NotebookLM, an optional Claude API key and your first channel. Run the same command again to update to the newest version. Run it as your own user, not with `sudo`. To read a script before running it, open [`install/install.ps1`](install/install.ps1) or [`install/install.sh`](install/install.sh).
+
+To remove it, delete the shortcut and the folder that holds its icon (`%LOCALAPPDATA%\notebook-alchemy` on Windows, `~/Library/Application Support/notebook-alchemy` on macOS, `~/.local/share/notebook-alchemy` on Linux; on Linux also delete `~/.local/share/applications/notebook-alchemy.desktop`), then run:
+
+```bash
+uv tool uninstall notebook-alchemy
+```
+
+The `Notebook Alchemy` folder keeps your settings and output until you delete it. Chromium stays in Playwright's `ms-playwright` folder (in your local app data on Windows, `~/Library/Caches` on macOS, `~/.cache` on Linux), where other tools may share it.
+
+To work on the code, install from source as below instead.
+
 ### Prerequisites
 
 - Python 3.11 or newer
@@ -359,8 +389,10 @@ notebook-alchemy/
 ├── tests/                  # Hermetic pytest suite; conftest.py isolates every test
 ├── .github/                # Issue and PR templates, Dependabot, validate workflow
 ├── .githooks/              # pre-push secret scan (gitleaks)
-├── scripts/                # Regenerate the README recording and the social preview
-├── docs/images/            # README recording and the social preview image
+├── install/                # One-line installers: install.ps1 (Windows), install.sh (macOS, Linux)
+├── scripts/                # Regenerate the README recordings, the social preview and the icons
+├── docs/images/            # README recordings and the social preview image
+├── docs/brand/             # icon.svg, the generated favicons and app icons, and the concept sheet
 ├── AGENTS.md               # Rules every change keeps (CLAUDE.md points here)
 ├── DEVLOG.md               # Past design decisions and why
 ├── OPERATIONS.md           # Maintainer runbook
