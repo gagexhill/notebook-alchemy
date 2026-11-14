@@ -523,12 +523,31 @@ def test_a_hand_edited_consent_record_asks_again_instead_of_crashing() -> None:
     assert not upload_confirmed(AccountIdentity("work", "a@example.test"))
 
 
-def test_plan_limits_name_the_plan_and_are_never_guessed(tmp_path: Path) -> None:
+def test_plan_limits_name_the_plan_and_are_never_guessed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pro = PlanLimits(300, 500, 2)
     client = NotebookLMClient(AlchemyConfig(), limits_reader=lambda c: pro)
     assert client.plan_limits() == pro and pro.plan == "Pro"
     assert PlanLimits(50, 100, 1).plan == "Standard" and PlanLimits(None, None, 9).plan == "unknown plan"
     fake = FakeNotebookLM()
     assert _client(tmp_path, FakeProcess()).plan_limits() is None  # a test double never reads live
-    assert _client(tmp_path, api=fake).plan_limits() is None and fake.opened == []
     assert NotebookLMClient(AlchemyConfig()).plan_limits() is None  # no session: unknown, not a guess
+    doubled = _client(tmp_path, api=fake)
+    _profile_session(doubled)  # signed in, so only the double stops a live read
+    monkeypatch.setattr(NotebookLMClient, "_read_plan_limits_live", lambda self: pro)
+    assert doubled.plan_limits() is None and fake.opened == []
+
+
+def test_the_test_suite_refuses_the_network_but_not_this_computer() -> None:
+    import socket
+
+    # 192.0.2.1 is an address reserved for documentation: nothing answers there.
+    with socket.socket() as outside:
+        outside.settimeout(0.2)
+        with pytest.raises(AssertionError, match="real network"):
+            outside.connect(("192.0.2.1", 9))
+    with socket.socket() as listener, socket.socket() as here:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        here.connect(listener.getsockname())  # an event loop wakes itself this way on Windows
