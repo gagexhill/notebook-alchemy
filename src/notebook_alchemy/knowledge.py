@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .cleanup import Chunk, is_punctuated
+from .cleanup import CHUNKING_VERSION, Chunk, is_punctuated
 from .errors import GeminiError
 from .gemini import GeminiResult
 
@@ -112,8 +112,9 @@ class VideoLabels:
 
 
 def label_key(video_id: str, transcript: str, model: str) -> str:
-    """Same transcript, prompt and model: same labels. Anything else labels again."""
-    digest = hashlib.sha256(f"{PROMPT_VERSION}\x00{model}\x00{video_id}\x00{transcript}".encode())
+    """Same transcript, chunking, prompt and model: same labels. Anything else labels again."""
+    seen = f"{PROMPT_VERSION}\x00{CHUNKING_VERSION}\x00{model}\x00{video_id}\x00{transcript}"
+    digest = hashlib.sha256(seen.encode())
     return digest.hexdigest()[:32]
 
 

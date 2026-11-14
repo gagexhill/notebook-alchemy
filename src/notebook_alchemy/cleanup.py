@@ -33,6 +33,8 @@ BOILERPLATE_MAX_WORDS = 30
 
 CHUNK_WORDS = 45  # target words per chunk: one to three sentences
 CHUNK_MAX_WORDS = 90
+# Bumped whenever chunk boundaries change, so labels made for the old numbering are not reused.
+CHUNKING_VERSION = "2"
 UNPUNCTUATED_BELOW = 1.0  # sentence marks per 100 words below which text is treated as unpunctuated
 SHINGLE = 8  # words per shingle for duplicate detection
 DUPLICATE_SHARE = 0.8  # share of a chunk's shingles already seen that makes it a duplicate
@@ -103,7 +105,16 @@ def _pieces(text: str) -> list[tuple[str, bool]]:
             flush()
             out.append((sentence, True))
             continue
-        size = len(sentence.split())
+        words = sentence.split()
+        if len(words) > CHUNK_MAX_WORDS:
+            # Captions punctuated only here and there (a period followed by a lowercase word, as
+            # NotebookLM's transcripts often are) can read as one sentence of thousands of words:
+            # cut it into chunks of the usual size, so the video is not one undivided passage.
+            flush()
+            for i in range(0, len(words), CHUNK_WORDS):
+                out.append((" ".join(words[i : i + CHUNK_WORDS]), False))
+            continue
+        size = len(words)
         if current and (count + size > CHUNK_MAX_WORDS or count >= CHUNK_WORDS):
             flush()
         current.append(sentence)
