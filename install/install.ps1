@@ -168,7 +168,7 @@ function Install-NotebookAlchemy {
 
     # 3. Chromium for sign-in
     Write-Step 3 'Installing the browser used for Google sign-in (Chromium, about 150 MB the first time)'
-    Invoke-Checked 'Installing Chromium' 'Check your internet connection and run this installer again. You can also sign in later with `notebook-alchemy login --browser-cookies chrome` instead.' {
+    Invoke-Checked 'Installing Chromium' 'Check your internet connection and run this installer again.' {
         & $python -m playwright install chromium
     }
 

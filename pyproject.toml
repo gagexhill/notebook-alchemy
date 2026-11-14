@@ -35,7 +35,9 @@ dependencies = [
     "yt-dlp[default]>=2026.10.21",
     "youtube-transcript-api>=1.2.4,<2",
     # 0.x: a minor release may remove API; Dependabot proposes the next one for review.
-    "notebooklm-py[browser,cookies]>=0.8.6,<0.9",
+    # Only the `browser` extra (the sign-in window). The `cookies` extra installs rookie-cookies, which
+    # reads every browser's saved sign-ins and which antivirus flags; nothing here needs it (#55).
+    "notebooklm-py[browser]>=0.8.6,<0.9",
 ]
 
 [project.optional-dependencies]

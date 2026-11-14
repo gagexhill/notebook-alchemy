@@ -2,6 +2,13 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## No browser-cookie reader in the install (#55, 2026-11-14)
+
+- **What was wrong.** The default install required `notebooklm-py[browser,cookies]`. The `cookies` extra installs `rookie-cookies`, a library that reads the saved sign-ins of every installed browser. Microsoft Defender quarantined its binary on the maintainer's machine as a Severe info-stealer. Whether that detection is a false positive was never established; either way, a tool for ordinary users should not put such a reader on their machine.
+- **What changed.** The dependency is now `notebooklm-py[browser]`. `login --browser-cookies` and setup's "reuse a browser's sign-in" are removed; the flag now says it was removed. Sign-in is through the browser window only, and `--account` is still checked after signing in. `NotebookLMClient.browser_accounts` is gone.
+- **Checked.** With `rookie-cookies` uninstalled, reinstalling the package does not bring it back, `pip check` is clean, `notebooklm` still imports and runs, and the suite passes. A test reads `pyproject.toml` and fails if the `cookies` extra returns.
+- **Not changed.** `run --cookies <browser>` is yt-dlp's own, opt-in reading of a browser's YouTube sign-in for blocked captions. It does not use `rookie-cookies`.
+
 ## Topic books from every word (0.3.0, 2026-11-08)
 
 - **Whole-branch review before the PR (15 findings, all fixed, 2026-11-14).**

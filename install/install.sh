@@ -226,7 +226,7 @@ main() {
   # 3. Chromium for sign-in
   step 3 'Installing the browser used for Google sign-in (Chromium, about 150 MB the first time)'
   "$python" -m playwright install chromium || fail 'Installing Chromium failed.' \
-    'Check your internet connection and run this installer again. You can also sign in later with `notebook-alchemy login --browser-cookies chrome` instead.'
+    'Check your internet connection and run this installer again.'
   if [ "$os" = linux ]; then
     say 'If the sign-in window does not open later, Chromium needs system libraries that only an'
     say 'administrator can add. To add them, run:'
