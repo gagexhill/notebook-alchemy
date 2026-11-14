@@ -413,6 +413,12 @@ def apply_consolidation(text: str, passages: list[Passage]) -> tuple[str, list[P
 SEP = "\x1f"  # between a topic and a section name in a stored placement
 EXTEND_AT_LEAST = 5  # unplaced passages that make the map grow...
 EXTEND_SHARE = 0.05  # ...or this share of all passages, whichever is larger
+# New sections one extension may add. Unbounded, a large channel's answer ran past the output limit
+# (live, 2026-11-13: 3,183 passages waiting) and nothing was added. Changing the prompt changes
+# EXTEND_VERSION, so an extension remembered for the old prompt is asked again.
+EXTEND_MAX_SECTIONS = 30
+EXTEND_VERSION = "2"
+MAP_MAX_TOKENS = 16384  # the topic map and an extension: names and one-line descriptions only
 SUBSECTION_AT = 200  # passages in one section before it is divided into subsections
 OTHER_SUBSECTION = "Other points"
 
@@ -439,7 +445,8 @@ def extend_prompt(channel: str, topics: list[Topic], headlines: list[str]) -> st
         f"The study library for the YouTube channel '{channel}' has these topics and sections:\n{current}\n\n"
         "The points below fit none of them. Add only what they need: new sections inside an existing "
         "topic (use its exact name), or a new topic with its sections. Do not rename, remove or repeat "
-        "anything that exists. Each new section has a one-line description.\n"
+        f"anything that exists. Add at most {EXTEND_MAX_SECTIONS} new sections in all, each for a group of "
+        "related points, with a one-line description; list only the new sections.\n"
         'Return JSON: {"topics": [{"name": "...", "sections": [{"name": "...", "about": "..."}]}]}\n\n'
         "Points:\n" + "\n".join(f"- {h[:120]}" for h in _sample(headlines, HEADLINE_SAMPLE))
     )
@@ -609,7 +616,7 @@ class LibraryBuilder:
                 text = self._ask(
                     taxonomy_prompt(self.channel, titles, [p.headline for p in passages]),
                     TAXONOMY_SCHEMA,
-                    8192,
+                    MAP_MAX_TOKENS,
                 )
                 name, topics = parse_taxonomy(text)
             except (ValueError, TypeError) as exc:
@@ -631,17 +638,22 @@ class LibraryBuilder:
     def _digest(unplaced: list[Passage]) -> str:
         return hashlib.sha256("\n".join(sorted(p.id for p in unplaced)).encode()).hexdigest()[:16]
 
+    @staticmethod
+    def _extend_digest(unplaced: list[Passage]) -> str:
+        """The passages an extension was asked about, and the prompt version it was asked with."""
+        return f"{EXTEND_VERSION}:{LibraryBuilder._digest(unplaced)}"
+
     def _new_unplaced(self, unplaced: list[Passage]) -> bool:
         """Whether these unplaced passages differ from the set the map was last extended for.
 
         The map is extended once per set, so passages that still fit nowhere afterwards do not
         cost another request on every run.
         """
-        return (self.cache.get(self._map_key) or {}).get("extended_for") != self._digest(unplaced)
+        return (self.cache.get(self._map_key) or {}).get("extended_for") != self._extend_digest(unplaced)
 
     def _mark_extended(self, unplaced: list[Passage]) -> None:
         stored = self.cache.get(self._map_key) or {"title": self.channel}
-        self.cache.put(self._map_key, {**stored, "extended_for": self._digest(unplaced)})
+        self.cache.put(self._map_key, {**stored, "extended_for": self._extend_digest(unplaced)})
 
     def _extend(self, topics: list[Topic], unplaced: list[Passage]) -> list[Topic] | None:
         """Add sections (or topics) for passages that fit nowhere; every existing one stays.
@@ -651,7 +663,9 @@ class LibraryBuilder:
         """
         try:
             text = self._ask(
-                extend_prompt(self.channel, topics, [p.headline for p in unplaced]), EXTENSION_SCHEMA, 8192
+                extend_prompt(self.channel, topics, [p.headline for p in unplaced]),
+                EXTENSION_SCHEMA,
+                MAP_MAX_TOKENS,
             )
             additions = parse_extension(text)
         except ClaudeError as exc:
