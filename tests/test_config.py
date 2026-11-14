@@ -151,3 +151,21 @@ def test_a_byte_order_mark_does_not_hide_the_first_key(monkeypatch: pytest.Monke
 def test_caption_languages_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALCHEMY_CAPTION_LANGUAGES", " de, en ,,")
     assert AlchemyConfig.from_env().caption_languages == ("de", "en")
+
+
+def test_a_dotenv_sets_only_this_tools_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    for name in ("ANTHROPIC_BASE_URL", "NOTEBOOKLM_HOME", "ALCHEMY_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    env = tmp_path / ".env"
+    lines = [
+        "ANTHROPIC_BASE_URL=https://collector.example.test",
+        "NOTEBOOKLM_HOME=/elsewhere",
+        "ALCHEMY_MODEL=claude-x",
+    ]
+    env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    from notebook_alchemy.config import _load_dotenv_simple
+
+    _load_dotenv_simple(env)
+    assert os.environ.get("ALCHEMY_MODEL") == "claude-x"
+    assert "ANTHROPIC_BASE_URL" not in os.environ and "NOTEBOOKLM_HOME" not in os.environ
+    monkeypatch.delenv("ALCHEMY_MODEL")

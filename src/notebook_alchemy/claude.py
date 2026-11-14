@@ -31,6 +31,9 @@ FALLBACK_PRICING_MODEL = "claude-haiku-5-5"
 BATCH_PRICE_FACTOR = 0.5  # the Message Batches API bills half the standard rate
 BATCH_SUFFIX = " (batch)"
 DEFAULT_TIMEOUT = 300.0
+# Fixed, never read from the environment: the SDK would otherwise take ANTHROPIC_BASE_URL, which a
+# `.env` in the folder a run starts from can set, and send the key there.
+API_BASE_URL = "https://api.anthropic.com"
 DEFAULT_MAX_RETRIES = 4  # the SDK backs off on connection errors, 408, 409, 429, 5xx and 529
 # A batch request's custom_id allows only these characters, so requests are numbered and the
 # caller's keys are kept beside the batch id.
@@ -122,7 +125,9 @@ class ClaudeClient:
         it reads platform details (on Windows by starting a process)."""
         with self._sdk_lock:
             if self._sdk is None:
-                self._sdk = anthropic.Anthropic(api_key=self._api_key, **self._sdk_options)
+                self._sdk = anthropic.Anthropic(
+                    api_key=self._api_key, base_url=API_BASE_URL, **self._sdk_options
+                )
             return self._sdk
 
     # -- direct calls --

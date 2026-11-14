@@ -221,7 +221,7 @@ for tag, i1, i2, j1, _j2 in matcher.get_opcodes():
 
 ### Keeping the API key out of everything
 
-The official SDK sends the key in a request header, never the URL, and every message passes through `scrub` before it is raised or logged.
+The official SDK sends the key in a request header, never the URL, and only to the Claude API's own address, which is fixed in the code; `.env` is read only for this tool's own settings. Every message passes through `scrub` before it is raised or logged.
 
 ```python
 cleaned = text.replace(api_key, "***") if api_key else text

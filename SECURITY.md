@@ -13,6 +13,9 @@
   header by the official `anthropic` SDK, and removed from any error text before it is shown or logged.
   Use a key scoped to a Console workspace of its own, with a monthly spend limit, so a leaked key can
   reach nothing else and cost little.
+- The API address is fixed in the code, and `.env` is read only for this tool's own settings
+  (`ANTHROPIC_API_KEY` and `ALCHEMY_*`), so a `.env` in the folder a run starts from cannot send the key
+  elsewhere or change how the `notebooklm` command runs.
 - The NotebookLM session is owned by the `notebooklm` CLI, which keeps it under
   `~/.notebooklm/profiles/<profile>/`. This tool reads the file's location, never its contents.
 - Document content reaches `notebooklm` as a temporary file, not on the command line.
