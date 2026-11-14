@@ -673,3 +673,14 @@ def test_a_closed_session_is_never_reopened_behind_the_clients_back() -> None:
     with pytest.raises(client_module._Closed):
         session.run(ask, 5)
     assert len(fake.opened) == 1 and not session.is_open
+
+
+def test_a_client_whose_session_was_closed_elsewhere_opens_a_new_one(tmp_path: Path) -> None:
+    from notebook_alchemy.client import close_all
+
+    fake = _two_notebooks()
+    client = _client(tmp_path, api=fake)
+    client.list_notebooks()
+    close_all()  # what the end of every command does
+    assert not client.session_is_open
+    assert len(client.list_notebooks()) == 2 and len(fake.opened) == 2

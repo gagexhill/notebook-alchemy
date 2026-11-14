@@ -105,7 +105,7 @@ def close_all() -> None:
         session.close()
 
 
-atexit.register(close_all)
+atexit.register(close_all)  # a backstop; a command closes its sessions when it ends
 
 
 class _Pending:
@@ -194,6 +194,10 @@ class _Session:
     @property
     def is_open(self) -> bool:
         return self._library is not None
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
 
     def run(self, call: Callable[[Any], Awaitable[Any]], timeout: float) -> Any:
         loop, library = self._open()
@@ -693,7 +697,8 @@ class NotebookLMClient:
 
     def _open_session(self) -> _Session:
         with self._session_lock:
-            if self._session is None:
+            # A session closed elsewhere (every session is closed when a command ends) is replaced.
+            if self._session is None or self._session.is_closed:
                 override = self._refuse_profile_with_session_file()
                 profile, path = (None, str(override)) if override else (self.profile, None)
                 opener = self._api or default_api

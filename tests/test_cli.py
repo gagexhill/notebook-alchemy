@@ -1673,3 +1673,23 @@ def test_signing_in_closes_the_open_session_so_the_new_sign_in_is_used(
     identity = cli_module._sign_in(client)
     assert identity.email == "owner@example.test" and seen == [False]
     assert len(fake.opened) == 2  # the check after signing in opened the new sign-in
+
+
+def test_a_command_closes_its_notebooklm_session_when_it_ends(
+    runner: CliRunner, fake_channel, fake_words, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    import threading
+
+    from notebook_alchemy import client as client_module
+
+    fake_channel("a b c d")
+    profile_dir = isolated_environment.home / ".notebooklm" / "profiles" / "default"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "storage_state.json").write_text("{}", encoding="utf-8")
+    fake = FakeNotebookLM()
+    monkeypatch.setattr("notebook_alchemy.client.default_api", fake)
+    result = runner.invoke(cli, [*RUN, "-N", "chan", "--yes"])
+    assert result.exit_code == 0 and fake.opened, result.output
+    # Closed by the command itself, not left for the interpreter's exit.
+    assert not client_module._OPEN
+    assert not [t for t in threading.enumerate() if t.name == "notebooklm-session"]
