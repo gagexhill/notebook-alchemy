@@ -151,7 +151,7 @@ def import_state(engine: AlchemyEngine, path: Path, *, replace: bool = False) ->
 def count_existing(engine: AlchemyEngine, path: Path) -> int:
     """How many files `import_state(..., replace=True)` would overwrite. Checks the whole state file
     as an import does, and writes nothing."""
-    existing: set[str] = set()
+    existing: set[tuple[int, int]] = set()
     with _open(path) as archive:
         for info in _checked_members(archive, path):
             if info.filename == NOTEBOOKS:
@@ -159,7 +159,8 @@ def count_existing(engine: AlchemyEngine, path: Path) -> int:
             folder, file_name = info.filename.split("/", 1)
             target = _folder(engine, folder) / file_name
             if target.exists():
-                existing.add(os.path.normcase(target))  # two names for one file count once
+                found = target.stat()
+                existing.add((found.st_dev, found.st_ino))  # two names for one file count once
     return len(existing)
 
 

@@ -16,7 +16,7 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   - The three new questions are asked only when input and output are both a terminal, so output sent to a file never waits unseen.
   - `import-state --replace` checks the state file first, and asks only when it would overwrite something, saying how many files.
   - Help is 80 columns wide by the tool's own setting (`max_content_width`), so a wide window no longer changes it; the width test now runs in a 200-column window.
-  - Hints name this tool's installer, not the library underneath; the scheduler hint no longer suggests a sign-in that does not apply.
+  - Hints name this tool's installer, not the library underneath; the scheduler hint names the missing tool and no longer suggests a sign-in that does not apply.
   - The progress and exit-code tests no longer depend on the environment or on `0` matching inside `70`.
   - Left: the `exc.hint or ...` fallbacks in `engine.py` (the errors raised there already carry hints), and the hint on an unusable answer, which is recorded and not shown.
 - **Second review (8 findings, all fixed).**
@@ -24,7 +24,9 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   - `clean` of labels, records or a custom folder with nobody to answer now stops with an error that names `--yes`; it no longer reads the end of the input as Ctrl+C.
   - A missing `notebooklm` tool is a broken install, so every hint for it says to run the installer again; none names `pip install` of a package the installer does not use.
   - The scheduler hint names the missing tool and what to do. `import-state` counts one file once when the state file names it twice. "1 local record" is singular.
-  - The test run clears `FORCE_COLOR`, which made one older test fail.
+  - The test run clears `FORCE_COLOR` and `TTY_COMPATIBLE`, which made one older test fail.
+  - Known change: in a window where input is a pipe (Git Bash's mintty), a costly `clean` used to ask and now stops with the `--yes` error, as the first-upload confirmation already does there.
+  - One file named twice is recognised by the file itself, not its name, so the count is right on a case-insensitive macOS disk too.
 
 ## No browser-cookie reader in the install (#55, 2026-11-14)
 

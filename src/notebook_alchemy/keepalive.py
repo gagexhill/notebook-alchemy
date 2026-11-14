@@ -200,8 +200,7 @@ class KeepAlive:
         except FileNotFoundError as exc:
             raise AlchemyError(
                 f"Could not {what}: `{cmd[0]}` was not found.",
-                hint=f"Install or turn on `{cmd[0]}`, then run the same command again. Without it, "
-                "sign in when a run asks.",
+                hint=f"Install or turn on `{cmd[0]}`, then run the same command again.",
             ) from exc
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise AlchemyError(

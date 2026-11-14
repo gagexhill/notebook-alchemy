@@ -1515,7 +1515,8 @@ def clean_pipeline(
     if costly and not yes and not _interactive():
         # Nobody is there to answer: say so, instead of reading the end of the input as a stop.
         raise AlchemyError(
-            "Deleting labels, records or a custom caption folder needs your confirmation.",
+            "Deleting labels, records, a custom caption folder or old document folders needs your "
+            "confirmation.",
             hint="Run the same command in a terminal, or add --yes to delete without the question.",
         )
     if ask:
