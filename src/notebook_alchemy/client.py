@@ -315,14 +315,6 @@ class NotebookLMClient:
             self.profile, None, "this profile's sign-in did not record an account", storage
         )
 
-    def browser_accounts(self, browser: str) -> list[str]:
-        """Emails of the Google accounts a browser has signed in (`notebooklm auth inspect`)."""
-        data = self._run(["auth", "inspect", "--browser", browser], timeout=LIST_TIMEOUT)
-        accounts = data.get("accounts") if isinstance(data, dict) else None
-        if not isinstance(accounts, list):
-            raise NotebookLMError("`notebooklm auth inspect` returned an unexpected shape.")
-        return [str(a["email"]) for a in accounts if isinstance(a, dict) and a.get("email")]
-
     # -- process plumbing --
 
     def _command(self, args: list[str], *, as_json: bool) -> list[str]:

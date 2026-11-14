@@ -42,6 +42,8 @@ to propose a change; this file covers what a change must keep true.
 - An upload never quietly shrinks a notebook: unsorted books do not replace AI-sorted ones without
   `--offline`, and books from under half the videos of the last upload need `--allow-fewer`. No
   sorting is asked for while videos still wait for labels, and no topic map is made from no passages.
+- The install never includes a browser-cookie reader: the dependency is `notebooklm-py[browser]`, without
+  the `cookies` extra, and NotebookLM sign-in is through the browser window only.
 - Nothing identifying the user is stored that a feature does not need. The upload confirmation keeps a
   salted hash of the account email, not the email; nothing is sent anywhere except YouTube, the Claude
   API and NotebookLM. No telemetry.

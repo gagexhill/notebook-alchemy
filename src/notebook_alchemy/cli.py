@@ -134,17 +134,6 @@ profile_option = click.option(
 )
 
 
-def _cookie_browser(_ctx: click.Context, _param: click.Parameter, value: str | None) -> str | None:
-    """`chrome`, `edge`, `firefox` or `brave`, optionally `chrome::<browser profile>`."""
-    if value is None:
-        return None
-    base, sep, rest = value.partition("::")
-    base = base.strip().lower()
-    if base not in COOKIE_BROWSERS:
-        raise click.BadParameter(f"use one of {', '.join(COOKIE_BROWSERS)}, optionally as chrome::<profile>.")
-    return f"{base}{sep}{rest}"  # the browser lower-cased, its profile name as typed
-
-
 def _who(identity: AccountIdentity) -> str:
     """The upload account, markup-safe. Unknown is said plainly, never guessed."""
     if identity.email:
@@ -175,7 +164,7 @@ def _show_upload_target(engine: AlchemyEngine) -> AccountIdentity:
         ui.warn(f"The sign-in did not record which Google account it is{reason}.", always=True)
         ui.next_command(
             "record it",
-            f"notebook-alchemy login --profile {identity.profile} --browser-cookies chrome --account <email>",
+            f"notebook-alchemy login --profile {identity.profile} --account <email>",
         )
     return identity
 
@@ -194,7 +183,7 @@ def _confirm_first_upload(identity: AccountIdentity, yes: bool) -> None:
             "and it needs your confirmation.",
             hint=(
                 "Run the command in a terminal to confirm, or add --yes. To be asked only once, record "
-                "the account: `notebook-alchemy login --browser-cookies chrome --account <email>`."
+                "the account: `notebook-alchemy login --account <email>`."
             ),
         )
     ui.console.print(f"\nNotebooks will be created in {_who(identity)}.")  # shown even with -q
@@ -778,9 +767,7 @@ def status(profile: str | None) -> None:
     if not has_session:
         ui.next_command("sign in", "notebook-alchemy login")
     elif not identity.email:
-        ui.next_command(
-            "record the Google account", "notebook-alchemy login --browser-cookies chrome --account <email>"
-        )
+        ui.next_command("record the Google account", "notebook-alchemy login --account <email>")
     if not has_key:
         ui.next_command("turn on AI sorting", "notebook-alchemy setup")
     if not ui.UiState.verbose:
@@ -807,63 +794,41 @@ def _sign_in(
     client: NotebookLMClient,
     *,
     browser: str = "chromium",
-    browser_cookies: str | None = None,
     account: str | None = None,
     timeout: int = 300,
     fresh: bool = False,
 ) -> AccountIdentity:
     """Run `notebooklm login` for this profile, then read back which account it recorded.
 
-    notebooklm's own progress lines (profile, cookies, file paths) are captured, not shown: the
-    result is reported in one line, and the captured text explains a failure.
+    Sign-in is always through a browser window. Reading an installed browser's saved sign-in was
+    removed: it needed a cookie-reading library on every user's machine (#55).
+
+    notebooklm's own progress lines (profile, file paths) are captured, not shown: the result is
+    reported in one line, and the captured text explains a failure.
     """
-    if account and browser_cookies:
-        # Check before signing in: a login with the wrong account would overwrite the profile.
-        try:
-            available = client.browser_accounts(browser_cookies)
-        except NotebookLMError as exc:
-            available = None
-            ui.warn(f"Could not list the browser's accounts first ({esc(exc.message)}); trying the sign-in.")
-        if available is not None and account.strip().casefold() not in {a.casefold() for a in available}:
-            raise SessionError(
-                f"{account} is not signed in to {browser_cookies}. Signed in: "
-                + (", ".join(available) or "no Google accounts")
-                + ". Nothing was changed.",
-                hint=(
-                    f"Sign in to that account in {browser_cookies.split('::', 1)[0]} first, "
-                    "or pick a listed one."
-                ),
-            )
     cmd = client.login_command()
     override = client.storage_override()
     ui.detail(
         f"Signing in through {esc(f'session file {override}' if override else f'profile {client.profile}')}."
     )
-    if browser_cookies:
-        cmd += ["--browser-cookies", browser_cookies]
-        if account:
-            cmd += ["--account", account]
-        ui.info(f"Using your {esc(browser_cookies.split('::', 1)[0].title())} sign-in...")
-        waiting = "Reading the sign-in..."
-    else:
-        cmd += ["--browser", browser, "--browser-timeout", str(timeout)]
-        if fresh:
-            cmd.append("--fresh")
-        # Said the way Google's own command-line tools say it: what opens, and as whom to sign in.
-        expected = account or client.upload_account().email
-        ui.info(f"Opening a browser window to sign in to NotebookLM ({NOTEBOOKLM_URL}).")
-        ui.info(
-            f"Sign in as {ui.name(expected)}."
-            if expected
-            else "Sign in with the Google account your notebooks should go to."
-        )
-        # The window is a separate test browser (it says it is controlled by automated software) and
-        # opens on NotebookLM's own page, so say where the sign-in is.
-        ui.info(
-            "If NotebookLM's page shows Sign in, click it to reach Google's sign-in page. The window "
-            "closes by itself when you are signed in."
-        )
-        waiting = "Waiting for you to finish signing in..."
+    cmd += ["--browser", browser, "--browser-timeout", str(timeout)]
+    if fresh:
+        cmd.append("--fresh")
+    # Said the way Google's own command-line tools say it: what opens, and as whom to sign in.
+    expected = account or client.upload_account().email
+    ui.info(f"Opening a browser window to sign in to NotebookLM ({NOTEBOOKLM_URL}).")
+    ui.info(
+        f"Sign in as {ui.name(expected)}."
+        if expected
+        else "Sign in with the Google account your notebooks should go to."
+    )
+    # The window is a separate test browser (it says it is controlled by automated software) and
+    # opens on NotebookLM's own page, so say where the sign-in is.
+    ui.info(
+        "If NotebookLM's page shows Sign in, click it to reach Google's sign-in page. The window "
+        "closes by itself when you are signed in."
+    )
+    waiting = "Waiting for you to finish signing in..."
     proc = _run_login(cmd, waiting)
     output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
     if proc.returncode != 0 and " already has " in output and "Overwrite it with" in output:
@@ -885,37 +850,23 @@ def _sign_in(
         proc = _run_login(cmd, waiting, answer="y\n")
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
-        if browser_cookies:
-            browser_name = browser_cookies.split("::", 1)[0]
-            hint = (
-                f"List the accounts that browser holds with `notebooklm auth inspect --browser "
-                f"{browser_name}`, sign in to Google in it first, or try another browser "
-                f"({', '.join(COOKIE_BROWSERS)})."
-            )
-        else:
-            hint = (
-                "If no window opened, install its browser once with `python -m playwright install "
-                "chromium`, or use `--browser chrome`. Reusing a browser you are already signed in "
-                "to also works: `notebook-alchemy login --browser-cookies chrome`."
-            )
         raise NotebookLMError(
             f"Sign-in did not complete (exit code {proc.returncode})."
             + (f" {_last_words(detail)}" if detail else ""),
-            hint=hint,
+            hint="If no window opened, install its browser once with `python -m playwright install "
+            "chromium`, or use `--browser chrome`.",
         )
     identity = client.upload_account()
     if account and (identity.email or "").casefold() != account.strip().casefold():
         raise SessionError(
             f"Sign-in finished, but profile '{client.profile}' now records the account "
             f"{identity.display}, not {account}. Uploads through this profile would go to that account.",
-            hint=(
-                "Check the email with `notebooklm auth inspect --browser "
-                f"{(browser_cookies or 'chrome').split('::', 1)[0]}` and sign in again before uploading."
-            ),
+            hint=f"Run `notebook-alchemy login --account {account}` again and choose that account in "
+            "the window, before uploading.",
         )
     with ui.console.status("Checking the sign-in..."):
         result = client.check_session()
-    if not result.ok and result.signed_out and not browser_cookies and not fresh:
+    if not result.ok and result.signed_out and not fresh:
         # notebooklm reused its saved browser, which still looked signed in to Google, without
         # showing a window, and the session it saved does not work: sign in from a clean browser.
         ui.info("The saved browser sign-in no longer works, so a clean sign-in window opens.")
@@ -934,9 +885,8 @@ def _sign_in(
     epilog=(
         "\b\nExamples:\n"
         "  notebook-alchemy login                        sign in through a browser window\n"
-        "  notebook-alchemy login --browser-cookies chrome  reuse a Chrome sign-in, no window\n"
-        "  notebook-alchemy login --browser-cookies chrome --account you@example.test --profile personal\n"
-        "                                                pick one of several signed-in accounts\n"
+        "  notebook-alchemy login --account you@example.test --profile personal\n"
+        "                                                check the account, keep it in its own profile\n"
         "  notebook-alchemy login --check                is the sign-in still working?\n"
     ),
 )
@@ -949,15 +899,16 @@ def _sign_in(
 )
 @click.option(
     "--browser-cookies",
-    callback=_cookie_browser,
-    help="Reuse an installed browser's sign-in (chrome, edge, firefox, brave; or chrome::<profile>).",
+    hidden=True,
+    expose_value=False,
+    callback=_removed(
+        "--browser-cookies was removed: it needed a library that reads every browser's saved sign-ins. "
+        "Sign in through the window with `notebook-alchemy login`."
+    ),
 )
 @click.option(
     "--account",
-    help=(
-        "Google account email. With --browser-cookies it picks that account; with a sign-in window "
-        "it is checked after you sign in."
-    ),
+    help="Google account email, checked after you sign in: the sign-in fails if another account was used.",
 )
 @click.option("--fresh", is_flag=True, help="Open the sign-in window without earlier browser data.")
 @click.option("--check", is_flag=True, help="Check the saved sign-in without signing in again.")
@@ -979,7 +930,6 @@ def _sign_in(
 @handle_errors
 def login(
     browser: str,
-    browser_cookies: str | None,
     account: str | None,
     fresh: bool,
     check: bool,
@@ -1001,7 +951,6 @@ def login(
     _sign_in(
         client,
         browser=browser,
-        browser_cookies=browser_cookies,
         account=account,
         timeout=timeout,
         fresh=fresh,
@@ -1251,26 +1200,11 @@ def setup() -> None:
     if identity.email:
         ui.info(f"  Signed in as {_who(identity)}.")
     choice = click.prompt(
-        "  Keep this account (keep), open a sign-in window (window), or reuse a browser's sign-in (cookies)",
-        type=click.Choice(["keep", "window", "cookies"]),
-        default="keep" if identity.email else "cookies",
+        "  Keep this account (keep) or open a sign-in window (window)",
+        type=click.Choice(["keep", "window"]),
+        default="keep" if identity.email else "window",
     )
-    if choice == "cookies":
-        browser_cookies = click.prompt(
-            "  Browser", type=click.Choice(list(COOKIE_BROWSERS)), default="chrome"
-        )
-        try:
-            emails = client.browser_accounts(browser_cookies)
-        except NotebookLMError as exc:
-            emails = []
-            ui.warn(f"Could not list that browser's accounts: {esc(exc.message)}")
-        for email in emails:
-            ui.info(f"    - {esc(email)}")
-        account = click.prompt(
-            "  Google account to upload to", default=emails[0] if len(emails) == 1 else None
-        ).strip()
-        identity = _sign_in(client, browser_cookies=browser_cookies, account=account)
-    elif choice == "window":
+    if choice == "window":
         _sign_in(client, fresh=_ask("  Start without earlier browser data", default=True))
         identity = client.upload_account()
     save("ALCHEMY_NOTEBOOKLM_PROFILE", profile)

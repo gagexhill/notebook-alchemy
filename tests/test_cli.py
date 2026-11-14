@@ -183,26 +183,11 @@ def test_login_without_the_notebooklm_command(runner: CliRunner, monkeypatch: py
     assert "Traceback" not in result.output
 
 
-def test_login_cookie_failure_does_not_fall_through(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[list[str]] = []
-
-    def fail(cmd, **k):
-        calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 1, "", "cookies unreadable")
-
-    monkeypatch.setattr(subprocess, "run", fail)
-    result = runner.invoke(cli, ["login", "--browser-cookies", "edge"])
-    assert result.exit_code == 1 and "cookies unreadable" in result.output
-    assert len(calls) == 1  # did not open an interactive browser afterwards
-
-
 def test_a_long_sign_in_failure_shows_its_cause(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     notes = "Note: sibling-product domains are not requested by default. " * 8
     out = notes + "Reading cookies from chrome... Could not read chrome cookies: browser database is locked."
     monkeypatch.setattr(subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 1, "", out))
-    result = runner.invoke(cli, ["login", "--browser-cookies", "chrome"], terminal_width=200)
+    result = runner.invoke(cli, ["login"], terminal_width=200)
     assert result.exit_code == 1 and "database is locked" in " ".join(result.output.split())
 
 
@@ -400,44 +385,10 @@ def test_login_window_with_account_checks_the_account_afterwards(
     assert right.exit_code == 0, right.output
 
 
-def test_login_rejects_an_unknown_cookie_browser(runner: CliRunner) -> None:
-    assert runner.invoke(cli, ["login", "--browser-cookies", "netscape"]).exit_code == 2
-
-
-def test_login_account_signs_in_that_profile_and_reads_it_back(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[list[str]] = []
-
-    def ok(cmd, **k):
-        calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(subprocess, "run", ok)
-    monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 2))
-    monkeypatch.setattr(NotebookLMClient, "browser_accounts", lambda self, b: [ACCOUNT])
-    args = ["login", "--browser-cookies", "Chrome::Profile 1", "--account", "Owner@Example.test"]
-    result = runner.invoke(cli, [*args, "--profile", "personal"])
-    assert result.exit_code == 0, result.output
-    assert calls == [
-        [
-            "notebooklm",
-            "--profile",
-            "personal",
-            "login",
-            "--browser-cookies",
-            "chrome::Profile 1",
-            "--account",
-            "Owner@Example.test",
-        ]
-    ]
-    assert "owner@example.test" in result.output
-
-
 def test_login_account_mismatch_is_an_error(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "", ""))
     monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 2))
-    args = ["login", "--browser-cookies", "edge", "--account", "someone-else@example.test"]
+    args = ["login", "--account", "someone-else@example.test"]
     result = runner.invoke(cli, args)
     assert result.exit_code == 1 and "not someone-else@example.test" in result.output
 
@@ -474,11 +425,10 @@ def test_setup_writes_env_without_echoing_the_key_and_reruns(
     assert env.read_text(encoding="utf-8") == text
 
 
-def test_setup_rejects_a_bad_key_and_signs_in_with_cookies(
+def test_setup_rejects_a_bad_key_and_signs_in_through_a_window(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
 ) -> None:
     monkeypatch.setattr(cli_module, "_interactive", lambda: True)
-    monkeypatch.setattr(NotebookLMClient, "browser_accounts", lambda self, b: [ACCOUNT])
     monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 0))
     calls: list[list[str]] = []
 
@@ -487,13 +437,13 @@ def test_setup_rejects_a_bad_key_and_signs_in_with_cookies(
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(subprocess, "run", ok)
-    # bad key, then skip; default profile; cookies from edge; accept the only listed account; vault
-    result = runner.invoke(cli, ["setup"], input="short\n\n\ncookies\nedge\n\n")
+    # bad key, then skip; default profile; a sign-in window; Enter: start without earlier browser data
+    result = runner.invoke(cli, ["setup"], input="short\n\n\nwindow\n\n")
     assert result.exit_code == 0, result.output
     assert "does not look like an API key" in result.output
-    assert calls == [
-        ["notebooklm", "--profile", "default", "login", "--browser-cookies", "edge", "--account", ACCOUNT]
-    ]
+    assert len(calls) == 1 and calls[0][:4] == ["notebooklm", "--profile", "default", "login"]
+    assert "--fresh" in calls[0] and "--browser-cookies" not in calls[0]
+    assert "cookies" not in result.output  # reusing a browser's sign-in is no longer offered
     text = (isolated_environment.work / ".env").read_text(encoding="utf-8")
     assert "ANTHROPIC_API_KEY" not in text and "ALCHEMY_NOTEBOOKLM_PROFILE=default" in text
 
@@ -504,23 +454,11 @@ def test_setup_rejects_a_bad_key_and_signs_in_with_cookies(
 def test_signed_in_email_is_printed_literally(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
     odd = "[bold red]x[/bold red]@example.test"
     monkeypatch.setattr(NotebookLMClient, "upload_account", lambda self: AccountIdentity(self.profile, odd))
-    monkeypatch.setattr(NotebookLMClient, "browser_accounts", lambda self, b: [odd])
     monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 1))
     monkeypatch.setattr(subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "", ""))
-    result = runner.invoke(cli, ["login", "--browser-cookies", "edge", "--account", odd])
+    result = runner.invoke(cli, ["login", "--account", odd])
     assert result.exit_code == 0, result.output
     assert f"You are now signed in as [{odd}]." in result.output
-
-
-def test_login_refuses_an_account_the_browser_does_not_hold_before_signing_in(
-    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[list[str]] = []
-    monkeypatch.setattr(NotebookLMClient, "browser_accounts", lambda self, b: ["other@example.test"])
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: calls.append(cmd))
-    result = runner.invoke(cli, ["login", "--browser-cookies", "edge", "--account", ACCOUNT])
-    assert result.exit_code == 1 and "other@example.test" in result.output
-    assert "Nothing was changed" in result.output and calls == []
 
 
 def test_setup_warns_when_the_environment_overrides_what_it_writes(
@@ -563,7 +501,7 @@ def test_login_writes_the_session_file_every_other_call_reads(
 
     monkeypatch.setattr(subprocess, "run", ok)
     monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 2))
-    result = runner.invoke(cli, ["login", "--browser-cookies", "edge", "-v"])
+    result = runner.invoke(cli, ["login", "-v"])
     assert result.exit_code == 0, result.output
     assert calls[0][:3] == ["notebooklm", "--storage", str(storage)] and "login" in calls[0]
     assert "session file" in result.output  # shown with -v
@@ -600,11 +538,11 @@ def test_login_asks_before_replacing_another_account(
     monkeypatch.setattr(subprocess, "run", notebooklm)
     monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 1))
     monkeypatch.setattr(cli_module, "_interactive", lambda: True)
-    declined = runner.invoke(cli, ["login", "--browser-cookies", "edge"], input="n\n")
+    declined = runner.invoke(cli, ["login"], input="n\n")
     assert declined.exit_code == 1 and "Nothing was changed" in declined.output and len(calls) == 1
     assert calls[0].get("stdin") is subprocess.DEVNULL  # notebooklm's own question cannot wait unseen
     calls.clear()
-    accepted = runner.invoke(cli, ["login", "--browser-cookies", "edge", "--no-keep-signed-in"], input="y\n")
+    accepted = runner.invoke(cli, ["login", "--no-keep-signed-in"], input="y\n")
     assert accepted.exit_code == 0, accepted.output
     assert [c.get("input") for c in calls] == [None, "y\n"] and "signed in as" in accepted.output
 
@@ -1072,10 +1010,10 @@ def test_login_asks_nothing_about_the_background_refresh(
 ) -> None:
     _signed_in(monkeypatch)
     monkeypatch.setattr(cli_module, "_interactive", lambda: True)
-    result = runner.invoke(cli, ["login", "--browser-cookies", "edge"])
+    result = runner.invoke(cli, ["login"])
     assert result.exit_code == 0, result.output
     assert "keep this sign-in fresh" not in result.output and not isolated_environment.scheduler.tasks
-    opted = runner.invoke(cli, ["login", "--browser-cookies", "edge", "--keep-signed-in"])
+    opted = runner.invoke(cli, ["login", "--keep-signed-in"])
     assert opted.exit_code == 0 and list(isolated_environment.scheduler.tasks) == [
         "Notebook Alchemy keep signed in (default)"
     ]
@@ -1450,3 +1388,23 @@ def test_a_saved_build_says_whose_notebooklm_reads_blocked_videos(
     monkeypatch.setattr(NotebookLMClient, "is_authenticated", lambda self: True)
     result = runner.invoke(cli, [*RUN, "--save", str(tmp_path / "books")])
     assert "read through NotebookLM as" in " ".join(result.output.split())
+
+
+def test_reusing_a_browsers_sign_in_says_it_was_removed(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: calls.append(cmd))
+    result = runner.invoke(cli, ["login", "--browser-cookies", "chrome"])
+    assert result.exit_code == 2 and "--browser-cookies was removed" in " ".join(result.output.split())
+    assert calls == []  # nothing was run
+
+
+def test_the_install_does_not_pull_in_a_browser_cookie_reader() -> None:
+    import tomllib
+
+    root = Path(cli_module.__file__).resolve().parents[2]
+    deps = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    notebooklm = [d for d in deps if d.startswith("notebooklm-py")]
+    assert notebooklm == ["notebooklm-py[browser]>=0.8.6,<0.9"]  # no `cookies` extra (rookie-cookies)
+    assert not any("rookie" in d or "cookie" in d for d in deps)

@@ -311,14 +311,14 @@ The Claude API key and the NotebookLM account are separate credentials:
 - **Uploads** go to whichever Google account the `notebooklm` profile is signed in to; `status` names it.
 - **A Claude subscription** (Pro, Max) does not cover API use: the API is billed separately, in the Console.
 
-The simplest sign-in reuses a browser you are already signed in to Google with. To pick one of several accounts there, name it and keep it in its own profile:
+Sign-in is through a browser window. To keep an account in its own profile, and have the sign-in fail if a different account was used, name both:
 
 ```bash
-notebook-alchemy login --browser-cookies chrome
-notebook-alchemy login --browser-cookies chrome --account you@example.test --profile personal
+notebook-alchemy login
+notebook-alchemy login --account you@example.test --profile personal
 ```
 
-`notebook-alchemy login` on its own opens a sign-in window instead; it needs a browser for Playwright, installed once with `python -m playwright install chromium`.
+The window needs a browser for Playwright, installed once with `python -m playwright install chromium` (the one-line installer does this). Notebook Alchemy never reads an installed browser's saved sign-ins.
 
 Google ends a sign-in that sits idle for a few hours. When yours has ended, `run` and the guided run say so, ask you to sign in again (one browser window), and carry on; the work already done is kept. A long run checks again before it uploads. Outside a terminal, the run stops with the sign-in command instead.
 

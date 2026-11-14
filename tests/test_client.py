@@ -302,15 +302,6 @@ def test_unreadable_consent_record_asks_again() -> None:
     assert not upload_confirmed(AccountIdentity("work", "a@example.test"))
 
 
-def test_browser_accounts_lists_emails(tmp_path: Path) -> None:
-    payload = json.dumps({"accounts": [{"email": "a@example.test"}, {"email": "b@example.test"}]})
-    process = FakeProcess(("auth inspect", 0, payload, ""))
-    assert _client(tmp_path, process).browser_accounts("edge") == ["a@example.test", "b@example.test"]
-    bad = FakeProcess(("auth inspect", 0, json.dumps({"nope": 1}), ""))
-    with pytest.raises(NotebookLMError, match="unexpected shape"):
-        _client(tmp_path, bad).browser_accounts("edge")
-
-
 def test_an_unknown_account_is_never_recorded_or_confirmed() -> None:
     unknown = AccountIdentity("work", None)
     record_upload_consent(unknown)
