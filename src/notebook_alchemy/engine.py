@@ -212,7 +212,7 @@ class AlchemyEngine:
         session = self.client.session_file()
         return {
             "environment": self.config.env,
-            "notebooklm_cli": self.client.cli_version() or "not found (pip install notebooklm-py)",
+            "notebooklm_cli": self.client.cli_version() or "not found (run the installer again)",
             "notebooklm_profile": self.client.profile,
             "session_file": _home_relative(session) if session else "none (run: notebook-alchemy login)",
             "api_key": "set" if self.config.has_api_key else "unset",

@@ -185,7 +185,7 @@ src/notebook_alchemy/
 - **Nothing kept that you did not ask for.** The books go to NotebookLM and are not stored; `--save DIR` writes a copy.
 - **Knows your plan's limit.** `run` reads the upload account's NotebookLM plan (for example Pro: 300 sources per notebook) and will not upload past it. When the notebook is tight, the copies being replaced are removed first.
 - **A known upload account.** `status` and `run` name the Google account that receives uploads, or say plainly when it is unknown. The first upload to an account asks first (`--yes` skips the question).
-- **Checked uploads.** Each book is uploaded, waited on, titled and read back; failures are listed by book and the exit code is non-zero.
+- **Checked uploads.** Each book is uploaded, waited on, titled and read back; failures are listed by book and the exit code is non-zero (see [Exit codes](#exit-codes)).
 - **Key hygiene.** The Claude API key travels in a header only and is removed from every error and log line.
 - **Plain output, detail on request.** Modelled on Google's `gcloud`:
   - everyday words and one line per result;
@@ -348,6 +348,16 @@ A real preview of that channel, recorded from the terminal:
 
 **Channel tabs:** a channel link reads the Videos and Live tabs; add Shorts with `--tabs videos,streams,shorts`. Playlist and video links are read as they are.
 
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Done. |
+| 1 | A failure the message explains, with a next step: a channel that cannot be read, an ended sign-in outside a terminal, a failed upload, a failed self-test. |
+| 2 | A wrong option or argument, or a setting in `.env` or the environment that is not valid. |
+| 70 | An unexpected error; run again with `--debug` and report it. |
+| 130 | Stopped with Ctrl+C. |
+
 ### What It Stores
 
 Everything stays on your machine. `notebook-alchemy clean --all` removes the working files and asks first; the last two rows are removed as shown.
@@ -359,10 +369,10 @@ Everything stays on your machine. `notebook-alchemy clean --all` removes the wor
 | `~/.notebook-alchemy/knowledge/`, `library/`, `batches/` | The AI's labels, topics, placements and section orders, so reruns cost nothing, and per channel a labelling batch still running and its answers until they are stored | `clean --labels` |
 | `~/.notebook-alchemy/sync/`, `notebooks.json`, `upload_accounts.json` | What the last upload added, which notebook each channel uses, and a salted hash of the account you confirmed uploads to (not the email) | `clean --records` |
 | `~/.notebooklm/profiles/<profile>/` | The Google sign-in, kept by the `notebooklm` command | `notebooklm auth logout` |
-| Your system scheduler, and `~/.notebook-alchemy/keepalive.json` | The 20-minute sign-in refresh (only if you turned it on) and when it last ran | `keep-signed-in --off`; `clean --records` |
+| Your system scheduler, and `~/.notebook-alchemy/keepalive.json` | The 20-minute sign-in refresh (only if you turned it on) and when it last ran | `keep-signed-in --off` (asks first in a terminal; `--yes` skips); `clean --records` |
 | Your NotebookLM account | The notebook itself, and the "Notebook Alchemy workspace" notebook used to read blocked videos (left empty after each run) | Delete them in NotebookLM |
 
-`notebook-alchemy export-state FILE` copies the cache, `knowledge/`, `library/`, `sync/` and `notebooks.json` into one zip; `import-state FILE` on another computer carries on from there. Sign-ins, the key, the upload confirmation and a labelling batch still running are not included.
+`notebook-alchemy export-state FILE` copies the cache, `knowledge/`, `library/`, `sync/` and `notebooks.json` into one zip; `import-state FILE` on another computer carries on from there, keeping files that computer already has (`--replace` overwrites them, asking first in a terminal). Sign-ins, the key, the upload confirmation and a labelling batch still running are not included.
 
 Version 0.2 wrote a `vault/` folder; `clean --vaults` removes it.
 
@@ -375,7 +385,7 @@ python -m pip install build
 python -m build
 ```
 
-> **Notes.** `dry-run` shows an estimated cost; the estimate comes from transcript length and the price table in `src/notebook_alchemy/claude.py`, so check Anthropic's pricing page before a large run. `clean` deletes only this tool's own files, and asks before deleting labels or records.
+> **Notes.** `dry-run` shows an estimated cost; the estimate comes from transcript length and the price table in `src/notebook_alchemy/claude.py`, so check Anthropic's pricing page before a large run. `clean` deletes only this tool's own files. It asks before deleting labels or records, and in a terminal before deleting captions; `--yes` skips the question.
 
 For contributors: [CONTRIBUTING.md](CONTRIBUTING.md) to propose a change, [AGENTS.md](AGENTS.md) for the rules every change keeps, [OPERATIONS.md](OPERATIONS.md) for the maintainer runbook, [DEVLOG.md](DEVLOG.md) for past design decisions, and [the issues](https://github.com/gagexhill/notebook-alchemy/issues) for current work.
 

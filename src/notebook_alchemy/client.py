@@ -32,6 +32,16 @@ NOTEBOOKLM_BIN = "notebooklm"
 
 
 LIST_TIMEOUT = 60.0
+# For answers from `notebooklm` this tool cannot read: usually a newer or older notebooklm-py.
+UNEXPECTED_HINT = (
+    "Run the same command again. If it keeps failing, update Notebook Alchemy by running its "
+    "installer again, then check with `notebook-alchemy test`."
+)
+# The notebooklm tool comes with Notebook Alchemy, so a missing one is a broken install.
+INSTALL_HINT = (
+    "Run the Notebook Alchemy installer again; it installs the notebooklm tool too. "
+    "In a source checkout, run: pip install -e ."
+)
 WRITE_TIMEOUT = 120.0
 UPLOAD_TIMEOUT = 300.0
 # notebooklm's own HTTP timeout for an upload (its default is 30 s, short for a large compendium);
@@ -351,7 +361,7 @@ class NotebookLMClient:
         except FileNotFoundError as exc:
             raise NotebookLMError(
                 "The `notebooklm` command was not found.",
-                hint="Install it with: pip install notebooklm-py",
+                hint=INSTALL_HINT,
             ) from exc
         except subprocess.TimeoutExpired as exc:
             raise NotebookLMError(
@@ -359,7 +369,10 @@ class NotebookLMClient:
                 hint="Check your connection and try again.",
             ) from exc
         except OSError as exc:
-            raise NotebookLMError(f"Could not start `{shown}`: {exc}") from exc
+            raise NotebookLMError(
+                f"Could not start `{shown}`: {exc}",
+                hint="Check the install with `notebook-alchemy test`; the installer repairs it.",
+            ) from exc
 
         out = (res.stdout or "").strip()
         if res.returncode != 0:
@@ -377,13 +390,18 @@ class NotebookLMClient:
                     f"NotebookLM rejected the session: {message}",
                     hint="Run `notebook-alchemy login`.",
                 )
-            raise NotebookLMError(f"`{shown}` failed: {message}")
+            raise NotebookLMError(
+                f"`{shown}` failed: {message}",
+                hint="Run the same command again; `notebook-alchemy status` shows whether the sign-in works.",
+            )
         if not as_json:
             return out
         try:
             return json.loads(out)
         except ValueError as exc:
-            raise NotebookLMError(f"`{shown}` returned output that is not JSON: {out[:120]!r}") from exc
+            raise NotebookLMError(
+                f"`{shown}` returned output that is not JSON: {out[:120]!r}", hint=UNEXPECTED_HINT
+            ) from exc
 
     # -- notebooks --
 
@@ -393,7 +411,7 @@ class NotebookLMClient:
             return data
         if isinstance(data, dict) and isinstance(data.get("notebooks"), list):
             return data["notebooks"]
-        raise NotebookLMError("`notebooklm list` returned an unexpected shape.")
+        raise NotebookLMError("`notebooklm list` returned an unexpected shape.", hint=UNEXPECTED_HINT)
 
     def find_notebook(self, query: str, *, exact_only: bool = False) -> dict[str, Any] | None:
         """Exact title or id match; otherwise a unique substring match. Ambiguity is an error."""
@@ -421,7 +439,10 @@ class NotebookLMClient:
         data = self._run(["create", title], timeout=WRITE_TIMEOUT)
         nb_id = _first(data, "id", "notebook_id") or _first(_first(data, "notebook"), "id")
         if not nb_id:
-            raise NotebookLMError(f"NotebookLM created '{title}' but returned no notebook id.")
+            raise NotebookLMError(
+                f"NotebookLM created '{title}' but returned no notebook id.",
+                hint="Run the same command again: it finds the notebook by its title and uses it.",
+            )
         return str(nb_id), True
 
     # -- sources --
@@ -432,7 +453,7 @@ class NotebookLMClient:
             return data
         if isinstance(data, dict) and isinstance(data.get("sources"), list):
             return data["sources"]
-        raise NotebookLMError("`notebooklm source list` returned an unexpected shape.")
+        raise NotebookLMError("`notebooklm source list` returned an unexpected shape.", hint=UNEXPECTED_HINT)
 
     def delete_source(self, notebook_id: str, source_id: str) -> None:
         self._run(["source", "delete", source_id, "-n", notebook_id, "-y"], timeout=WRITE_TIMEOUT)

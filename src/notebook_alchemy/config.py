@@ -111,7 +111,10 @@ def update_dotenv(values: dict[str, str], env_path: Path | None = None) -> Path:
     path = env_path or Path(".env")
     for key, value in values.items():
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
-            raise ConfigError(f"{key!r} is not an environment variable name.")
+            raise ConfigError(
+                f"{key!r} is not an environment variable name.",
+                hint="Use capital letters, digits and underscores, starting with a letter: ALCHEMY_MODEL.",
+            )
         if any(ch in value for ch in '\r\n"') or value != value.strip():
             raise ConfigError(
                 f"The value for {key} contains a quote, a line break or surrounding spaces.",
@@ -145,7 +148,10 @@ def update_dotenv(values: dict[str, str], env_path: Path | None = None) -> Path:
         os.replace(tmp, path)
     except OSError as exc:
         Path(tmp).unlink(missing_ok=True)
-        raise ConfigError(f"Could not write {path}: {exc}") from exc
+        raise ConfigError(
+            f"Could not write {path}: {exc}",
+            hint="Check that the folder can be written to, or run the command from another folder.",
+        ) from exc
     return path
 
 

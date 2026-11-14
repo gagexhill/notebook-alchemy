@@ -122,7 +122,7 @@ def test_timeout_and_missing_binary_are_typed_errors(tmp_path: Path) -> None:
         _client(tmp_path, slow).list_notebooks()  # type: ignore[arg-type]
     with pytest.raises(NotebookLMError) as err:
         _client(tmp_path, absent).list_notebooks()  # type: ignore[arg-type]
-    assert "pip install notebooklm-py" in (err.value.hint or "")
+    assert "installer again" in (err.value.hint or "")
 
 
 def test_unparseable_output_is_an_error(tmp_path: Path) -> None:

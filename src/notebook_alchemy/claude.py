@@ -173,7 +173,12 @@ class ClaudeClient:
             "refusal": "Claude declined to answer this request",
             "max_tokens": "the answer was longer than the output limit",
         }.get(result.stop_reason, f"the answer ended as '{result.stop_reason or 'empty'}'")
-        raise ClaudeError(f"Unusable answer: {reason}.", detail=reason, unusable=True)
+        raise ClaudeError(
+            f"Unusable answer: {reason}.",
+            hint="Nothing needs doing: that part keeps its points unlabelled, and it is not asked again.",
+            detail=reason,
+            unusable=True,
+        )
 
     def _status_error(self, exc: anthropic.APIStatusError) -> ClaudeError:
         status = int(getattr(exc, "status_code", 0) or 0)
@@ -291,7 +296,9 @@ class ClaudeClient:
             raise self._status_error(exc) from None
         except anthropic.APIConnectionError as exc:
             raise ClaudeError(
-                "Could not reach the Claude API.", detail=scrub(f"connection: {exc}", self._api_key)
+                "Could not reach the Claude API.",
+                hint="Check the internet connection and run the same command again.",
+                detail=scrub(f"connection: {exc}", self._api_key),
             ) from None
         return str(batch.id)
 
@@ -305,7 +312,9 @@ class ClaudeClient:
             raise self._status_error(exc) from None
         except anthropic.APIConnectionError as exc:
             raise ClaudeError(
-                "Could not reach the Claude API.", detail=scrub(f"connection: {exc}", self._api_key)
+                "Could not reach the Claude API.",
+                hint="Check the internet connection and run the same command again.",
+                detail=scrub(f"connection: {exc}", self._api_key),
             ) from None
 
     def batch_results(
@@ -335,7 +344,9 @@ class ClaudeClient:
             raise self._status_error(exc) from None
         except anthropic.APIConnectionError as exc:
             raise ClaudeError(
-                "Could not reach the Claude API.", detail=scrub(f"connection: {exc}", self._api_key)
+                "Could not reach the Claude API.",
+                hint="Check the internet connection and run the same command again.",
+                detail=scrub(f"connection: {exc}", self._api_key),
             ) from None
         return status, out
 

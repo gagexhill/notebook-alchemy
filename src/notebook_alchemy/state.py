@@ -133,49 +133,8 @@ def import_state(engine: AlchemyEngine, path: Path, *, replace: bool = False) ->
     holds one file at most, and each is written atomically. A file already here is kept unless
     `replace` is set; the channel-to-notebook list is merged, this computer's entries first.
     """
-    try:
-        archive = zipfile.ZipFile(path)
-    except (OSError, zipfile.BadZipFile) as exc:
-        raise AlchemyError(
-            f"{path} is not a Notebook Alchemy state file: {exc}",
-            hint="Make one with `notebook-alchemy export-state FILE` on the other computer.",
-        ) from exc
-    with archive:
-        manifest = _json_object(archive.read(MANIFEST)) if MANIFEST in archive.namelist() else None
-        if not manifest or manifest.get("format") != FORMAT:
-            raise AlchemyError(
-                f"{path} is not a Notebook Alchemy state file.",
-                hint="Make one with `notebook-alchemy export-state FILE` on the other computer.",
-            )
-        if not isinstance(manifest.get("version"), int) or manifest["version"] > FORMAT_VERSION:
-            raise AlchemyError(
-                f"{path} was made by a newer version of Notebook Alchemy ({manifest.get('tool', '?')}).",
-                hint="Upgrade Notebook Alchemy on this computer, then import it again.",
-            )
-        members: list[zipfile.ZipInfo] = []
-        total = 0
-        for info in archive.infolist():
-            if info.is_dir() or info.filename == MANIFEST:
-                continue
-            name = info.filename
-            if not _member_ok(name):
-                raise AlchemyError(
-                    f"{path} holds a file this tool does not write ({name}). Nothing was imported.",
-                    hint="Import only files made by `notebook-alchemy export-state`.",
-                )
-            total += info.file_size
-            if info.file_size > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
-                raise AlchemyError(
-                    f"{path} is larger than a state file can be. Nothing was imported.",
-                    hint="Import only files made by `notebook-alchemy export-state`.",
-                )
-            if _json_object(_read_member(archive, info)) is None:
-                raise AlchemyError(
-                    f"{name} in {path} is not a JSON object. Nothing was imported.",
-                    hint="Make a new state file on the other computer.",
-                )
-            members.append(info)
-
+    with _open(path) as archive:
+        members = _checked_members(archive, path)
         summary = StateSummary(path)
         try:
             for info in members:
@@ -187,6 +146,71 @@ def import_state(engine: AlchemyEngine, path: Path, *, replace: bool = False) ->
                 hint="Free some disk space or fix the folder's permissions, then import again.",
             ) from exc
     return summary
+
+
+def count_existing(engine: AlchemyEngine, path: Path) -> int:
+    """How many files `import_state(..., replace=True)` would overwrite. Checks the whole state file
+    as an import does, and writes nothing."""
+    existing: set[tuple[int, int]] = set()
+    with _open(path) as archive:
+        for info in _checked_members(archive, path):
+            if info.filename == NOTEBOOKS:
+                continue  # merged, never overwritten
+            folder, file_name = info.filename.split("/", 1)
+            target = _folder(engine, folder) / file_name
+            if target.exists():
+                found = target.stat()
+                existing.add((found.st_dev, found.st_ino))  # two names for one file count once
+    return len(existing)
+
+
+def _open(path: Path) -> zipfile.ZipFile:
+    try:
+        return zipfile.ZipFile(path)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise AlchemyError(
+            f"{path} is not a Notebook Alchemy state file: {exc}",
+            hint="Make one with `notebook-alchemy export-state FILE` on the other computer.",
+        ) from exc
+
+
+def _checked_members(archive: zipfile.ZipFile, path: Path) -> list[zipfile.ZipInfo]:
+    """The archive's files, after every one is checked; raises before anything is written."""
+    manifest = _json_object(archive.read(MANIFEST)) if MANIFEST in archive.namelist() else None
+    if not manifest or manifest.get("format") != FORMAT:
+        raise AlchemyError(
+            f"{path} is not a Notebook Alchemy state file.",
+            hint="Make one with `notebook-alchemy export-state FILE` on the other computer.",
+        )
+    if not isinstance(manifest.get("version"), int) or manifest["version"] > FORMAT_VERSION:
+        raise AlchemyError(
+            f"{path} was made by a newer version of Notebook Alchemy ({manifest.get('tool', '?')}).",
+            hint="Upgrade Notebook Alchemy on this computer, then import it again.",
+        )
+    members: list[zipfile.ZipInfo] = []
+    total = 0
+    for info in archive.infolist():
+        if info.is_dir() or info.filename == MANIFEST:
+            continue
+        name = info.filename
+        if not _member_ok(name):
+            raise AlchemyError(
+                f"{path} holds a file this tool does not write ({name}). Nothing was imported.",
+                hint="Import only files made by `notebook-alchemy export-state`.",
+            )
+        total += info.file_size
+        if info.file_size > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
+            raise AlchemyError(
+                f"{path} is larger than a state file can be. Nothing was imported.",
+                hint="Import only files made by `notebook-alchemy export-state`.",
+            )
+        if _json_object(_read_member(archive, info)) is None:
+            raise AlchemyError(
+                f"{name} in {path} is not a JSON object. Nothing was imported.",
+                hint="Make a new state file on the other computer.",
+            )
+        members.append(info)
+    return members
 
 
 def _read_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:

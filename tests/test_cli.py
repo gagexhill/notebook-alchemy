@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -158,7 +159,7 @@ def test_status_is_offline_and_actionable(runner: CliRunner, monkeypatch: pytest
     monkeypatch.setattr(NotebookLMClient, "cli_version", lambda self: None)
     result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0
-    assert "pip install notebooklm-py" in result.output and "notebook-alchemy login" in result.output
+    assert "installer again" in result.output and "notebook-alchemy login" in result.output
     assert "notebook-alchemy setup" in result.output and "AI sorting is off" in result.output
 
 
@@ -179,7 +180,7 @@ def test_login_without_the_notebooklm_command(runner: CliRunner, monkeypatch: py
 
     monkeypatch.setattr(subprocess, "run", absent)
     result = runner.invoke(cli, ["login"])
-    assert result.exit_code == 1 and "pip install notebooklm-py" in result.output
+    assert result.exit_code == 1 and "installer again" in " ".join(result.output.split())
     assert "Traceback" not in result.output
 
 
@@ -213,7 +214,10 @@ def test_clean_defaults_to_the_cache_and_keeps_vaults(runner: CliRunner, isolate
     assert not list(cache.iterdir()) and (vault / "A.md").exists()
 
 
-def test_clean_vaults_asks_first(runner: CliRunner, isolated_environment) -> None:
+def test_clean_vaults_asks_first(
+    runner: CliRunner, isolated_environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
     _cache, vault = _seed_cache_and_vault(isolated_environment)
     declined = runner.invoke(cli, ["clean", "--vaults"], input="n\n")
     assert declined.exit_code == 0 and "Nothing was deleted" in declined.output and (vault / "A.md").exists()
@@ -229,8 +233,9 @@ def test_clean_yes_skips_the_prompt(runner: CliRunner, isolated_environment) -> 
 
 
 def test_clean_records_removes_upload_records_and_confirmations(
-    runner: CliRunner, isolated_environment
+    runner: CliRunner, isolated_environment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
     cache, vault = _seed_cache_and_vault(isolated_environment)
     sync_dir = isolated_environment.home / ".notebook-alchemy" / "sync"
     sync_dir.mkdir(parents=True)
@@ -282,6 +287,7 @@ def test_clean_only_touches_this_tools_own_files(runner: CliRunner, isolated_env
 def test_clean_asks_before_clearing_a_custom_cache_folder(
     runner: CliRunner, isolated_environment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
     custom = isolated_environment.work / "my-docs"
     custom.mkdir()
     (custom / "abc.json").write_text(json.dumps({"video_id": "abc"}), encoding="utf-8")
@@ -1408,3 +1414,220 @@ def test_the_install_does_not_pull_in_a_browser_cookie_reader() -> None:
     notebooklm = [d for d in deps if d.startswith("notebooklm-py")]
     assert notebooklm == ["notebooklm-py[browser]>=0.8.6,<0.9"]  # no `cookies` extra (rookie-cookies)
     assert not any("rookie" in d or "cookie" in d for d in deps)
+
+
+def test_every_help_line_fits_in_80_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A wide terminal: the limit must come from the tool's own setting, not from the window.
+    monkeypatch.setenv("COLUMNS", "200")
+    width = cli.context_settings["max_content_width"]
+    top = click.Context(cli, info_name="notebook-alchemy", max_content_width=width)
+    helps = {"notebook-alchemy": cli.get_help(top)}
+    for name, command in cli.commands.items():
+        if not command.hidden:
+            ctx = click.Context(command, info_name=name, parent=top, max_content_width=width)
+            helps[name] = command.get_help(ctx)
+    long = [f"{name}: {line}" for name, text in helps.items() for line in text.splitlines() if len(line) > 80]
+    assert long == []
+
+
+def test_every_visible_command_has_an_example_in_its_help() -> None:
+    missing = [n for n, c in cli.commands.items() if not c.hidden and "Example" not in (c.epilog or "")]
+    assert missing == []
+
+
+def test_turning_the_refresh_off_in_a_terminal_asks_first(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _signed_in(monkeypatch)
+    monkeypatch.setattr(NotebookLMClient, "is_authenticated", lambda self: True)
+    turned_on = runner.invoke(cli, ["keep-signed-in"])
+    assert turned_on.exit_code == 0, turned_on.output
+    assert isolated_environment.scheduler.tasks
+    monkeypatch.setattr(cli_module, "_can_ask", lambda: True)
+    kept = runner.invoke(cli, ["keep-signed-in", "--off"], input="n\n")
+    assert "Nothing was changed" in kept.output and isolated_environment.scheduler.tasks
+    gone = runner.invoke(cli, ["keep-signed-in", "--off", "--yes"])
+    assert gone.exit_code == 0 and not isolated_environment.scheduler.tasks
+
+
+def test_replacing_on_import_in_a_terminal_asks_first(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment, tmp_path: Path
+) -> None:
+    home = isolated_environment.home / ".notebook-alchemy"
+    (home / "cache").mkdir(parents=True, exist_ok=True)
+    record = home / "cache" / "vid00000001.json"
+    record.write_text('{"video_id": "vid00000001", "full_text": "first"}', encoding="utf-8")
+    archive = tmp_path / "state.zip"
+    assert runner.invoke(cli, ["export-state", str(archive)]).exit_code == 0
+    record.write_text('{"video_id": "vid00000001", "full_text": "changed here"}', encoding="utf-8")
+    monkeypatch.setattr(cli_module, "_can_ask", lambda: True)
+    declined = runner.invoke(cli, ["import-state", str(archive), "--replace"], input="n\n")
+    assert "Nothing was imported" in declined.output and "changed here" in record.read_text(encoding="utf-8")
+    accepted = runner.invoke(cli, ["import-state", str(archive), "--replace", "--yes"])
+    assert accepted.exit_code == 0 and "first" in record.read_text(encoding="utf-8")
+
+
+def test_clearing_captions_in_a_terminal_asks_first(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    cache = isolated_environment.home / ".notebook-alchemy" / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    record = cache / "vid00000001.json"
+    record.write_text('{"video_id": "vid00000001", "full_text": "words"}', encoding="utf-8")
+    monkeypatch.setattr(cli_module, "_can_ask", lambda: True)
+    declined = runner.invoke(cli, ["clean"], input="n\n")
+    assert "Nothing was deleted" in declined.output and record.exists()
+    assert runner.invoke(cli, ["clean", "--yes"]).exit_code == 0 and not record.exists()
+
+
+def test_every_typed_error_carries_a_next_step() -> None:
+    import ast
+
+    family = {
+        "AlchemyError", "ConfigError", "ChannelScanError", "ClaudeError",
+        "NotebookLMError", "SessionError", "SyncError", "VaultError",
+    }  # fmt: skip
+    source_dir = Path(cli_module.__file__).parent
+    missing = []
+    for path in sorted(source_dir.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            call = node.exc if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) else None
+            if call is None or getattr(call.func, "id", "") not in family:
+                continue
+            if not any(k.arg == "hint" for k in call.keywords):
+                missing.append(f"{path.name}:{node.lineno}")
+    assert missing == []
+
+
+def test_progress_outside_a_terminal_is_one_line_per_finished_stage(capsys, monkeypatch) -> None:
+    from rich.console import Console
+
+    from notebook_alchemy import ui
+
+    monkeypatch.setattr(ui.UiState, "quiet", False)
+    monkeypatch.setattr(ui.UiState, "verbose", 0)
+    # Not a terminal whatever the environment says (FORCE_COLOR would make Rich think it is one).
+    monkeypatch.setattr(ui, "console", Console(force_terminal=False, highlight=False, width=100))
+    with ui.Reporter() as report:
+        report("Labelling", 1, 3)
+        report("Labelling", 3, 3)
+        report("Labelling", 3, 3)
+    assert capsys.readouterr().out.count("Labelling: 3/3") == 1  # shown without -v, once
+    monkeypatch.setattr(ui.UiState, "quiet", True)
+    with ui.Reporter() as report:
+        report("Sorting", 2, 2)
+    assert "Sorting" not in capsys.readouterr().out  # -q keeps only errors and results
+
+
+def test_a_saved_path_is_never_cut_in_the_middle(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deep = tmp_path / ("a-long-folder-name-" * 4) / "books"
+    monkeypatch.setenv("COLUMNS", "60")
+    result = runner.invoke(cli, ["run", "--mock", "--save", str(deep)])
+    assert result.exit_code == 0, result.output
+    saved = next(line for line in result.output.splitlines() if "Saved " in line)
+    assert saved.rstrip().endswith("books].")  # the whole path on the line that names it
+
+
+def test_the_help_and_readme_document_the_exit_codes(runner: CliRunner) -> None:
+    from notebook_alchemy import ui
+    from notebook_alchemy.errors import AlchemyError, ConfigError
+
+    codes = {0, AlchemyError.exit_code, ConfigError.exit_code, ui.EXIT_UNEXPECTED, ui.EXIT_INTERRUPTED}
+    assert codes == {0, 1, 2, 70, 130}
+    help_text = " ".join(runner.invoke(cli, ["--help"]).output.split())
+    readme = (Path(cli_module.__file__).resolve().parents[2] / "README.md").read_text(encoding="utf-8")
+    paragraph = help_text.split("Exit codes:")[1].split("Docs:")[0]
+    for code in sorted(codes):
+        assert re.search(rf"(?<!\d){code} ", paragraph), code  # 0 is not satisfied by 70 or 130
+        assert f"| {code} |" in readme
+
+
+def test_stopping_at_a_question_is_reported_as_a_stop(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    from notebook_alchemy import ui
+
+    cache = isolated_environment.home / ".notebook-alchemy" / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    record = cache / "vid00000001.json"
+    record.write_text('{"video_id": "vid00000001", "full_text": "words"}', encoding="utf-8")
+    monkeypatch.setattr(cli_module, "_can_ask", lambda: True)
+    result = runner.invoke(cli, ["clean"], input="")  # the input ends at the question, as Ctrl+C does
+    assert result.exit_code == ui.EXIT_INTERRUPTED and record.exists()
+    assert "Aborted!" not in result.output
+
+
+def test_a_question_is_not_asked_when_the_output_goes_to_a_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setattr(cli_module, "_is_console", lambda stream: stream is sys.stdin)
+    assert cli_module._interactive() and not cli_module._can_ask()
+    monkeypatch.setattr(cli_module, "_is_console", lambda stream: True)
+    assert cli_module._can_ask()
+
+
+def test_the_null_device_is_not_a_terminal() -> None:
+    import os
+
+    class Plain:
+        def isatty(self) -> bool:
+            return False
+
+    assert not cli_module._is_console(Plain()) and not cli_module._is_console(object())
+    if os.name == "nt":  # NUL answers isatty() on Windows; it is still not a console
+        with open(os.devnull) as nul:
+            assert nul.isatty() and not cli_module._is_console(nul)
+
+
+def test_replacing_on_import_asks_only_when_something_would_be_overwritten(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment, tmp_path: Path
+) -> None:
+    home = isolated_environment.home / ".notebook-alchemy"
+    (home / "cache").mkdir(parents=True, exist_ok=True)
+    record = home / "cache" / "vid00000001.json"
+    record.write_text('{"video_id": "vid00000001", "full_text": "first"}', encoding="utf-8")
+    archive = tmp_path / "state.zip"
+    assert runner.invoke(cli, ["export-state", str(archive)]).exit_code == 0
+    record.unlink()
+    monkeypatch.setattr(cli_module, "_can_ask", lambda: True)
+    fresh = runner.invoke(cli, ["import-state", str(archive), "--replace"])  # nothing here: no question
+    assert fresh.exit_code == 0 and "overwritten" not in fresh.output and record.exists()
+    bad = tmp_path / "not-a-state-file.zip"
+    bad.write_text("not a zip", encoding="utf-8")
+    refused = runner.invoke(cli, ["import-state", str(bad), "--replace"])  # checked before asking
+    assert refused.exit_code == 1 and "Do you want to continue" not in refused.output
+
+
+def test_a_costly_clean_with_nobody_to_ask_says_so(runner: CliRunner, isolated_environment) -> None:
+    sync_dir = isolated_environment.home / ".notebook-alchemy" / "sync"
+    sync_dir.mkdir(parents=True)
+    record = sync_dir / "nb-1.json"
+    record.write_text('{"titles": ["A"]}', encoding="utf-8")
+    result = runner.invoke(cli, ["clean", "--records"], input="")  # a script, without --yes
+    flat = " ".join(result.output.split())
+    assert result.exit_code == 1 and "--yes" in flat and "Stopped" not in flat and record.exists()
+
+
+def test_two_names_for_one_file_are_counted_once(
+    runner: CliRunner, tmp_path: Path, isolated_environment
+) -> None:
+    import zipfile
+
+    from notebook_alchemy import state
+
+    made = tmp_path / "state.zip"
+    assert runner.invoke(cli, ["export-state", str(made)]).exit_code == 0
+    twice = tmp_path / "twice.zip"
+    with zipfile.ZipFile(made) as old, zipfile.ZipFile(twice, "w") as new:
+        new.writestr(state.MANIFEST, old.read(state.MANIFEST))
+        new.writestr("captions/vid00000001.json", '{"video_id": "vid00000001"}')
+        new.writestr("captions/VID00000001.json", '{"video_id": "vid00000001"}')
+    engine = AlchemyEngine(cli_module._config())
+    assert state.count_existing(engine, twice) == 0
+    target = engine.config.cache_dir / "vid00000001.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{}", encoding="utf-8")
+    # Windows finds the one file under both names; elsewhere only the lower-case name exists.
+    assert state.count_existing(engine, twice) == 1

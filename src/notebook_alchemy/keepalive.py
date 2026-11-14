@@ -198,9 +198,15 @@ class KeepAlive:
         try:
             res = self.run(cmd, capture_output=True, text=True, timeout=60, input=stdin)
         except FileNotFoundError as exc:
-            raise AlchemyError(f"Could not {what}: `{cmd[0]}` was not found.") from exc
+            raise AlchemyError(
+                f"Could not {what}: `{cmd[0]}` was not found.",
+                hint=f"Install or turn on `{cmd[0]}`, then run the same command again.",
+            ) from exc
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise AlchemyError(f"Could not {what}: {exc}") from exc
+            raise AlchemyError(
+                f"Could not {what}: {exc}",
+                hint="Run the same command again; `notebook-alchemy status` shows whether the refresh is on.",
+            ) from exc
         return res
 
     def _check(self, res: subprocess.CompletedProcess, what: str) -> None:
@@ -333,7 +339,10 @@ class KeepAlive:
             self._check(res, "update the crontab")
         self._remove_files()
         if self.state().on:
-            raise AlchemyError(f"The {kind} entry is still there after removing it.")
+            raise AlchemyError(
+                f"The {kind} entry is still there after removing it.",
+                hint=f"Remove it in {kind} yourself, then confirm with `notebook-alchemy status`.",
+            )
         _record(self.home, self.profile, where=None)
         return True
 

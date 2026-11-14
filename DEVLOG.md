@@ -2,6 +2,32 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## The command line, audited against #32 (2026-11-14)
+
+- **Why.** An audit of 0.3.0 against #32's five acceptance items found gaps in four.
+- **Help.** `status` and `test` gained examples, and every help line now fits 80 columns. The top-level help lists the exit codes; the README has the table.
+- **Progress.** Outside a terminal, a run prints one line per finished stage without `-v`. Before, a piped run showed no progress at all.
+- **Errors.** Every typed error now carries a next step; 17 had none.
+- **Confirmations.** In a terminal, `keep-signed-in --off`, `import-state --replace` and clearing captions now ask first, and `--yes` skips the question. Outside a terminal the flag itself is the instruction, so scripts are not blocked.
+- **Paths.** The line that names where books were saved is never wrapped, so the path can be copied whole.
+- **Guards.** Tests fail if a help line passes 80 columns, a visible command lacks an example, or a typed error is raised without a next step. Each was checked by removing its guard.
+- **Review before merge (10 findings, 8 fixed, 2 left as they are).**
+  - Ctrl+C at a question now exits 130 with the usual stop message; before, click printed `Aborted!` and exited 1.
+  - The three new questions are asked only when input and output are both a terminal, so output sent to a file never waits unseen.
+  - `import-state --replace` checks the state file first, and asks only when it would overwrite something, saying how many files.
+  - Help is 80 columns wide by the tool's own setting (`max_content_width`), so a wide window no longer changes it; the width test now runs in a 200-column window.
+  - Hints name this tool's installer, not the library underneath; the scheduler hint names the missing tool and no longer suggests a sign-in that does not apply.
+  - The progress and exit-code tests no longer depend on the environment or on `0` matching inside `70`.
+  - Left: the `exc.hint or ...` fallbacks in `engine.py` (the errors raised there already carry hints), and the hint on an unusable answer, which is recorded and not shown.
+- **Second review (8 findings, all fixed).**
+  - On Windows `NUL` answers as a terminal. A question is now asked only at a real console, so a scheduled or scripted command with `<NUL` or `>NUL` is not asked one nobody sees.
+  - `clean` of labels, records or a custom folder with nobody to answer now stops with an error that names `--yes`; it no longer reads the end of the input as Ctrl+C.
+  - A missing `notebooklm` tool is a broken install, so every hint for it says to run the installer again; none names `pip install` of a package the installer does not use.
+  - The scheduler hint names the missing tool and what to do. `import-state` counts one file once when the state file names it twice. "1 local record" is singular.
+  - The test run clears `FORCE_COLOR` and `TTY_COMPATIBLE`, which made one older test fail.
+  - Known change: in a window where input is a pipe (Git Bash's mintty), a costly `clean` used to ask and now stops with the `--yes` error, as the first-upload confirmation already does there.
+  - One file named twice is recognised by the file itself, not its name, so the count is right on a case-insensitive macOS disk too.
+
 ## No browser-cookie reader in the install (#55, 2026-11-14)
 
 - **What was wrong.** The default install required `notebooklm-py[browser,cookies]`. The `cookies` extra installs `rookie-cookies`, a library that reads the saved sign-ins of every installed browser. Microsoft Defender quarantined its binary on the maintainer's machine as a Severe info-stealer. Whether that detection is a false positive was never established; either way, a tool for ordinary users should not put such a reader on their machine.
