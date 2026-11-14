@@ -106,3 +106,23 @@ def test_equal_dates_keep_the_same_copy_every_run() -> None:
         return [v for v, cs in vids.items() if cs[0].kept]
 
     assert run_once(["aaa", "bbb"]) == run_once(["bbb", "aaa"])
+
+
+def test_a_long_run_without_sentence_breaks_is_cut_into_chunks() -> None:
+    # Periods followed by a lowercase word (as in NotebookLM's transcripts) are not sentence breaks.
+    text = ("and then i went to sam.gov. and i did it again " * 400).strip()
+    chunks = chunk_video("v", text)
+    assert len(chunks) > 50 and all(len(c.text.split()) <= CHUNK_MAX_WORDS for c in chunks)
+    assert " ".join(c.text for c in chunks).split() == clean_text(text).split()  # every word, in order
+
+
+def test_labels_made_for_another_chunking_are_not_reused() -> None:
+    from notebook_alchemy import cleanup, knowledge
+
+    before = knowledge.label_key("v", "words", "m")
+    cleanup_version = cleanup.CHUNKING_VERSION
+    try:
+        knowledge.CHUNKING_VERSION = "other"
+        assert knowledge.label_key("v", "words", "m") != before
+    finally:
+        knowledge.CHUNKING_VERSION = cleanup_version
