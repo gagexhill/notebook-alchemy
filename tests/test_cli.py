@@ -33,7 +33,7 @@ from notebook_alchemy.client import (
     upload_confirmed,
 )
 from notebook_alchemy.engine import AlchemyEngine, SyncResult
-from notebook_alchemy.errors import ChannelScanError, SyncError
+from notebook_alchemy.errors import AlchemyError, ChannelScanError, SyncError
 
 from .conftest import FakeNotebookLM
 
@@ -657,7 +657,7 @@ def fake_words(monkeypatch: pytest.MonkeyPatch):
 def _record_uploads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     uploads: list[str] = []
 
-    def fake_publish(self, title, books, channel_key=None, progress=None):
+    def fake_publish(self, title, books, **kw):
         uploads.append(title)
         return SyncResult("nb-1", True, len(books), 0)
 
@@ -729,9 +729,7 @@ def test_a_rerun_with_nothing_changed_says_the_notebook_is_up_to_date(
     monkeypatch.setattr(
         AlchemyEngine,
         "publish",
-        lambda self, title, books, channel_key=None, progress=None: SyncResult(
-            "nb-1", False, 0, 0, unchanged=len(books)
-        ),
+        lambda self, title, books, **kw: SyncResult("nb-1", False, 0, 0, unchanged=len(books)),
     )
     monkeypatch.setattr(NotebookLMClient, "check_session", lambda self: SessionStatus(True, "ok", 1))
     result = runner.invoke(cli, [*RUN, "-N", "My Notebook", "--yes"])
@@ -746,7 +744,7 @@ def test_an_upload_failure_exits_non_zero_and_lists_each_book(
     fake_channel("a", "b")
     _record_uploads(monkeypatch)
 
-    def boom(self, title, books, channel_key=None, progress=None):
+    def boom(self, title, books, **kw):
         raise SyncError(
             "1 of 2 books did not upload.", failed=["Pricing: No such option"], hint="Run it again."
         )
@@ -1154,7 +1152,9 @@ def test_nothing_is_uploaded_while_videos_wait_for_labels(
     monkeypatch.setattr(AlchemyEngine, "build", waiting)
     result = runner.invoke(cli, ["-q", *RUN, "-N", "chan", "--yes"])
     assert result.exit_code == 0 and uploads == []
-    assert "still wait for labels, so nothing was uploaded" in " ".join(result.output.split())  # even with -q
+    assert "still waits for labels, so no books were written and nothing was uploaded" in " ".join(
+        result.output.split()
+    )  # even with -q
 
 
 @pytest.mark.parametrize("flag", [["-n", "x"], ["--sync"], ["--write"]])
@@ -1221,12 +1221,12 @@ def test_the_guided_run_needs_only_a_channel_link_when_signed_in(
     _guided(monkeypatch, signed_in=True)
     runs = _recorded_run(monkeypatch)
     # key: Enter (no); a wrong link, then a channel
-    result = runner.invoke(cli, [], input="\nnot a link\n@kizzyparks\n")
+    result = runner.invoke(cli, [], input="\nnot a link\n@example-channel\n")
     assert result.exit_code == 0, result.output
     flat = " ".join(result.output.split())
     assert f"Signed in as [{ACCOUNT}]" in flat and "does not look like a YouTube link" in flat
-    assert runs == [{"source": "@kizzyparks", "offline": True}]  # no key: every word, sorted by title
-    assert "notebook-alchemy run @kizzyparks" in flat
+    assert runs == [{"source": "@example-channel", "offline": False, "tabs": ("videos", "streams")}]
+    assert "notebook-alchemy run @example-channel" in flat
     assert "keep this sign-in fresh" not in flat and not isolated_environment.scheduler.tasks
 
 
@@ -1238,11 +1238,17 @@ def test_the_guided_run_can_add_a_claude_api_key(
     opened: list[str] = []
     monkeypatch.setattr(click, "launch", lambda url, **kw: opened.append(url))
     key = "sk-ant-TEST-ONLY-not-a-real-key-001"
-    result = runner.invoke(cli, [], input=f"y\n{key}\nhttps://www.youtube.com/@kizzyparks\n")
+    result = runner.invoke(cli, [], input=f"y\n{key}\nhttps://www.youtube.com/@example-channel\n")
     assert result.exit_code == 0, result.output
     assert opened == ["https://platform.claude.com/settings/keys"] and key not in result.output
     assert f"ANTHROPIC_API_KEY={key}" in (isolated_environment.work / ".env").read_text(encoding="utf-8")
-    assert runs == [{"source": "https://www.youtube.com/@kizzyparks", "offline": False}]
+    assert runs == [
+        {
+            "source": "https://www.youtube.com/@example-channel",
+            "offline": False,
+            "tabs": ("videos", "streams"),
+        }
+    ]
 
 
 def test_the_guided_run_stops_cleanly_without_a_sign_in(
@@ -1287,7 +1293,7 @@ def test_the_guided_run_warns_when_the_environment_key_would_win(
     monkeypatch.setattr(click, "launch", lambda url, **kw: None)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "your_key_here")  # set, but not a usable key
     key = "sk-ant-TEST-ONLY-not-a-real-key-001"
-    result = runner.invoke(cli, [], input=f"y\n{key}\n@kizzyparks\n")
+    result = runner.invoke(cli, [], input=f"y\n{key}\n@example-channel\n")
     assert result.exit_code == 0, result.output
     assert "also set in your environment" in " ".join(result.output.split())
 
@@ -1356,3 +1362,91 @@ def test_dry_run_warns_when_the_model_has_no_listed_price(
     result = runner.invoke(cli, ["dry-run", "@my"])
     assert result.exit_code == 0, result.output
     assert "No listed price for 'claude-unlisted-test'" in " ".join(result.output.split())
+
+
+def test_the_guided_run_hands_the_real_run_command_a_tuple_of_tabs(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    _guided(monkeypatch, signed_in=True)
+    seen: dict[str, object] = {}
+
+    def scan(self, url, limit=None, tabs=()):
+        seen["tabs"] = tabs
+        raise AlchemyError("stop here")
+
+    from notebook_alchemy.channel import ChannelScanner
+
+    monkeypatch.setattr(ChannelScanner, "scan", scan)
+    monkeypatch.setattr(cli_module, "_show_upload_target", lambda engine: None)
+    monkeypatch.setattr(cli_module, "_confirm_first_upload", lambda confirmed, yes: None)
+    runner.invoke(cli, [], input="\n@example-channel\n")
+    assert seen["tabs"] == ("videos", "streams")
+
+
+def test_no_books_are_written_while_videos_wait_for_labels(
+    runner: CliRunner, fake_channel, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_channel("a b c")
+    real = AlchemyEngine.build
+
+    def waiting(self, *a, **kw):
+        report = real(self, *a, **kw)
+        report.waiting = [report.videos[0].id]
+        return report
+
+    monkeypatch.setattr(AlchemyEngine, "build", waiting)
+    out = tmp_path / "books"
+    result = runner.invoke(cli, [*RUN, "--save", str(out)])
+    flat = " ".join(result.output.split())
+    assert "still waits for labels, so no books were written" in flat and not out.exists()
+
+
+def test_clean_leaves_files_that_are_not_shaped_like_its_own(runner: CliRunner, isolated_environment) -> None:
+    home = isolated_environment.home / ".notebook-alchemy"
+    (home / "batches").mkdir(parents=True, exist_ok=True)
+    (home / "library").mkdir(parents=True, exist_ok=True)
+    mine = home / "batches" / "Chan.json"
+    mine.write_text('{"job": "msgbatch_test", "keys": []}', encoding="utf-8")
+    other = home / "batches" / "notes.json"
+    other.write_text('{"shopping": ["milk"]}', encoding="utf-8")
+    library_other = home / "library" / "budget.json"
+    library_other.write_text('{"rent": 1200}', encoding="utf-8")
+    notebooks = home / "notebooks.json"
+    notebooks.write_text('{"settings": {"theme": "dark"}}', encoding="utf-8")
+    result = runner.invoke(cli, ["clean", "--labels", "--records", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert not mine.exists() and other.exists() and library_other.exists() and notebooks.exists()
+    assert "does not look like Notebook Alchemy output" in " ".join(result.output.split())
+
+
+def test_an_unreadable_refresh_record_is_reported_as_unknown(isolated_environment) -> None:
+    from notebook_alchemy.cli import _keepalive_line
+    from notebook_alchemy.keepalive import KeepAliveState, status_problem
+
+    home = isolated_environment.home / ".notebook-alchemy"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "keepalive.json").write_text("{not json", encoding="utf-8")
+    problem = status_problem(home)
+    assert problem
+    ok, text = _keepalive_line(KeepAliveState(True, "Task Scheduler", unreadable=problem))
+    assert ok is False and "could not be read" in text
+
+
+def test_export_warns_when_a_labelling_batch_is_still_running(
+    runner: CliRunner, isolated_environment, tmp_path: Path
+) -> None:
+    home = isolated_environment.home / ".notebook-alchemy"
+    (home / "batches").mkdir(parents=True, exist_ok=True)
+    (home / "batches" / "Chan.json").write_text('{"job": "msgbatch_test"}', encoding="utf-8")
+    result = runner.invoke(cli, ["export-state", str(tmp_path / "state.zip")])
+    assert result.exit_code == 0, result.output
+    assert "still running here and is not in the file" in " ".join(result.output.split())
+
+
+def test_a_saved_build_says_whose_notebooklm_reads_blocked_videos(
+    runner: CliRunner, fake_channel, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_channel("a b c")
+    monkeypatch.setattr(NotebookLMClient, "is_authenticated", lambda self: True)
+    result = runner.invoke(cli, [*RUN, "--save", str(tmp_path / "books")])
+    assert "read through NotebookLM as" in " ".join(result.output.split())

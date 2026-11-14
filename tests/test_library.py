@@ -195,13 +195,13 @@ def test_the_builder_sorts_consolidates_and_reuses_every_answer(tmp_path: Path) 
     passages = [_passage("s1:1"), _passage("s2:1"), _passage("p1:1"), _passage("p2:1"), _passage("x9:1")]
     ai = SortingAI()
     cache = RequestCache(tmp_path / "library.json")
-    library = LibraryBuilder(ai, cache, TODAY, "Kizzy Parks").build(passages, ["t1", "t2"])
+    library = LibraryBuilder(ai, cache, TODAY, "Example Channel").build(passages, ["t1", "t2"])
     assert library.notebook_title == "GovCon Library"
     names = {t.name: [p.id for s in t.sections for p in s.passages] for t in library.topics}
     assert names["Registration"] == ["s1:1", "s2:1"] and names["Bidding"] == ["p1:1", "p2:1"]
     assert names[MISC] == ["x9:1"] and library.unplaced == 1
     asked = len(ai.prompts)
-    again = LibraryBuilder(ai, RequestCache(tmp_path / "library.json"), TODAY, "Kizzy Parks").build(
+    again = LibraryBuilder(ai, RequestCache(tmp_path / "library.json"), TODAY, "Example Channel").build(
         [_passage(p.id) for p in passages], ["t1", "t2"]
     )
     assert len(ai.prompts) == asked and len(again.topics) == 3  # a rerun asks nothing
@@ -209,7 +209,7 @@ def test_the_builder_sorts_consolidates_and_reuses_every_answer(tmp_path: Path) 
 
 def _build(tmp_path: Path, ai: SortingAI, ids: list[str]) -> Library:
     cache = RequestCache(tmp_path / "library.json")
-    return LibraryBuilder(ai, cache, TODAY, "Kizzy Parks").build([_passage(i) for i in ids], ["t1"])
+    return LibraryBuilder(ai, cache, TODAY, "Example Channel").build([_passage(i) for i in ids], ["t1"])
 
 
 def _ids(library: Library) -> dict[str, list[str]]:
@@ -262,7 +262,7 @@ def test_resort_rebuilds_the_map(tmp_path: Path) -> None:
     ai = SortingAI()
     _build(tmp_path, ai, ["s1:1", "p1:1"])
     cache = RequestCache(tmp_path / "library.json")
-    LibraryBuilder(ai, cache, TODAY, "Kizzy Parks").build([_passage("s1:1")], ["t1"], resort=True)
+    LibraryBuilder(ai, cache, TODAY, "Example Channel").build([_passage("s1:1")], ["t1"], resort=True)
     assert len(ai.asked("You are organising")) == 2
 
 
@@ -321,7 +321,7 @@ def _library() -> Library:
 def test_a_topic_book_is_plain_markdown_with_its_sources_named() -> None:
     books = render_library(
         _library(),
-        "Kizzy Parks",
+        "Example Channel",
         {"v1": "Video one", "v2": "Video two", "v3": "Never read"},
         {"v1", "v2"},
         {"v1"},
@@ -433,7 +433,7 @@ def test_the_library_cache_is_saved_as_each_answer_arrives(tmp_path: Path) -> No
 
 def test_an_extension_that_adds_nothing_asks_nothing_more(tmp_path: Path) -> None:
     ai = SortingAI(new_section="Pricing")  # names only a section that already exists
-    builder = LibraryBuilder(ai, RequestCache(tmp_path / "library.json"), TODAY, "Kizzy Parks")
+    builder = LibraryBuilder(ai, RequestCache(tmp_path / "library.json"), TODAY, "Example Channel")
     builder.build([_passage(i) for i in ["s1:1", "p1:1", *XS]], ["t1"])
     assert len(ai.asked("Place each numbered passage")) == 1
     assert any("No new topics" in n for n in builder.notices)
@@ -478,7 +478,7 @@ def test_resort_forgets_subsections(tmp_path: Path, monkeypatch) -> None:
     ids = [f"s{i}:1" for i in range(1, 6)]
     _build(tmp_path, ai, ids)
     cache = RequestCache(tmp_path / "library.json")
-    LibraryBuilder(ai, cache, TODAY, "Kizzy Parks").build([_passage(i) for i in ids], ["t1"], resort=True)
+    LibraryBuilder(ai, cache, TODAY, "Example Channel").build([_passage(i) for i in ids], ["t1"], resort=True)
     assert len(ai.asked("has grown to")) == 2
 
 
@@ -569,3 +569,9 @@ def test_an_extension_is_bounded_and_asked_again_when_its_prompt_changes(tmp_pat
     monkeypatch.setattr(library_module, "EXTEND_VERSION", "next")
     _builder(tmp_path, ai).build(passages, ["T"])
     assert len(ai.asked("fit none of them")) == 2  # a changed prompt asks again
+
+
+def test_no_topic_map_is_asked_for_without_passages(tmp_path: Path) -> None:
+    ai = SortingAI()
+    library = _builder(tmp_path, ai).build([], ["a title", "another title"])
+    assert library.topics == [] and ai.prompts == []

@@ -22,12 +22,12 @@ logger = logging.getLogger(__name__)
 # USD per 1M tokens: (input, output) up to LONG_PROMPT_TOKENS of prompt, and above it. Source: Claude
 # API pricing (platform.claude.com/docs/en/about-claude/pricing), read 2026-11-13.
 PRICING_USD_PER_M: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {
-    "claude-haiku-5-5": ((0.10, 0.50), (0.50, 2.50)),
+    DEFAULT_MODEL: ((0.10, 0.50), (0.50, 2.50)),  # claude-haiku-5-5
 }
 LONG_PROMPT_TOKENS = 100_000
 # An unlisted model is priced at the default model's rate and flagged with a note, which `dry-run` and
 # the cost line show: a larger model costs more, so the figure is then too low.
-FALLBACK_PRICING_MODEL = "claude-haiku-5-5"
+FALLBACK_PRICING_MODEL = DEFAULT_MODEL
 BATCH_PRICE_FACTOR = 0.5  # the Message Batches API bills half the standard rate
 BATCH_SUFFIX = " (batch)"
 DEFAULT_TIMEOUT = 300.0

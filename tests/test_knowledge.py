@@ -319,3 +319,21 @@ def test_a_batch_that_is_gone_is_asked_again_directly(tmp_path: Path) -> None:
         run.labelled_now == 1 and len(ai.calls) == 1 and any("no longer available" in n for n in run.notices)
     )
     assert not (tmp_path / "batch.json").read_text(encoding="utf-8").strip("{}")
+
+
+def test_paid_answers_survive_a_run_that_stops_before_storing_them(tmp_path: Path) -> None:
+    ai = FakeAI(batch="ok")
+    labeler = _labeler(tmp_path, ai)
+    real_put = labeler.store.put
+
+    def crash(labels):
+        raise KeyboardInterrupt
+
+    labeler.store.put = crash  # type: ignore[method-assign]
+    with pytest.raises(KeyboardInterrupt):
+        labeler.run([_video("vid00000001"), _video("vid00000002")])
+    labeler.store.put = real_put  # type: ignore[method-assign]
+    again = FakeAI(batch="ok")
+    run = _labeler(tmp_path, again).run([_video("vid00000001"), _video("vid00000002")])
+    assert run.labelled_now == 2 and again.batches == [] and again.attempts == 0  # nothing paid twice
+    assert json.loads((tmp_path / "batch.json").read_text(encoding="utf-8")) == {}  # cleared once stored

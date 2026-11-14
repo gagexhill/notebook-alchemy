@@ -178,7 +178,7 @@ src/notebook_alchemy/
   - A refused route pauses without stopping the run.
 - **Cheap to run again.**
   - Captions, labels, the topics, every passage's place and every section's order are cached by what produced them.
-  - A rerun with no new videos asks the AI nothing and uploads nothing.
+  - A rerun with no new videos asks the AI nothing and uploads nothing, unless a new year or a passage crossing a date rule changes a section's order.
   - New videos are placed into the existing topics; the map grows instead of being rebuilt, and only the books whose text changed are uploaded.
   - Labels are made in a half-price batch (`--now` for standard calls).
   - A used-up credit balance, spend limit or rate limit stops the run cleanly; the next run carries on.
@@ -315,7 +315,7 @@ The simplest sign-in reuses a browser you are already signed in to Google with. 
 
 ```bash
 notebook-alchemy login --browser-cookies chrome
-notebook-alchemy login --browser-cookies chrome --account you@example.com --profile personal
+notebook-alchemy login --browser-cookies chrome --account you@example.test --profile personal
 ```
 
 `notebook-alchemy login` on its own opens a sign-in window instead; it needs a browser for Playwright, installed once with `python -m playwright install chromium`.
@@ -356,13 +356,13 @@ Everything stays on your machine. `notebook-alchemy clean --all` removes the wor
 |---|---|---|
 | `.env` in the folder you run from | Your Claude API key and profile, written by `setup` | Delete the file |
 | `~/.notebook-alchemy/cache/` | Downloaded words per video, and which videos had none (for a week) | `clean --cache` |
-| `~/.notebook-alchemy/knowledge/`, `library/`, `batch.json` | The AI's labels, topics, placements and section orders, so reruns cost nothing, and a labelling batch still running | `clean --labels` |
+| `~/.notebook-alchemy/knowledge/`, `library/`, `batches/` | The AI's labels, topics, placements and section orders, so reruns cost nothing, and per channel a labelling batch still running and its answers until they are stored | `clean --labels` |
 | `~/.notebook-alchemy/sync/`, `notebooks.json`, `upload_accounts.json` | What the last upload added, which notebook each channel uses, and a salted hash of the account you confirmed uploads to (not the email) | `clean --records` |
 | `~/.notebooklm/profiles/<profile>/` | The Google sign-in, kept by the `notebooklm` command | `notebooklm auth logout` |
 | Your system scheduler, and `~/.notebook-alchemy/keepalive.json` | The 20-minute sign-in refresh (only if you turned it on) and when it last ran | `keep-signed-in --off`; `clean --records` |
 | Your NotebookLM account | The notebook itself, and the "Notebook Alchemy workspace" notebook used to read blocked videos (left empty after each run) | Delete them in NotebookLM |
 
-`notebook-alchemy export-state FILE` copies the cache, `knowledge/`, `library/`, `sync/` and `notebooks.json` into one zip; `import-state FILE` on another computer carries on from there. Sign-ins, the key and the upload confirmation are not included.
+`notebook-alchemy export-state FILE` copies the cache, `knowledge/`, `library/`, `sync/` and `notebooks.json` into one zip; `import-state FILE` on another computer carries on from there. Sign-ins, the key, the upload confirmation and a labelling batch still running are not included.
 
 Version 0.2 wrote a `vault/` folder; `clean --vaults` removes it.
 

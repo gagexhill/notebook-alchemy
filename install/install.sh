@@ -295,7 +295,8 @@ main() {
   else
     say 'To start, open [Notebook Alchemy] from your applications menu, or open a new terminal and run:'
   fi
-  say '  $ notebook-alchemy'
+  # Settings (.env) are read from the folder a run starts in, so the command starts there too.
+  say "  \$ cd \"$WORK_DIR\" && notebook-alchemy"
 }
 
 main "$@"

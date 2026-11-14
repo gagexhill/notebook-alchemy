@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -414,6 +415,11 @@ def cli(ctx: click.Context, quiet: bool, verbose: int, no_color: bool, debug: bo
 )
 @click.option("-y", "--yes", is_flag=True, help="Accept defaults without asking.")
 @click.option(
+    "--allow-fewer",
+    is_flag=True,
+    help="Upload even when the books come from under half the videos the notebook's last upload had.",
+)
+@click.option(
     "--no-sync",
     is_flag=True,
     hidden=True,
@@ -488,6 +494,7 @@ def run_pipeline(
     resort: bool,
     cookies_browser: str | None,
     yes: bool,
+    allow_fewer: bool,
     profile: str | None,
 ) -> None:
     """Build topic books from a YouTube channel, playlist or video, and upload them to NotebookLM."""
@@ -506,6 +513,11 @@ def run_pipeline(
             "without AI.",
         )
     upload = save_dir is None and not mock  # sample data is never uploaded
+    if not upload and not mock and engine.client.is_authenticated():
+        # Blocked videos are still read through NotebookLM, in its working notebook: say whose.
+        ui.info(
+            f"Videos YouTube blocks are read through NotebookLM as {_who(engine.client.upload_account())}."
+        )
     if mock and save_dir is None:
         raise click.UsageError("Sample data is never uploaded: add --save DIR to see the books it makes.")
 
@@ -535,6 +547,18 @@ def run_pipeline(
         )
     _show_build(report, engine)
 
+    if report.waiting:
+        # Books without these videos would replace the notebook's, so none are written yet.
+        _show_ai_cost(engine)
+        ui.warn(
+            f"{_plural(len(report.waiting), 'video')} "
+            f"{'still waits' if len(report.waiting) == 1 else 'still wait'} for labels, so no books were "
+            "written and "
+            "nothing was uploaded. Run the same command again to finish; the work done is kept.",
+            always=True,
+        )
+        return
+
     ui.step(2, total, "Writing the books")
     words = sum(b.words for b in report.books)
     topics = [b for b in report.books if b.title != OVERVIEW_TITLE]
@@ -546,15 +570,6 @@ def run_pipeline(
     if save_dir is not None:
         paths = engine.save_books(report.books, save_dir)
         ui.success(f"Saved {_plural(len(paths), 'file')} to {ui.name(_short(save_dir))}.")
-        return
-
-    if report.waiting:
-        # Uploading now would replace the notebook's books with ones missing these videos.
-        ui.warn(
-            f"{_plural(len(report.waiting), 'video')} still wait for labels, so nothing was uploaded and "
-            "the notebook is unchanged. Run the same command again to finish; the work done is kept.",
-            always=True,
-        )
         return
 
     ui.step(3, total, "Uploading to NotebookLM")
@@ -578,7 +593,15 @@ def run_pipeline(
     _same_account_as_confirmed(engine, confirmed)
     with ui.Reporter() as reporter:
         synced = engine.publish(
-            title, report.books, channel_key=None if notebook_name else target, progress=reporter
+            title,
+            report.books,
+            channel_key=None if notebook_name or mock else report.channel,
+            old_channel_key=None if notebook_name else target,
+            sorted_by_ai=report.library.sorted_by_ai,
+            videos_read=len(report.read),
+            allow_unsorted=offline,
+            allow_fewer=allow_fewer,
+            progress=reporter,
         )
     _show_sync_result(title, synced)
 
@@ -620,6 +643,12 @@ def _show_sync_result(name: str, synced) -> None:
     )
     if synced.freed_first:
         ui.detail("  Earlier copies were removed first, to stay within the plan's source limit.")
+    if not synced.record_saved:
+        ui.warn(
+            "The upload record could not be saved, so the next run may not recognise these books as its own "
+            "and upload them again. Check that ~/.notebook-alchemy can be written to (run with -v for the "
+            "cause)."
+        )
     ui.info(f"  Open it at {NOTEBOOKLM_URL}")
 
 
@@ -906,7 +935,7 @@ def _sign_in(
         "\b\nExamples:\n"
         "  notebook-alchemy login                        sign in through a browser window\n"
         "  notebook-alchemy login --browser-cookies chrome  reuse a Chrome sign-in, no window\n"
-        "  notebook-alchemy login --browser-cookies chrome --account you@example.com --profile personal\n"
+        "  notebook-alchemy login --browser-cookies chrome --account you@example.test --profile personal\n"
         "                                                pick one of several signed-in accounts\n"
         "  notebook-alchemy login --check                is the sign-in still working?\n"
     ),
@@ -1006,6 +1035,11 @@ def _keepalive_line(state: KeepAliveState) -> tuple[bool, str] | None:
     """The status line for the optional background refresh; None when it is off (the normal case)."""
     if not state.on:
         return None
+    if state.unreadable:
+        return False, (
+            f"The record of background refreshes could not be read ({esc(state.unreadable)}), so whether "
+            "they work is unknown; the next refresh rewrites it."
+        )
     if state.stale:
         when = ui.ago(state.last_at)
         return False, (
@@ -1137,7 +1171,10 @@ def guided(ctx: click.Context) -> None:
         if _looks_like_youtube(source):
             break
         ui.warn("That does not look like a YouTube link (for example https://www.youtube.com/@name).")
-    ctx.invoke(run_pipeline, source=source, offline=not config.has_api_key)
+    # ctx.invoke fills in option defaults without their callbacks, so `tabs` is passed as the tuple
+    # its callback would make. offline=False: with no key the run warns, and an upload that would
+    # replace AI-sorted books with unsorted ones stops (see `publish`) instead of going ahead.
+    ctx.invoke(run_pipeline, source=source, offline=False, tabs=DEFAULT_TABS)
     ui.next_command("add new videos when the channel posts", f"notebook-alchemy run {source}")
 
 
@@ -1297,9 +1334,18 @@ def export_state_command(file: Path) -> None:
 
     Sign-ins, the Claude API key and the upload confirmation are not included.
     """
-    summary = export_state(AlchemyEngine(_config()), file)
+    engine = AlchemyEngine(_config())
+    summary = export_state(engine, file)
     for item in summary.skipped:
         ui.warn(f"Left out {esc(item)}.")
+    batches = engine.home / "batches"
+    running = [f for f in (sorted(batches.glob("*.json")) if batches.is_dir() else []) if _json(f)]
+    if running:
+        # A batch's state is tied to this computer's run; its paid answers would be paid for again there.
+        ui.warn(
+            "A labelling batch is still running here and is not in the file. Run the same `run` command here "
+            "until it finishes before moving, or the other computer pays for those labels again."
+        )
     ui.success(f"Saved {ui.name(file)}.")
     ui.detail(f"  {_state_counts(summary.files)}.")
     ui.next_command("carry on from another computer", f"notebook-alchemy import-state {file.name}")
@@ -1345,6 +1391,26 @@ def _is_cache_record(path: Path) -> bool:
     """True for a caption cache file this tool wrote (JSON object with a video_id)."""
     data = _json(path)
     return isinstance(data, dict) and "video_id" in data
+
+
+def _is_library_cache(path: Path) -> bool:
+    """The sorting answers this tool keeps per channel: keys are hashes or map:/placed:/sub: names."""
+    data = _json(path)
+    return isinstance(data, dict) and all(
+        k == "parts" or k.startswith(("map:", "placed:", "sub:")) or re.fullmatch(r"[0-9a-f]{32}", k)
+        for k in data
+    )
+
+
+def _is_batch_state(path: Path) -> bool:
+    """A labelling batch's state: only the keys this tool writes there."""
+    data = _json(path)
+    return isinstance(data, dict) and set(data) <= {"job", "keys", "model", "answers"}
+
+
+def _is_string_map(path: Path) -> bool:
+    data = _json(path)
+    return isinstance(data, dict) and all(isinstance(v, str) for v in data.values())
 
 
 def _is_label_record(path: Path) -> bool:
@@ -1423,20 +1489,24 @@ def clean_pipeline(
             (targets.append(("labels", f)) if _is_label_record(f) else skipped.append(str(f)))
         library = engine.home / "library"
         for f in sorted(library.glob("*.json")) if library.is_dir() else []:
-            (targets.append(("labels", f)) if isinstance(_json(f), dict) else skipped.append(str(f)))
+            (targets.append(("labels", f)) if _is_library_cache(f) else skipped.append(str(f)))
         batches = engine.home / "batches"  # labelling batches still running are forgotten too
-        for f in sorted(batches.glob("*.json")) if batches.is_dir() else []:
-            targets.append(("labels", f))
-        for name in ("batch.json", "watched.json"):  # left by 0.3 previews
-            if (engine.home / name).is_file():
-                targets.append(("labels", engine.home / name))
+        for f in [*(sorted(batches.glob("*.json")) if batches.is_dir() else []), engine.home / "batch.json"]:
+            if f.is_file():
+                (targets.append(("labels", f)) if _is_batch_state(f) else skipped.append(str(f)))
+        watched = engine.home / "watched.json"  # left by 0.3 previews of --watch
+        if watched.is_file():
+            (targets.append(("labels", watched)) if _is_string_map(watched) else skipped.append(str(watched)))
     if do_records:
         records_dir = engine.sync_records_dir()
         for f in sorted(records_dir.glob("*.json")) if records_dir.is_dir() else []:
             (targets.append(("record", f)) if _is_sync_record(f) else skipped.append(str(f)))
-        for f in (consent_file(), engine.notebooks_path(), engine.home / "keepalive.json"):
+        if consent_file().is_file():
+            targets.append(("record", consent_file()))
+        for f in (engine.notebooks_path(), engine.home / "keepalive.json"):
             if f.is_file():
-                targets.append(("record", f))
+                shaped = _is_string_map(f) if f == engine.notebooks_path() else isinstance(_json(f), dict)
+                (targets.append(("record", f)) if shaped else skipped.append(str(f)))
     if do_vaults:
         targets += [("vault", d) for d in _legacy_vaults()]
     for item in skipped:

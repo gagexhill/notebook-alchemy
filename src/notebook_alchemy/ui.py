@@ -50,7 +50,7 @@ def esc(value: object) -> str:
 
 
 def name(value: object) -> str:
-    """A resource name in square brackets, as gcloud prints them: `[Kizzy Parks]`. Markup-safe."""
+    """A resource name in square brackets, as gcloud prints them: `[Example Channel]`. Markup-safe."""
     return esc(f"[{value}]")
 
 

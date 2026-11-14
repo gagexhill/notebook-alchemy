@@ -805,13 +805,13 @@ def test_words_a_model_wrote_down_are_not_used_as_the_speakers_own(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from notebook_alchemy.channel import (
+        MODEL_WRITTEN,
         ChannelScanner,
         ChannelScanResult,
         ChannelVideo,
         TranscriptManager,
         TranscriptResult,
     )
-    from notebook_alchemy.engine import MODEL_WRITTEN
 
     videos = [ChannelVideo("vid00000001", "One", "u", 600), ChannelVideo("vid00000002", "Two", "u", 600)]
     monkeypatch.setattr(
@@ -830,3 +830,103 @@ def test_words_a_model_wrote_down_are_not_used_as_the_speakers_own(
     report = AlchemyEngine(_config(tmp_path)).build("@chan", offline=True)
     assert report.read == {"vid00000001"}
     assert all("a model wrote this" not in b.content for b in report.books)
+
+
+def test_nothing_is_sorted_while_videos_wait_for_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from notebook_alchemy.channel import (
+        ChannelScanner,
+        ChannelScanResult,
+        ChannelVideo,
+        TranscriptManager,
+        TranscriptResult,
+    )
+
+    videos = [ChannelVideo("vid00000001", "One", "u", 600, "2026-03-01")]
+    monkeypatch.setattr(
+        ChannelScanner, "scan", lambda self, url, limit=None, **kw: ChannelScanResult("Chan", videos)
+    )
+    monkeypatch.setattr(
+        TranscriptManager,
+        "fetch_many",
+        lambda self, items, progress=None: {
+            v: TranscriptResult(v, "Registering takes ten days.", "youtube") for v, _ in items
+        },
+    )
+
+    class StillRunning(PipelineAI):
+        def submit_batch(self, requests):
+            return "msgbatch_test"
+
+        def batch_results(self, batch_id, keys):
+            return "in_progress", None
+
+    engine = AlchemyEngine(_config(tmp_path))
+    engine.ai = StillRunning()  # type: ignore[assignment]
+    import notebook_alchemy.knowledge as knowledge
+
+    real_init = knowledge.Labeler.__init__
+
+    def quick(self, *a, **kw):
+        real_init(self, *a, **{**kw, "batch_wait": 0, "sleep": lambda s: None})
+
+    monkeypatch.setattr(knowledge.Labeler, "__init__", quick)
+    report = engine.build("@chan")
+    assert report.waiting == ["vid00000001"] and report.books == []
+    assert engine.ai.prompts == []  # no topic map, placement or order was asked for
+    assert RequestCache(engine.library_cache_path("Chan")).get("map:Chan") is None
+
+
+def test_unsorted_books_do_not_quietly_replace_ai_sorted_ones(tmp_path: Path) -> None:
+    from notebook_alchemy.errors import AlchemyError
+
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    first = engine.publish("Chan", _books(), channel_key="Chan", sorted_by_ai=True, videos_read=10)
+    sources = len(fake.sources[first.notebook_id])
+    with pytest.raises(AlchemyError, match="have no AI sorting"):
+        engine.publish("Chan", _books(), channel_key="Chan", sorted_by_ai=False, videos_read=10)
+    assert len(fake.sources[first.notebook_id]) == sources  # nothing uploaded or removed
+    engine.publish(
+        "Chan", _books(), channel_key="Chan", sorted_by_ai=False, videos_read=10, allow_unsorted=True
+    )
+
+
+def test_a_much_smaller_build_does_not_quietly_shrink_the_notebook(tmp_path: Path) -> None:
+    from notebook_alchemy.errors import AlchemyError
+
+    engine = _fake_engine(tmp_path, FakeNotebookLM())
+    engine.publish("Chan", _books(), channel_key="Chan", videos_read=100)
+    with pytest.raises(AlchemyError, match="from 10 videos; the notebook's come from 100"):
+        engine.publish("Chan", _books(), channel_key="Chan", videos_read=10)
+    engine.publish("Chan", _books(), channel_key="Chan", videos_read=60)  # half or more is fine
+    engine.publish("Chan", _books(), channel_key="Chan", videos_read=10, allow_fewer=True)
+
+
+def test_a_notebook_recorded_under_the_typed_link_is_still_found(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    first = engine.publish("Chan", _books(), channel_key="@chan")
+    # A new title, so only the record (not a notebook with the same title) can lead back to it.
+    again = engine.publish("A Better Title", _books(), channel_key="Chan", old_channel_key="@chan")
+    assert again.notebook_id == first.notebook_id and len(fake.notebooks) == 1
+    assert engine.notebook_for("Chan") == first.notebook_id
+
+
+def test_an_upload_record_that_cannot_be_saved_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _fake_engine(tmp_path, FakeNotebookLM())
+    monkeypatch.setattr(engine, "_write_json", lambda path, data, what: False)
+    assert engine.publish("Chan", _books()).record_saved is False
+
+
+def test_cached_words_a_model_wrote_down_are_read_again(tmp_path: Path) -> None:
+    from notebook_alchemy.channel import MODEL_WRITTEN
+
+    engine = AlchemyEngine(_config(tmp_path))
+    engine.transcripts._write_cache("vid00000001", "t", "a model wrote this", method=MODEL_WRITTEN)
+    engine.transcripts._write_cache("vid00000002", "t", "captions said this", method="youtube")
+    assert engine.transcripts._read_cache("vid00000001") is None  # not used: the video is read again
+    assert engine.transcripts._read_cache("vid00000002").text == "captions said this"

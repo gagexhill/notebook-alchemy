@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import platform
 import socket
 import subprocess
 import threading
@@ -21,6 +22,13 @@ import youtube_transcript_api  # noqa: F401
 # The tool imports these on first use. Load them now, before the fixtures below replace
 # subprocess.Popen: yt-dlp subclasses Popen while it imports.
 import yt_dlp  # noqa: F401
+
+# The Claude SDK reads platform details for its request headers; on Windows Python starts `ver` the
+# first time. Read them now too, before the fixtures below block real processes.
+platform.uname()
+platform.system()
+platform.release()
+platform.machine()
 
 _ENV_TO_CLEAR = (
     "ANTHROPIC_API_KEY",
