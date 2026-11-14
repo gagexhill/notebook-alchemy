@@ -750,7 +750,7 @@ def status(profile: str | None) -> None:
         console.print(("[green]✓[/green] " if ok else "[red]✗[/red] ") + text)
 
     if not has_cli:
-        line(False, "The notebooklm tool is not installed.")
+        line(False, "The notebooklm command, which opens the sign-in window, is not installed.")
     if not has_session:
         line(False, "Not signed in to NotebookLM.")
     else:
@@ -782,7 +782,7 @@ def status(profile: str | None) -> None:
         table.add_column("Setting", style="bold")
         table.add_column("Value", overflow="fold")
         rows = [
-            (has_cli, "notebooklm tool", esc(facts["notebooklm_cli"])),
+            (has_cli, "Sign-in command (notebooklm)", esc(facts["notebooklm_cli"])),
             (None, "NotebookLM profile", esc(facts["notebooklm_profile"])),
             (has_session, "Sign-in file", esc(facts["session_file"])),
             (bool(identity.email) if has_session else None, "Upload account", _who(identity)),
@@ -844,6 +844,9 @@ def _sign_in(
     reported in one line, and the captured text explains a failure.
     """
     cmd = client.login_command()
+    # Signing in replaces the file an open session read. Closed first, so the next request opens
+    # the new sign-in instead of carrying on with the old one.
+    client.close()
     override = client.storage_override()
     ui.detail(
         f"Signing in through {esc(f'session file {override}' if override else f'profile {client.profile}')}."

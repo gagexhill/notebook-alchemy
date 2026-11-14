@@ -17,7 +17,8 @@ to propose a change; this file covers what a change must keep true.
   - `engine.py`: the pipeline and the upload.
   - `cli.py`: commands.
   - `ui.py`: output.
-  - `client.py`: NotebookLM through the `notebooklm` CLI.
+  - `client.py`: NotebookLM through the notebooklm-py Python API, on one session per run; the
+    `notebooklm` command only for the sign-in window and for reading the recorded account.
   - `claude.py`: the Claude API through the official SDK, including batches.
   - `offline.py`: the no-key path.
   - `state.py`: `export-state` and `import-state`.
@@ -61,8 +62,12 @@ to propose a change; this file covers what a change must keep true.
   bumps `PROMPT_VERSION` or `LIBRARY_PROMPT_VERSION`. A key, credit balance, spend limit or rate limit
   that would fail every request (`ClaudeError.stop_run`) stops the step, keeps what was done, and the
   next run resumes.
-- Upload content goes to `notebooklm` as a file, never on the command line (Windows limits one argument
-  to about 32,000 characters). NotebookLM can reset a source title to its file name after processing, so
+- Upload content goes to NotebookLM as a file, never as a command-line argument (Windows limits one
+  argument to about 32,000 characters). NotebookLM errors are told apart by the library's error type,
+  never by words in a message: only its sign-in error, or a sign-in file that cannot be used, is a
+  sign-out. A sign-in closes the open session first, so the new sign-in is the one used, and a
+  command closes its session when it ends. A copy a failed upload left is adopted as the tool's own
+  only when it was not in the notebook before that upload and carries the failed book's title. NotebookLM can reset a source title to its file name after processing, so
   an upload waits, corrects titles, and reads the notebook back before it reports success. An upload
   replaces or removes only sources it recorded as its own (by id); a book whose text matches the
   recorded copy still in the notebook is not sent again (its title is corrected if NotebookLM changed

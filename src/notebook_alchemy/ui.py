@@ -117,37 +117,48 @@ def handle_errors(func: F) -> F:
     @wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
-            return func(*args, **kwargs)
-        except AlchemyError as exc:
-            print_error(exc)
-            if UiState.debug:
-                err_console.print(esc(traceback.format_exc()))
-            sys.exit(exc.exit_code)
-        except (KeyboardInterrupt, click.exceptions.Abort):
-            # click turns Ctrl+C at a question into Abort; both are the same stop.
-            err_console.print(
-                "\n[yellow]Stopped.[/yellow] Files on disk are complete. If an upload was running, run "
-                "the same command again to finish it."
-            )
-            sys.exit(EXIT_INTERRUPTED)
-        except (
-            SystemExit,
-            EOFError,
-            click.ClickException,
-            click.exceptions.Exit,
-        ):
-            raise
-        except Exception as exc:  # noqa: BLE001 - last-resort boundary for the CLI
-            if UiState.debug:
-                err_console.print(esc(traceback.format_exc()))
-            err_console.print(
-                f"[bold red]Error:[/bold red] Something unexpected went wrong ({esc(type(exc).__name__)}: "
-                f"{esc(exc)}).\n[bold]Next:[/bold] Run the command again with --debug and include its "
-                "output in a bug report."
-            )
-            sys.exit(EXIT_UNEXPECTED)
+            return _run_command(func, *args, **kwargs)
+        finally:
+            # Closed here, while the program is still fully running: at interpreter exit the
+            # library can no longer save the sign-in's refreshed cookies.
+            from . import client
+
+            client.close_all()
 
     return wrapper  # type: ignore[return-value]
+
+
+def _run_command(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    try:
+        return func(*args, **kwargs)
+    except AlchemyError as exc:
+        print_error(exc)
+        if UiState.debug:
+            err_console.print(esc(traceback.format_exc()))
+        sys.exit(exc.exit_code)
+    except (KeyboardInterrupt, click.exceptions.Abort):
+        # click turns Ctrl+C at a question into Abort; both are the same stop.
+        err_console.print(
+            "\n[yellow]Stopped.[/yellow] Files on disk are complete. If an upload was running, run "
+            "the same command again to finish it."
+        )
+        sys.exit(EXIT_INTERRUPTED)
+    except (
+        SystemExit,
+        EOFError,
+        click.ClickException,
+        click.exceptions.Exit,
+    ):
+        raise
+    except Exception as exc:  # noqa: BLE001 - last-resort boundary for the CLI
+        if UiState.debug:
+            err_console.print(esc(traceback.format_exc()))
+        err_console.print(
+            f"[bold red]Error:[/bold red] Something unexpected went wrong ({esc(type(exc).__name__)}: "
+            f"{esc(exc)}).\n[bold]Next:[/bold] Run the command again with --debug and include its "
+            "output in a bug report."
+        )
+        sys.exit(EXIT_UNEXPECTED)
 
 
 class Reporter:

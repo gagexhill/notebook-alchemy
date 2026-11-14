@@ -18,9 +18,11 @@
   elsewhere or set the `notebooklm` command's own variables. Two of its settings do choose the
   sign-in that receives uploads (`ALCHEMY_SESSION_FILE`, `ALCHEMY_NOTEBOOKLM_PROFILE`); `status` names that
   account, and the first upload to an account asks first.
-- The NotebookLM session is owned by the `notebooklm` CLI, which keeps it under
-  `~/.notebooklm/profiles/<profile>/`. This tool reads the file's location, never its contents.
-- Document content reaches `notebooklm` as a temporary file, not on the command line.
+- The NotebookLM sign-in is kept by the notebooklm-py library under
+  `~/.notebooklm/profiles/<profile>/`. This tool opens it through that library, in its own process,
+  only to talk to NotebookLM; the library keeps the file's cookies current. This tool's own code never
+  reads, copies, logs or exports the file's contents.
+- Document content reaches NotebookLM as a temporary file, removed when its upload ends.
 - `.gitignore` blocks `.env`, session and token files, and the `vault/` folder older versions wrote. A pre-push hook scans
   pushed commits with gitleaks, and GitHub secret scanning with push protection is enabled.
 

@@ -49,7 +49,12 @@ class ClaudeError(AlchemyError):
 
 
 class NotebookLMError(AlchemyError):
-    """The `notebooklm` CLI is missing, failed, timed out or returned unusable output."""
+    """NotebookLM, or the notebooklm library or command, failed, timed out or answered unusably.
+
+    `source_id` is set when NotebookLM had already registered a source before the failure.
+    """
+
+    source_id: str | None = None
 
 
 class SessionError(NotebookLMError):
