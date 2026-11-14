@@ -1324,7 +1324,7 @@ def test_a_sign_in_that_reused_a_stale_browser_opens_a_clean_window(
     assert result.exit_code == 0, result.output
     flat = " ".join(result.output.split())
     assert f"Sign in as [{ACCOUNT}]" in flat and "https://notebooklm.google.com" in flat
-    assert "a clean sign-in window opens" in flat
+    assert "a clean sign-in window opens" in flat and "click it to reach Google's sign-in page" in flat
     assert ["--fresh" in cmd for cmd in logins] == [False, True]
 
 

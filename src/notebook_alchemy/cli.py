@@ -830,6 +830,12 @@ def _sign_in(
             if expected
             else "Sign in with the Google account your notebooks should go to."
         )
+        # The window is a separate test browser (it says it is controlled by automated software) and
+        # opens on NotebookLM's own page, so say where the sign-in is.
+        ui.info(
+            "If NotebookLM's page shows Sign in, click it to reach Google's sign-in page. The window "
+            "closes by itself when you are signed in."
+        )
         waiting = "Waiting for you to finish signing in..."
     proc = _run_login(cmd, waiting)
     output = f"{proc.stdout or ''}\n{proc.stderr or ''}"
