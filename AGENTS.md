@@ -34,8 +34,10 @@ to propose a change; this file covers what a change must keep true.
   raise a typed error from `errors.py` with a message and a next action. No broad `except` that discards
   an outcome.
 - The Claude API key reaches the API only through the official `anthropic` SDK, which sends it in a
-  request header. Never log, print or store it outside `.env`, and never put it in a URL. Every raised
-  message passes through `claude.scrub`.
+  request header, to the fixed `claude.API_BASE_URL`. Never log, print or store it outside `.env`, and
+  never put it in a URL. Every raised message passes through `claude.scrub`. A `.env` sets only the
+  names in `config.DOTENV_NAMES` and `ALCHEMY_*`, so it cannot redirect the key or change how
+  `notebooklm` runs.
 - Nothing identifying the user is stored that a feature does not need. The upload confirmation keeps a
   salted hash of the account email, not the email; nothing is sent anywhere except YouTube, the Claude
   API and NotebookLM. No telemetry.

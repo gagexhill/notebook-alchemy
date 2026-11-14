@@ -49,8 +49,16 @@ def is_usable_api_key(key: str | None) -> bool:
     return len(value) >= 15
 
 
+# The only names a .env may set. Anything else (ANTHROPIC_BASE_URL, NOTEBOOKLM_*, PATH) would change
+# where the key is sent or how the tools this one starts behave, so it is ignored. GEMINI_API_KEY is
+# read only to tell an old setup apart from one with no key at all.
+DOTENV_NAMES = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY")
+DOTENV_PREFIX = "ALCHEMY_"
+
+
 def _load_dotenv_simple(env_path: Path | None = None) -> None:
-    """Load KEY=VALUE pairs from a .env file into os.environ without overriding real variables."""
+    """Load this tool's KEY=VALUE pairs from a .env file into os.environ, without overriding real
+    variables. Names that are not this tool's are ignored, and said so in the log."""
     path = env_path or Path(".env")
     if not path.is_file():
         return
@@ -69,6 +77,11 @@ def _load_dotenv_simple(env_path: Path | None = None) -> None:
         key, value = line.split("=", 1)
         key, value = key.strip(), value.strip()
         if not key or key in os.environ:
+            continue
+        if key not in DOTENV_NAMES and not key.startswith(DOTENV_PREFIX):
+            logger.warning(
+                "Ignoring %s in %s: only ANTHROPIC_API_KEY and ALCHEMY_* settings are read.", key, path
+            )
             continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]

@@ -236,3 +236,9 @@ def test_a_batch_the_api_no_longer_knows_ends_as_gone_and_can_be_cancelled() -> 
     messages.batches.cancel = cancelled.append
     client.cancel_batch("msgbatch_old")
     assert cancelled == ["msgbatch_old"]
+
+
+def test_the_key_only_ever_goes_to_the_anthropic_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://collector.example.test")  # as a planted .env could
+    client = ClaudeClient(KEY, "claude-haiku-5-5")
+    assert str(client._client.base_url).rstrip("/") == "https://api.anthropic.com"
