@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -1410,12 +1411,15 @@ def test_the_install_does_not_pull_in_a_browser_cookie_reader() -> None:
     assert not any("rookie" in d or "cookie" in d for d in deps)
 
 
-def test_every_help_line_fits_in_80_columns() -> None:
-    top = click.Context(cli, info_name="notebook-alchemy", max_content_width=100, terminal_width=80)
+def test_every_help_line_fits_in_80_columns(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A wide terminal: the limit must come from the tool's own setting, not from the window.
+    monkeypatch.setenv("COLUMNS", "200")
+    width = cli.context_settings["max_content_width"]
+    top = click.Context(cli, info_name="notebook-alchemy", max_content_width=width)
     helps = {"notebook-alchemy": cli.get_help(top)}
     for name, command in cli.commands.items():
         if not command.hidden:
-            ctx = click.Context(command, info_name=name, parent=top, terminal_width=80, max_content_width=100)
+            ctx = click.Context(command, info_name=name, parent=top, max_content_width=width)
             helps[name] = command.get_help(ctx)
     long = [f"{name}: {line}" for name, text in helps.items() for line in text.splitlines() if len(line) > 80]
     assert long == []
@@ -1434,7 +1438,7 @@ def test_turning_the_refresh_off_in_a_terminal_asks_first(
     turned_on = runner.invoke(cli, ["keep-signed-in"])
     assert turned_on.exit_code == 0, turned_on.output
     assert isolated_environment.scheduler.tasks
-    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    monkeypatch.setattr(cli_module, "_can_ask", lambda: True)
     kept = runner.invoke(cli, ["keep-signed-in", "--off"], input="n\n")
     assert "Nothing was changed" in kept.output and isolated_environment.scheduler.tasks
     gone = runner.invoke(cli, ["keep-signed-in", "--off", "--yes"])
@@ -1451,7 +1455,7 @@ def test_replacing_on_import_in_a_terminal_asks_first(
     archive = tmp_path / "state.zip"
     assert runner.invoke(cli, ["export-state", str(archive)]).exit_code == 0
     record.write_text('{"video_id": "vid00000001", "full_text": "changed here"}', encoding="utf-8")
-    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    monkeypatch.setattr(cli_module, "_can_ask", lambda: True)
     declined = runner.invoke(cli, ["import-state", str(archive), "--replace"], input="n\n")
     assert "Nothing was imported" in declined.output and "changed here" in record.read_text(encoding="utf-8")
     accepted = runner.invoke(cli, ["import-state", str(archive), "--replace", "--yes"])
@@ -1465,7 +1469,7 @@ def test_clearing_captions_in_a_terminal_asks_first(
     cache.mkdir(parents=True, exist_ok=True)
     record = cache / "vid00000001.json"
     record.write_text('{"video_id": "vid00000001", "full_text": "words"}', encoding="utf-8")
-    monkeypatch.setattr(cli_module, "_interactive", lambda: True)
+    monkeypatch.setattr(cli_module, "_can_ask", lambda: True)
     declined = runner.invoke(cli, ["clean"], input="n\n")
     assert "Nothing was deleted" in declined.output and record.exists()
     assert runner.invoke(cli, ["clean", "--yes"]).exit_code == 0 and not record.exists()
@@ -1491,11 +1495,15 @@ def test_every_typed_error_carries_a_next_step() -> None:
 
 
 def test_progress_outside_a_terminal_is_one_line_per_finished_stage(capsys, monkeypatch) -> None:
+    from rich.console import Console
+
     from notebook_alchemy import ui
 
     monkeypatch.setattr(ui.UiState, "quiet", False)
     monkeypatch.setattr(ui.UiState, "verbose", 0)
-    with ui.Reporter() as report:  # under pytest the console is not a terminal
+    # Not a terminal whatever the environment says (FORCE_COLOR would make Rich think it is one).
+    monkeypatch.setattr(ui, "console", Console(force_terminal=False, highlight=False, width=100))
+    with ui.Reporter() as report:
         report("Labelling", 1, 3)
         report("Labelling", 3, 3)
         report("Labelling", 3, 3)
@@ -1525,6 +1533,49 @@ def test_the_help_and_readme_document_the_exit_codes(runner: CliRunner) -> None:
     assert codes == {0, 1, 2, 70, 130}
     help_text = " ".join(runner.invoke(cli, ["--help"]).output.split())
     readme = (Path(cli_module.__file__).resolve().parents[2] / "README.md").read_text(encoding="utf-8")
+    paragraph = help_text.split("Exit codes:")[1].split("Docs:")[0]
     for code in sorted(codes):
-        assert f"{code} " in help_text.split("Exit codes:")[1]
+        assert re.search(rf"(?<!\d){code} ", paragraph), code  # 0 is not satisfied by 70 or 130
         assert f"| {code} |" in readme
+
+
+def test_stopping_at_a_question_is_reported_as_a_stop(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment
+) -> None:
+    from notebook_alchemy import ui
+
+    cache = isolated_environment.home / ".notebook-alchemy" / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    record = cache / "vid00000001.json"
+    record.write_text('{"video_id": "vid00000001", "full_text": "words"}', encoding="utf-8")
+    monkeypatch.setattr(cli_module, "_can_ask", lambda: True)
+    result = runner.invoke(cli, ["clean"], input="")  # the input ends at the question, as Ctrl+C does
+    assert result.exit_code == ui.EXIT_INTERRUPTED and record.exists()
+    assert "Aborted!" not in result.output
+
+
+def test_a_question_is_not_asked_when_the_output_goes_to_a_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
+    assert cli_module._interactive() and not cli_module._can_ask()
+
+
+def test_replacing_on_import_asks_only_when_something_would_be_overwritten(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch, isolated_environment, tmp_path: Path
+) -> None:
+    home = isolated_environment.home / ".notebook-alchemy"
+    (home / "cache").mkdir(parents=True, exist_ok=True)
+    record = home / "cache" / "vid00000001.json"
+    record.write_text('{"video_id": "vid00000001", "full_text": "first"}', encoding="utf-8")
+    archive = tmp_path / "state.zip"
+    assert runner.invoke(cli, ["export-state", str(archive)]).exit_code == 0
+    record.unlink()
+    monkeypatch.setattr(cli_module, "_can_ask", lambda: True)
+    fresh = runner.invoke(cli, ["import-state", str(archive), "--replace"])  # nothing here: no question
+    assert fresh.exit_code == 0 and "overwritten" not in fresh.output and record.exists()
+    bad = tmp_path / "not-a-state-file.zip"
+    bad.write_text("not a zip", encoding="utf-8")
+    refused = runner.invoke(cli, ["import-state", str(bad), "--replace"])  # checked before asking
+    assert refused.exit_code == 1 and "Do you want to continue" not in refused.output

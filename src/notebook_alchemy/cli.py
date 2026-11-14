@@ -47,7 +47,7 @@ from .config import (
 from .engine import AlchemyEngine, BuildReport
 from .errors import AlchemyError, ConfigError, NotebookLMError, SessionError
 from .keepalive import INTERVAL_MINUTES, KeepAlive, KeepAliveState
-from .state import export_state, import_state
+from .state import count_existing, export_state, import_state
 from .ui import esc, handle_errors
 from .writer import OVERVIEW_TITLE
 
@@ -86,6 +86,12 @@ def _engine(profile: str | None = None) -> AlchemyEngine:
 
 def _interactive() -> bool:
     return sys.stdin.isatty()
+
+
+def _can_ask() -> bool:
+    """Whether a question would be seen: input and output are both a terminal. With output sent to
+    a file the question would go there, and the command would wait unseen."""
+    return _interactive() and sys.stdout.isatty()
 
 
 def _ask(question: str, *, default: bool = False) -> bool:
@@ -323,7 +329,7 @@ def _removed(message: str) -> Callable[[click.Context, click.Parameter, Any], An
 @click.group(
     cls=OrderedGroup,
     invoke_without_command=True,
-    context_settings={"help_option_names": ["-h", "--help"], "max_content_width": 100},
+    context_settings={"help_option_names": ["-h", "--help"], "max_content_width": 80},
     epilog=(
         "\b\nFirst run:\n"
         "  notebook-alchemy                   a guided first run\n"
@@ -333,7 +339,7 @@ def _removed(message: str) -> Callable[[click.Context, click.Parameter, Any], An
         "  notebook-alchemy run <url>         build the topic books and upload them\n"
         "\nExit codes: 0 done; 1 a failure the message explains; 2 a wrong option or\n"
         "setting; 70 an unexpected error; 130 stopped with Ctrl+C.\n"
-        "\nDocs:\n  https://github.com/gagexhill/notebook-alchemy"
+        "\n\b\nDocs:\n  https://github.com/gagexhill/notebook-alchemy"
     ),
 )
 @click.version_option(version=__version__, prog_name="notebook-alchemy")
@@ -1048,7 +1054,7 @@ def keep_signed_in(off: bool, yes: bool, profile: str | None) -> None:
     engine = _engine(profile)
     if off:
         # Asked in a terminal only: outside one, --off is itself the instruction.
-        if not yes and _interactive() and _keepalive(engine).state().on:
+        if not yes and _can_ask() and _keepalive(engine).state().on:
             ui.console.print("The background refresh of this sign-in will be removed from your scheduler.")
             if not _ask("Do you want to continue"):
                 ui.info("Cancelled. Nothing was changed.")
@@ -1316,15 +1322,20 @@ def export_state_command(file: Path) -> None:
 @handle_errors
 def import_state_command(file: Path, replace: bool, yes: bool) -> None:
     """Load captions, labels and sorting saved with `export-state`, so nothing is read or paid for again."""
-    # Asked in a terminal only: outside one, --replace is itself the instruction.
-    if replace and not yes and _interactive():
-        ui.console.print(
-            "Captions, labels and sorting this computer already has will be overwritten by the file's copies."
-        )
-        if not _ask("Do you want to continue"):
-            ui.info("Cancelled. Nothing was imported.")
-            return
-    summary = import_state(AlchemyEngine(_config()), file, replace=replace)
+    engine = AlchemyEngine(_config())
+    # Asked in a terminal only, after the file is checked, and only when something would be
+    # overwritten: outside a terminal, --replace is itself the instruction.
+    if replace and not yes and _can_ask():
+        existing = count_existing(engine, file)
+        if existing:
+            ui.console.print(
+                f"{_plural(existing, 'file')} this computer already has will be overwritten by the "
+                "state file's copies."
+            )
+            if not _ask("Do you want to continue"):
+                ui.info("Cancelled. Nothing was imported.")
+                return
+    summary = import_state(engine, file, replace=replace)
     ui.success(f"Imported {_plural(summary.total, 'file')} from {ui.name(file)}.")
     ui.detail(f"  {_state_counts(summary.files)}.")
     if summary.kept:
@@ -1482,7 +1493,7 @@ def clean_pipeline(
     # Captions alone in the default folder are asked about in a terminal only (they can be read
     # again for free); labels, records, old vaults and a custom folder are always asked about.
     costly = bool(kinds & {"labels", "record", "vault"} or ("cache" in kinds and custom_cache))
-    ask = (costly or _interactive()) and not yes
+    ask = (costly or _can_ask()) and not yes
     if ask:
         count = {k: sum(1 for kind, _p in targets if kind == k) for k in kinds}
         if "cache" in kinds and custom_cache:

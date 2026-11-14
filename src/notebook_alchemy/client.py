@@ -34,8 +34,8 @@ NOTEBOOKLM_BIN = "notebooklm"
 LIST_TIMEOUT = 60.0
 # For answers from `notebooklm` this tool cannot read: usually a newer or older notebooklm-py.
 UNEXPECTED_HINT = (
-    "Run the same command again. If it keeps failing, update the tool it drives: "
-    "pip install -U notebooklm-py."
+    "Run the same command again. If it keeps failing, update Notebook Alchemy (run its installer "
+    "again, or `pip install -U notebook-alchemy` in its environment) and check with `notebook-alchemy test`."
 )
 WRITE_TIMEOUT = 120.0
 UPLOAD_TIMEOUT = 300.0
@@ -366,7 +366,7 @@ class NotebookLMClient:
         except OSError as exc:
             raise NotebookLMError(
                 f"Could not start `{shown}`: {exc}",
-                hint="Check the install with `notebook-alchemy test`, or run: pip install notebooklm-py.",
+                hint="Check the install with `notebook-alchemy test`; the installer repairs it.",
             ) from exc
 
         out = (res.stdout or "").strip()

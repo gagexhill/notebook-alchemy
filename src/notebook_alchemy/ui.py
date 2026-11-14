@@ -123,7 +123,8 @@ def handle_errors(func: F) -> F:
             if UiState.debug:
                 err_console.print(esc(traceback.format_exc()))
             sys.exit(exc.exit_code)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, click.exceptions.Abort):
+            # click turns Ctrl+C at a question into Abort; both are the same stop.
             err_console.print(
                 "\n[yellow]Stopped.[/yellow] Files on disk are complete. If an upload was running, run "
                 "the same command again to finish it."
@@ -133,7 +134,6 @@ def handle_errors(func: F) -> F:
             SystemExit,
             EOFError,
             click.ClickException,
-            click.exceptions.Abort,
             click.exceptions.Exit,
         ):
             raise

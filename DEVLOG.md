@@ -11,6 +11,14 @@ Completed material decisions, newest first. Current work is in GitHub issues.
 - **Confirmations.** In a terminal, `keep-signed-in --off`, `import-state --replace` and clearing captions now ask first, and `--yes` skips the question. Outside a terminal the flag itself is the instruction, so scripts are not blocked.
 - **Paths.** The line that names where books were saved is never wrapped, so the path can be copied whole.
 - **Guards.** Tests fail if a help line passes 80 columns, a visible command lacks an example, or a typed error is raised without a next step. Each was checked by removing its guard.
+- **Review before merge (10 findings, 8 fixed, 2 left as they are).**
+  - Ctrl+C at a question now exits 130 with the usual stop message; before, click printed `Aborted!` and exited 1.
+  - The three new questions are asked only when input and output are both a terminal, so output sent to a file never waits unseen.
+  - `import-state --replace` checks the state file first, and asks only when it would overwrite something, saying how many files.
+  - Help is 80 columns wide by the tool's own setting (`max_content_width`), so a wide window no longer changes it; the width test now runs in a 200-column window.
+  - Hints name this tool's installer, not the library underneath; the scheduler hint no longer suggests a sign-in that does not apply.
+  - The progress and exit-code tests no longer depend on the environment or on `0` matching inside `70`.
+  - Left: the `exc.hint or ...` fallbacks in `engine.py` (the errors raised there already carry hints), and the hint on an unusable answer, which is recorded and not shown.
 
 ## No browser-cookie reader in the install (#55, 2026-11-14)
 

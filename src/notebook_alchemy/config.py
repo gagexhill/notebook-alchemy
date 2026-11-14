@@ -113,7 +113,7 @@ def update_dotenv(values: dict[str, str], env_path: Path | None = None) -> Path:
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
             raise ConfigError(
                 f"{key!r} is not an environment variable name.",
-                hint="Use letters, digits and underscores, starting with a letter, as in ALCHEMY_MODEL.",
+                hint="Use capital letters, digits and underscores, starting with a letter: ALCHEMY_MODEL.",
             )
         if any(ch in value for ch in '\r\n"') or value != value.strip():
             raise ConfigError(
