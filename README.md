@@ -17,8 +17,8 @@
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
 **Maintainer:** [gagexhill](https://github.com/gagexhill) — open source, MIT licensed, unofficial and not affiliated with Google
-**Runtime:** A Python command-line tool on your machine; the Claude API and Google NotebookLM only when you opt in
-**Status:** Alpha — [audit remediation #16](https://github.com/gagexhill/notebook-alchemy/issues/16) owns current progress
+**Runtime:** A Python command-line tool and desktop MCP server (`stdio` + loopback `streamable-http`) on your machine; Claude, Gemini (`--watch`) and Google NotebookLM only when you opt in
+**Status:** Alpha (`v0.4.0`) — see [open issues](https://github.com/gagexhill/notebook-alchemy/issues) for current roadmap work
 
 <br>
 
