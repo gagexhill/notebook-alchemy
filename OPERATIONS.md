@@ -54,10 +54,14 @@ one workspace kept for this tool. That workspace has:
 Rotate before the key expires, or at once if it may have leaked:
 
 1. In the Console, create a key for the same service account, scoped to the same workspace.
-2. Put it in `.env` as `ANTHROPIC_API_KEY` (never in a file git tracks), and run
-   `notebook-alchemy status`.
+2. Put it in `~/.notebook-alchemy/.env` (or folder-local `.env`) as `ANTHROPIC_API_KEY` (never in a file
+   git tracks), and run `notebook-alchemy status`.
 3. Run one small build (`notebook-alchemy run <channel> --limit 1 --save books`) to confirm it works.
 4. Delete the old key in the Console.
+
+When enabling opt-in `--watch N` fallback (`GEMINI_API_KEY`) or external ChatGPT Connectors via
+`mcp serve --transport streamable-http --allow-tunnel` (`ALCHEMY_MCP_TOKEN`), keep both in
+`~/.notebook-alchemy/.env` so every CLI working directory and MCP desktop client shares them.
 
 A key that may have leaked is disabled first, then rotated; the spend limit bounds what it could cost
 in the meantime. Price changes go in `PRICING_USD_PER_M` with the date they were read.

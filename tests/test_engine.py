@@ -937,3 +937,83 @@ def test_a_copy_left_by_an_upload_that_gave_no_id_is_found_and_removed_next_run(
     engine.publish("Chan", _books())
     left = {s["id"] for s in fake.sources[nb]}
     assert "src-lost" not in left and yours <= left
+
+
+def test_a_source_that_never_became_ready_is_recorded_and_replaced_not_duplicated(tmp_path: Path) -> None:
+    fake = FakeNotebookLM(fail={"wait": "src-"})  # every new source fails while NotebookLM processes it
+    nb = fake.seed("Chan", ["My own notes"])
+    engine = _fake_engine(tmp_path, fake)
+    with pytest.raises(SyncError) as err:
+        engine.publish("Chan", _books())
+    assert all("processing did not finish" in line for line in err.value.failed)
+    unready = sorted(s["id"] for s in fake.sources[nb] if s["id"].startswith("src-"))
+    record = json.loads(engine._sync_state_path(nb).read_text(encoding="utf-8"))
+    assert len(unready) == 2 and record["orphans"] == unready and record["ids"] == {}
+    assert record["hashes"] == {}  # nothing was confirmed, so the next run sends both books again
+    fake.fail = {}
+    result = engine.publish("Chan", _books())
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "My own notes"]  # once each; yours stays
+    assert result.uploaded == 2 and not {s["id"] for s in fake.sources[nb]} & set(unready)
+
+
+def test_owned_preparing_source_is_not_treated_as_unchanged_and_is_replaced(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    engine = _fake_engine(tmp_path, fake)
+    first = engine.publish("Chan", _books())
+    nb = first.notebook_id
+    # Simulate NotebookLM leaving Alpha Topics stuck in `preparing` after a prior failure.
+    for s in fake.sources[nb]:
+        if s["title"] == "Alpha Topics":
+            s["status"] = "preparing"
+            broken_id = s["id"]
+    result = engine.publish("Chan", _books())
+    assert result.uploaded == 1 and result.unchanged == 1
+    ids = {s["title"]: s["id"] for s in fake.sources[nb]}
+    assert ids["Alpha Topics"] != broken_id
+    assert broken_id not in {s["id"] for s in fake.sources[nb]}
+
+
+def test_unowned_preparing_sources_are_reported_when_over_limit(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    nb = fake.seed("Chan", ["User A", "User B"])
+    fake.sources[nb][0]["status"] = "preparing"
+    with pytest.raises(SyncError, match="1 other source\\(s\\) in the notebook are stuck in preparing/error"):
+        _limited_engine(tmp_path, fake, 3).publish("Chan", _books())
+
+
+def test_full_notebook_replaces_incrementally_without_wiping_unreplaced_books_on_failure(
+    tmp_path: Path,
+) -> None:
+    fake = FakeNotebookLM()
+    nb = fake.seed("Chan", ["Alpha Topics", "Beta Topics", "Mine 1", "Mine 2"])
+    engine = _limited_engine(tmp_path, fake, 4)  # 4 of 4 slots full (0 free slots)
+    _previous_upload(engine, nb, ["Alpha Topics", "Beta Topics"])
+    # Fail Alpha's upload in wave 1: Beta's old copy must stay untouched in the notebook.
+    broken = FakeNotebookLM(fail={"add": "Alpha"})
+    broken.notebooks, broken.sources = fake.notebooks, fake.sources
+    engine.client = NotebookLMClient(
+        engine.config, api=broken, limits_reader=lambda client: PlanLimits(4, 100, 1)
+    )
+    with pytest.raises(SyncError):
+        engine.publish("Chan", _edited(_books()))
+    # Wave 1 failed Alpha after freeing its slot; wave 2 still replaced Beta within the 4-slot limit.
+    titles = [s["title"] for s in fake.sources[nb]]
+    assert sorted(titles) == ["Beta Topics", "Mine 1", "Mine 2"]
+    assert len(titles) <= 4
+    # Retry cleanly with working API: Alpha is re-added while confirmed Beta is left unchanged.
+    engine.client = NotebookLMClient(
+        engine.config, api=fake, limits_reader=lambda client: PlanLimits(4, 100, 1)
+    )
+    result = engine.publish("Chan", _edited(_books()))
+    assert not result.freed_first and result.uploaded == 1 and result.unchanged == 1
+    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "Mine 1", "Mine 2"]
+
+
+def test_full_notebook_replaces_renamed_book_without_exceeding_limit(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    nb = fake.seed("Chan", ["Old Topics", "Mine 1", "Mine 2", "Mine 3"])
+    engine = _limited_engine(tmp_path, fake, 4)
+    _previous_upload(engine, nb, ["Old Topics"])
+    result = engine.publish("Chan", _books(("Gamma_Topics",)))
+    assert result.freed_first and result.uploaded == 1 and result.pruned == 1
+    assert fake.titles("Chan") == ["Gamma Topics", "Mine 1", "Mine 2", "Mine 3"]

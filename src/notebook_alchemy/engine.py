@@ -29,18 +29,28 @@ from .channel import (
     ChannelScanner,
     ChannelVideo,
     TranscriptManager,
+    TranscriptResult,
     YtDlpSubtitles,
     video_id_from_url,
 )
 from .claude import BATCH_PRICE_FACTOR, ClaudeClient, price_for
 from .cleanup import Chunk, chunk_video, is_punctuated, mark_duplicates
 from .client import NotebookLMClient, SourceDocument, normalize_title
-from .config import CAPTION_BLOCK_PAUSE, AlchemyConfig
-from .errors import AlchemyError, ChannelScanError, ClaudeError, SessionError, SyncError
+from .config import CAPTION_BLOCK_PAUSE, GEMINI_KEY_URL, AlchemyConfig
+from .errors import (
+    AlchemyError,
+    ChannelScanError,
+    ClaudeError,
+    ConfigError,
+    GeminiError,
+    SessionError,
+    SyncError,
+)
 from .knowledge import KnowledgeStore, Labeler, VideoText, label_key
 from .library import Library, LibraryBuilder, Passage, RequestCache, build_passages
 from .mock_data import MOCK_NOTEBOOK_TITLE, get_mock_sources, sample_transcript
 from .offline import library_without_ai
+from .watch import MAX_WATCH_DURATION_SECONDS, GeminiWatcher, watch_cost
 from .writer import Book, render_library
 
 logger = logging.getLogger(__name__)
@@ -91,6 +101,9 @@ class Estimate:
     labelled: int  # videos whose labels are cached already
     cost_usd: float
     model: str
+    watch_videos: int = 0
+    watch_cost_usd: float = 0.0
+    gemini_model: str = ""
 
 
 @dataclass
@@ -106,6 +119,7 @@ class BuildReport:
     by_source: dict[str, int] = field(default_factory=dict)
     is_mock: bool = False
     used_ai: bool = True
+    watched: set[str] = field(default_factory=set)
 
 
 def _content_hash(text: str) -> str:
@@ -170,6 +184,11 @@ class AlchemyEngine:
         self.config = config or AlchemyConfig.from_env()
         self.client = NotebookLMClient(self.config)
         self.ai = ClaudeClient(self.config.api_key, self.config.model) if self.config.has_api_key else None
+        self.watcher = (
+            GeminiWatcher(self.config.gemini_api_key, self.config.gemini_model)
+            if self.config.has_gemini_key
+            else None
+        )
         self.route_notices: list[str] = []  # said once per build by the NotebookLM transcript route
         self.transcripts = TranscriptManager(
             cache_dir=self.config.cache_dir,
@@ -217,6 +236,8 @@ class AlchemyEngine:
             "session_file": _home_relative(session) if session else "none (run: notebook-alchemy login)",
             "api_key": "set" if self.config.has_api_key else "unset",
             "model": self.config.model,
+            "gemini_api_key": "set" if self.config.has_gemini_key else "unset",
+            "gemini_model": self.config.gemini_model,
             "cache_dir": f"{_home_relative(self.home)} ({_dir_size(self.home) / 1024:.0f} KB)",
             "max_concurrency": self.config.max_concurrency,
         }
@@ -239,7 +260,14 @@ class AlchemyEngine:
         scan = ChannelScanner().scan(source, limit=limit, tabs=tabs)
         return scan.channel_name, scan.videos
 
-    def estimate(self, videos: list[ChannelVideo], *, mock: bool = False, batch: bool = True) -> Estimate:
+    def estimate(
+        self,
+        videos: list[ChannelVideo],
+        *,
+        mock: bool = False,
+        batch: bool = True,
+        watch_limit: int = 0,
+    ) -> Estimate:
         """Words already read and an estimated cost for the rest, from durations. Spends nothing.
 
         `batch` prices the labelling at the half-price batch rate, as a run without --now pays.
@@ -249,9 +277,13 @@ class AlchemyEngine:
         known_words = known_videos = labelled = 0
         words_total = 0
         cost = 0.0
+        watch_videos = 0
+        watch_usd = 0.0
         store = KnowledgeStore(self.knowledge_dir())
         for v in videos:
-            cached = None if mock else self.transcripts._read_cache(v.id)
+            cached = (
+                None if mock else self.transcripts._read_cache(v.id, include_model_written=watch_limit > 0)
+            )
             if cached and cached.text:
                 words = len(cached.text.split())
                 known_words += words
@@ -262,15 +294,31 @@ class AlchemyEngine:
                     words_total += words
                     continue
             else:
-                words = int((v.duration_seconds or 600) * WORDS_PER_SECOND)
+                seconds = v.duration_seconds or 600
+                words = int(seconds * WORDS_PER_SECOND)
                 punctuated = False
+                if watch_limit > watch_videos and seconds <= MAX_WATCH_DURATION_SECONDS:
+                    watch_videos += 1
+                    w_cost, _w_note = watch_cost(seconds, self.config.gemini_model)
+                    watch_usd += w_cost
             words_total += words
             tokens = words * TOKENS_PER_WORD
             share = LABEL_OUTPUT_SHARE + (0 if punctuated else PUNCTUATED_OUTPUT_SHARE)
             cost += (tokens * price_in + tokens * share * price_out) / 1e6
         # Labels can be made in a half-price batch; sorting and consolidation always use standard calls.
         cost = cost * (BATCH_PRICE_FACTOR if batch else 1.0) + cost * SORTING_SHARE
-        return Estimate(len(videos), known_words, known_videos, words_total, labelled, cost, model)
+        return Estimate(
+            len(videos),
+            known_words,
+            known_videos,
+            words_total,
+            labelled,
+            cost,
+            model,
+            watch_videos=watch_videos,
+            watch_cost_usd=watch_usd,
+            gemini_model=self.config.gemini_model if watch_limit > 0 else "",
+        )
 
     # -- 2.-6. build --
 
@@ -284,12 +332,24 @@ class AlchemyEngine:
         offline: bool = False,
         resort: bool = False,
         use_batch: bool = True,
+        watch_limit: int = 0,
         progress: ProgressFn | None = None,
     ) -> BuildReport:
+        if watch_limit < 0:
+            raise ConfigError(
+                f"--watch must be 0 or more, got {watch_limit}.",
+                hint="Omit --watch or give a positive limit like --watch 5.",
+            )
+        if watch_limit > 0 and not mock and self.watcher is None:
+            raise ConfigError(
+                "`--watch` needs a Gemini API key to read blocked videos.",
+                hint=f"Add GEMINI_API_KEY to your .env (create one at {GEMINI_KEY_URL}), or omit --watch.",
+            )
         self.route_notices = []
         channel, videos = self.scan(source, limit=limit, tabs=tabs, mock=mock)
         today = dt.datetime.now(dt.UTC).date().isoformat()
         notices: list[str] = []
+        watched: set[str] = set()
 
         # 2. words
         if mock:
@@ -297,22 +357,73 @@ class AlchemyEngine:
             exact: set[str] = set()
             by_source = {"sample": len(videos)}
         else:
-            results = self.transcripts.fetch_many(
-                [(v.id, v.title) for v in videos],
-                progress=(lambda d, t: progress("Reading what each video says", d, t)) if progress else None,
-            )
-            # Words a model wrote down from a video (the removed `--watch`) are not the speakers' own, so
-            # such a cached record is not used: the video counts as unread.
-            texts = {vid: r.text for vid, r in results.items() if r.text and r.method != MODEL_WRITTEN}
+            prev_include = self.transcripts.include_model_written
+            self.transcripts.include_model_written = watch_limit > 0
+            try:
+                results = self.transcripts.fetch_many(
+                    [(v.id, v.title) for v in videos],
+                    progress=(
+                        (lambda d, t: progress("Reading what each video says", d, t)) if progress else None
+                    ),
+                )
+            finally:
+                self.transcripts.include_model_written = prev_include
+            # Words a model wrote down from a video are only used when `--watch` is opted into.
+            texts = {
+                vid: r.text
+                for vid, r in results.items()
+                if r.text and (watch_limit > 0 or r.method != MODEL_WRITTEN)
+            }
+            watched = {
+                vid for vid, r in results.items() if r.text and r.method == MODEL_WRITTEN and vid in texts
+            }
             exact = {vid for vid, r in results.items() if r.published}
             for v in videos:  # an exact date from yt-dlp replaces the listing's approximate one
                 if results.get(v.id) and results[v.id].published:
                     v.published = results[v.id].published
             by_source = dict(self.transcripts.by_source)
+            if watch_limit > 0 and self.watcher is not None:
+                missing_videos = [
+                    v
+                    for v in videos
+                    if v.id not in texts and results.get(v.id) and results[v.id].source != "skipped"
+                ]
+                eligible = [
+                    v for v in missing_videos if (v.duration_seconds or 0) <= MAX_WATCH_DURATION_SECONDS
+                ]
+                skipped_long = len(missing_videos) - len(eligible)
+                if skipped_long:
+                    notices.append(f"Skipped {skipped_long} video(s) longer than 90 minutes for `--watch`.")
+                watch_targets = eligible[:watch_limit]
+                for done, v in enumerate(watch_targets, 1):
+                    try:
+                        wres = self.watcher.watch_video(v.id)
+                    except GeminiError as exc:
+                        if exc.stop_run:
+                            notices.append(f"{exc.message} {exc.hint or ''}".strip())
+                            break
+                        notices.append(f"Gemini could not watch '{v.title}': {exc.detail}")
+                        continue
+                    self.transcripts._write_cache(
+                        v.id, v.title, wres.text, method=MODEL_WRITTEN, published=v.published
+                    )
+                    results[v.id] = TranscriptResult(
+                        v.id, wres.text, MODEL_WRITTEN, published=v.published, method=MODEL_WRITTEN
+                    )
+                    texts[v.id] = wres.text
+                    watched.add(v.id)
+                    by_source[MODEL_WRITTEN] = by_source.get(MODEL_WRITTEN, 0) + 1
+                    if progress:
+                        progress("Watching blocked videos with Gemini", done, len(watch_targets))
             notices += self.transcripts.notices + self.route_notices
-            if self.transcripts.blocked_total:
+            blocked_left = sum(
+                1
+                for v in videos
+                if v.id not in texts and results.get(v.id) and results[v.id].source == "blocked"
+            )
+            if blocked_left:
                 notices.append(
-                    f"YouTube wouldn't share words for {self.transcripts.blocked_total} videos this time. "
+                    f"YouTube wouldn't share words for {blocked_left} videos this time. "
                     "Run the same command later to fill them in; words already read are kept."
                 )
         read = set(texts)
@@ -399,7 +510,9 @@ class AlchemyEngine:
         # move between "Part 1" and "Part 2" (and both get re-uploaded) whenever another one grows.
         layout = None if mock else RequestCache(self.library_cache_path(channel))
         parts = dict(layout.get(PARTS_KEY) or {}) if layout else {}
-        books = render_library(library, channel, titles, read - set(waiting), exact, dated, parts)
+        books = render_library(
+            library, channel, titles, read - set(waiting), exact, dated, parts, watched=watched
+        )
         if layout:
             layout.put(PARTS_KEY, parts)
         return BuildReport(
@@ -414,6 +527,7 @@ class AlchemyEngine:
             by_source=by_source,
             is_mock=mock,
             used_ai=use_ai,
+            watched=watched,
         )
 
     @staticmethod
@@ -766,11 +880,16 @@ class AlchemyEngine:
         ]
         book_titles = {normalize_title(b.title) for b in books}
         title_by_id = {str(s["id"]): str(s.get("title", "")) for s in before}
+        status_by_id = {str(s["id"]): str(s.get("status", "ready") or "ready").lower() for s in before}
         hashes = {b.title: _content_hash(b.content) for b in books}
         same: dict[str, str] = {}
         for b in books:
             old_id = record["ids"].get(b.title)
-            if record["hashes"].get(b.title) != hashes[b.title] or old_id not in title_by_id:
+            if (
+                record["hashes"].get(b.title) != hashes[b.title]
+                or old_id not in title_by_id
+                or status_by_id.get(old_id) in ("preparing", "error")
+            ):
                 continue
             if title_by_id[old_id] != b.title:
                 # The text is unchanged but NotebookLM shows another title: set it, else send again.
@@ -784,84 +903,159 @@ class AlchemyEngine:
         final_count = len(before) - len(ours) + len(books)
         if limit is not None and final_count > limit:
             plan = limits.plan if limits else "unknown plan"
+            stuck_unowned = sum(
+                1
+                for s in before
+                if str(s["id"]) not in mine_ids
+                and normalize_title(str(s.get("title", ""))) not in legacy
+                and str(s.get("status", "")).lower() in ("preparing", "error")
+            )
+            stuck_note = (
+                f" ({stuck_unowned} other source(s) in the notebook are stuck in preparing/error)"
+                if stuck_unowned
+                else ""
+            )
             raise SyncError(
-                f"The notebook would hold {final_count} sources, but a NotebookLM {plan} notebook holds "
-                f"up to {limit}. Nothing was uploaded.",
+                f"The notebook would hold {final_count} sources{stuck_note}, but a NotebookLM {plan} "
+                f"notebook holds up to {limit}. Nothing was uploaded.",
                 failed=[],
                 hint="Remove sources you no longer need from the notebook, or upload to a new notebook "
                 "with -N.",
             )
         freed_first = limit is not None and len(before) + len(sending) > limit
         freed: set[str] = set()
-        if freed_first:
-            # Adding everything before removing the old copies would briefly exceed the limit, so
-            # the copies this upload replaces go first.
-            for old in ours:
-                if str(old["id"]) in keep_ids:
-                    continue
-                try:
-                    self.client.delete_source(nb_id, str(old["id"]))
-                    freed.add(str(old["id"]))
-                except AlchemyError as exc:
-                    raise SyncError(
-                        f"Could not free a slot before uploading: {exc.message}",
-                        failed=[str(old.get("title", old["id"]))],
-                        hint="Remove an old source in NotebookLM, then run the same command again.",
-                    ) from exc
+        replaceable_by_key: dict[str, list[dict[str, Any]]] = {}
+        cleanup_first: list[dict[str, Any]] = []
+        for old in ours:
+            oid = str(old["id"])
+            if oid in keep_ids:
+                continue
+            key = normalize_title(str(old.get("title", "")))
+            if oid in orphans or key not in book_titles or status_by_id.get(oid) in ("preparing", "error"):
+                cleanup_first.append(old)
+            else:
+                replaceable_by_key.setdefault(key, []).append(old)
+
+        def _free_old(old: dict[str, Any]) -> None:
+            oid = str(old["id"])
+            if oid in freed:
+                return
+            try:
+                self.client.delete_source(nb_id, oid)
+                freed.add(oid)
+            except AlchemyError as exc:
+                raise SyncError(
+                    f"Could not free a slot before uploading: {exc.message}",
+                    failed=[str(old.get("title", oid))],
+                    hint="Remove an old source in NotebookLM, then run the same command again.",
+                ) from exc
+
+        # Orphans, removed books and stuck preparing/error copies owned by this tool always go first
+        # when tight (or when any owned unready source needs clearing before counting slots).
+        for old in cleanup_first:
+            if freed_first or status_by_id.get(str(old["id"])) in ("preparing", "error"):
+                _free_old(old)
 
         failed: list[str] = []
         steps = _Counter(progress, "Uploading to NotebookLM", len(sending) * 2)
 
         half_made: list[str] = []  # sources NotebookLM registered for an upload that then failed
         lost: list[str] = []  # books whose upload failed without saying whether a source was made
-
-        def add(book: Book) -> tuple[str, str | None, str | None]:
-            try:
-                source_id = self.client.add_source_document(
-                    nb_id, SourceDocument(_safe_name(book.title), book.title, book.content)
-                )
-                return book.title, source_id, None
-            except AlchemyError as exc:
-                if getattr(exc, "source_id", None):
-                    half_made.append(str(exc.source_id))  # type: ignore[attr-defined]
-                else:
-                    lost.append(book.title)
-                return book.title, None, f"{book.title}: {exc.message}"
-            except Exception as exc:  # noqa: BLE001 - reported per book, so the rest still reconcile
-                lost.append(book.title)
-                return book.title, None, f"{book.title}: {type(exc).__name__}: {exc}"
-            finally:
-                steps.tick()
-
         new_ids: dict[str, str] = {}
-        for title, source_id, error in _run_pool(add, sending):
-            if source_id:
-                new_ids[title] = source_id
-            if error:
-                failed.append(error)
-        if lost:
-            half_made += self._sources_left_by_failed_uploads(nb_id, lost, before, new_ids)
         sizes = {b.title: b.words for b in books}
 
-        def wait(item: tuple[str, str]) -> str | None:
-            title, source_id = item
-            # A large book takes NotebookLM longer to process: a minute per 50,000 words, at least 3.
-            timeout = max(180, int(sizes.get(title, 0) / 50_000 * 60) + 180)
-            try:
-                self.client.wait_for_source(nb_id, source_id, timeout=timeout)
-                return None
-            except AlchemyError as exc:
-                return f"{title}: processing did not finish: {exc.message}"
-            except Exception as exc:  # noqa: BLE001 - reported per source
-                return f"{title}: processing did not finish: {type(exc).__name__}: {exc}"
-            finally:
-                steps.tick()
+        def _upload_wave(wave: list[Book]) -> None:
+            def add(book: Book) -> tuple[str, str | None, str | None]:
+                try:
+                    source_id = self.client.add_source_document(
+                        nb_id, SourceDocument(_safe_name(book.title), book.title, book.content)
+                    )
+                    return book.title, source_id, None
+                except AlchemyError as exc:
+                    if getattr(exc, "source_id", None):
+                        half_made.append(str(exc.source_id))  # type: ignore[attr-defined]
+                    else:
+                        lost.append(book.title)
+                    return book.title, None, f"{book.title}: {exc.message}"
+                except Exception as exc:  # noqa: BLE001 - reported per book, so the rest still reconcile
+                    lost.append(book.title)
+                    return book.title, None, f"{book.title}: {type(exc).__name__}: {exc}"
+                finally:
+                    steps.tick()
 
-        pending = list(new_ids.items())
-        for (title, _sid), error in zip(pending, _run_pool(wait, pending), strict=True):
-            if error:
-                failed.append(error)
-                new_ids.pop(title)
+            wave_ids: dict[str, str] = {}
+            for title, source_id, error in _run_pool(add, wave):
+                if source_id:
+                    wave_ids[title] = source_id
+                if error:
+                    failed.append(error)
+
+            def wait(item: tuple[str, str]) -> str | None:
+                title, source_id = item
+                # A large book takes NotebookLM longer to process: a minute per 50,000 words, at least 3.
+                timeout = max(180, int(sizes.get(title, 0) / 50_000 * 60) + 180)
+                try:
+                    self.client.wait_for_source(nb_id, source_id, timeout=timeout)
+                    return None
+                except AlchemyError as exc:
+                    return f"{title}: processing did not finish: {exc.message}"
+                except Exception as exc:  # noqa: BLE001 - reported per source
+                    return f"{title}: processing did not finish: {type(exc).__name__}: {exc}"
+                finally:
+                    steps.tick()
+
+            pending = list(wave_ids.items())
+            for (title, source_id), error in zip(pending, _run_pool(wait, pending), strict=True):
+                if error:
+                    failed.append(error)
+                    wave_ids.pop(title)
+                    # The source exists (likely stuck in preparing/error). Record it so the next
+                    # run removes it instead of leaving a duplicate beside the next upload (#43).
+                    half_made.append(source_id)
+            new_ids.update(wave_ids)
+
+        if not freed_first:
+            _upload_wave(sending)
+        else:
+            assert limit is not None  # noqa: S101 - freed_first implies limit is not None
+            # Only free the minimum old copies needed per wave so a mid-run failure never wipes
+            # books whose replacements were not even started yet.
+            remaining_books = list(sending)
+            while remaining_books:
+                used_slots = len(before) - len(freed) + len(new_ids) + len(half_made)
+                available = limit - used_slots
+                # Free only 1 replaceable old copy at a time when out of slots (or before the first
+                # upload when tight), so a wave-1 failure never wipes later books' old copies.
+                if available <= 0 or (len(remaining_books) > available and not freed):
+                    candidates = [
+                        old
+                        for b in remaining_books
+                        for old in replaceable_by_key.get(normalize_title(b.title), [])
+                        if str(old["id"]) not in freed
+                    ]
+                    if not candidates:
+                        candidates = [
+                            old
+                            for group in replaceable_by_key.values()
+                            for old in group
+                            if str(old["id"]) not in freed
+                        ]
+                    if candidates:
+                        _free_old(candidates[0])
+                        available += 1
+                wave_size = max(1, min(len(remaining_books), available))
+                wave = remaining_books[:wave_size]
+                remaining_books = remaining_books[wave_size:]
+                _upload_wave(wave)
+                # Delete replaced copies for succeeded books in this wave to free slots for the next.
+                for b in wave:
+                    if b.title in new_ids:
+                        for old in replaceable_by_key.get(normalize_title(b.title), []):
+                            if str(old["id"]) not in freed:
+                                _free_old(old)
+
+        if lost:
+            half_made += self._sources_left_by_failed_uploads(nb_id, lost, before, new_ids)
         unconfirmed: set[str] = set()  # uploaded, but the title or the read-back was not confirmed
         if new_ids:
             # NotebookLM can reset a title to the file name once processing ends.

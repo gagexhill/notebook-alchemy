@@ -4,20 +4,25 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 0.2.x   | Yes       |
-| < 0.2   | No        |
+| 0.4.x   | Yes       |
+| < 0.4   | No        |
 
 ## How Credentials Are Handled
 
-- The Claude API key is read from the environment or a git-ignored `.env`, sent only in a request
-  header by the official `anthropic` SDK, and removed from any error text before it is shown or logged.
-  Use a key scoped to a Console workspace of its own, with a monthly spend limit, so a leaked key can
-  reach nothing else and cost little.
-- The API address is fixed in the code, and `.env` is read only for this tool's own settings
-  (`ANTHROPIC_API_KEY` and `ALCHEMY_*`), so a `.env` in the folder a run starts from cannot send the key
-  elsewhere or set the `notebooklm` command's own variables. Two of its settings do choose the
-  sign-in that receives uploads (`ALCHEMY_SESSION_FILE`, `ALCHEMY_NOTEBOOKLM_PROFILE`); `status` names that
-  account, and the first upload to an account asks first.
+- The Claude API key (`ANTHROPIC_API_KEY`) and optional Gemini API key (`GEMINI_API_KEY`, used only
+  with explicit `--watch N`) are read from the environment, a folder-local `.env`, or the global
+  `~/.notebook-alchemy/.env`. Keys reach only their official SDKs (`anthropic` -> `https://api.anthropic.com`
+  in a request header, `google-genai` -> Gemini API), and are scrubbed from errors and logs before
+  reaching the terminal or MCP clients. Use keys with monthly spend limits so a leaked key can reach
+  nothing else and cost little.
+- `.env` loading reads only this tool's own allowlisted names (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`,
+  and `ALCHEMY_*`), so a `.env` in a working directory cannot redirect keys or set the `notebooklm`
+  command's own variables. Two settings choose the sign-in that receives uploads (`ALCHEMY_SESSION_FILE`,
+  `ALCHEMY_NOTEBOOKLM_PROFILE`); `status` names that account, and the first upload to an account asks first.
+- The local MCP server defaults to `stdio` for desktop clients (Claude Desktop, Antigravity, ChatGPT
+  Codex). When served over `streamable-http` for ChatGPT Apps & Connectors, DNS rebinding protection is
+  enabled by default on `127.0.0.1`, and exposing `--allow-tunnel` requires a bearer token (`ALCHEMY_MCP_TOKEN`
+  or `--token`), checked with constant-time comparison.
 - The NotebookLM sign-in is kept by the notebooklm-py library under
   `~/.notebooklm/profiles/<profile>/`. This tool opens it through that library, in its own process,
   only to talk to NotebookLM; the library keeps the file's cookies current. This tool's own code never

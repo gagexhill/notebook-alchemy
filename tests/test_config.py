@@ -84,6 +84,39 @@ def test_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
     assert AlchemyConfig.from_env().model == "claude-test-model"
 
 
+def test_global_dotenv_is_read_from_any_working_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from notebook_alchemy.config import default_write_env_path, global_env_path
+
+    user_env = global_env_path()
+    user_env.parent.mkdir(parents=True, exist_ok=True)
+    user_env.write_text(
+        "ANTHROPIC_API_KEY=sk-ant-TEST-global-00000\n"
+        "GEMINI_API_KEY=AIzaTESTglobalkey000000\n"
+        "ALCHEMY_NOTEBOOKLM_PROFILE=personal\n",
+        encoding="utf-8",
+    )
+    other_dir = tmp_path / "elsewhere"
+    other_dir.mkdir()
+    monkeypatch.chdir(other_dir)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("ALCHEMY_NOTEBOOKLM_PROFILE", raising=False)
+
+    cfg = AlchemyConfig.from_env()
+    assert cfg.has_api_key and cfg.has_gemini_key and cfg.notebooklm_profile == "personal"
+    assert default_write_env_path() == user_env
+
+    # A local .env overrides the global file per key while inheriting the rest.
+    (other_dir / ".env").write_text("ALCHEMY_NOTEBOOKLM_PROFILE=work\n", encoding="utf-8")
+    monkeypatch.delenv("ALCHEMY_NOTEBOOKLM_PROFILE", raising=False)
+    cfg2 = AlchemyConfig.from_env()
+    assert cfg2.notebooklm_profile == "work" and cfg2.has_api_key
+    assert default_write_env_path() == Path(".env")
+    assert default_write_env_path(local=True) == Path(".env")
+
+
 def test_notebooklm_profile_default_override_and_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
     assert AlchemyConfig.from_env().notebooklm_profile == "default"
     monkeypatch.setenv("ALCHEMY_NOTEBOOKLM_PROFILE", "personal")

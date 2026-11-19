@@ -2,6 +2,14 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## Desktop LLM MCP connector, global `.env`, `--watch`, and slot-safe uploads (`0.4.0`, `#43`, `#60`, `#61`, `#63`, `#64`, 2026-11-19)
+
+- **Shared service layer & global `.env` (#60).** Extracted `service.py` from `cli.py` so CLI commands and MCP tools share one pipeline, validation, and error path. `config.py` now loads `~/.notebook-alchemy/.env` after `./.env` (and supports `ALCHEMY_ENV_FILE`), and `setup` writes global by default (`--local` opts into `./.env`), so MCP desktop hosts spawned from arbitrary working directories see the same keys and profile.
+- **Dual-transport MCP connector & installer (#61).** Added `mcp_server.py` (`mcp>=2.0,<3`, `MCPServer`) exposing `alchemy_status`, `alchemy_preview`, `alchemy_run`, `alchemy_notebooks`, `alchemy_clean`, two read-only resources, and a workflow prompt. Supports `stdio` (with `ui.route_to_stderr()` to keep JSON-RPC on `stdout` clean) for **Claude Desktop**, **Antigravity**, and **ChatGPT Codex**, plus `streamable-http` with `StaticBearerVerifier` and `TransportSecuritySettings` for **ChatGPT Desktop Apps & Connectors**. Added `mcp_install.py` (`notebook-alchemy mcp install <client>`) to merge entries atomically without clobbering existing JSON/TOML settings.
+- **Slot-safe upload & stuck-source handling (#43).** `publish()` now never counts an owned `preparing` or `error` source as up-to-date, frees owned unready/pruned/orphan sources before checking capacity, deletes replaceable books in minimal slot-safe waves instead of all at once, reports unowned unready sources blocking capacity, and records failed `wait_for_source` orphans so the next run replaces them cleanly.
+- **2026 Google GenAI `--watch` fallback (#64).** Restored opt-in `--watch N` via `watch.py` using `google-genai>=3.2.0` (`client.interactions.create` on `gemini-4-hydrogen`, `store=False`, `thinking_level="low"`). Only videos whose captions failed are eligible, outputs are scrubbed of `GEMINI_API_KEY`, and `_OVERVIEW.md` explicitly lists Gemini-transcribed videos.
+- **Repository cleanup (#63).** Removed stale unpushed LLM branch (`fix/43-unready-source`), `.claude/`, `CLAUDE.md`, orphaned `.pyc` bytecode, and dead `VaultError`, and replaced sleep-based thread timing in `tests/test_client.py` with `threading.Event`.
+
 ## NotebookLM through the library's Python API (#45, 2026-11-14)
 
 - **What was wrong.** Every NotebookLM call started a `notebooklm` process, 2.5 to 8 seconds each, and a failure was recognised by English words in its output. Any message with "login" in it counted as a sign-out.
