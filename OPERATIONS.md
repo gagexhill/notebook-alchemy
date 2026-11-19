@@ -59,8 +59,8 @@ Rotate before the key expires, or at once if it may have leaked:
 3. Run one small build (`notebook-alchemy run <channel> --limit 1 --save books`) to confirm it works.
 4. Delete the old key in the Console.
 
-When enabling opt-in `--watch N` fallback (`GEMINI_API_KEY`) or external ChatGPT Connectors via
-`mcp serve --transport streamable-http --allow-tunnel` (`ALCHEMY_MCP_TOKEN`), keep both in
+When enabling opt-in `--watch N` fallback (`GEMINI_API_KEY`) or loopback HTTP debugging via
+`mcp serve --transport streamable-http` (`ALCHEMY_MCP_TOKEN`), keep both in
 `~/.notebook-alchemy/.env` so every CLI working directory and MCP desktop client shares them.
 
 A key that may have leaked is disabled first, then rotated; the spend limit bounds what it could cost

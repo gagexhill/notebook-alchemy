@@ -42,6 +42,8 @@ dependencies = [
     # Only the `browser` extra (the sign-in window). The `cookies` extra installs rookie-cookies, which
     # reads every browser's saved sign-ins and which antivirus flags; nothing here needs it (#55).
     "notebooklm-py[browser]>=0.8.6,<0.9",
+    # Minimum bound avoids known CVE-2026-112940 family in filelock 3.x pulled transitively.
+    "filelock>=4.2.1,<5",
 ]
 
 [project.optional-dependencies]

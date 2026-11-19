@@ -47,7 +47,7 @@
 
 ## 🌐 Project Overview
 
-**Notebook Alchemy** takes a YouTube channel, playlist or video link, reads what every video says, keeps each point once, and uploads the result to a Google NotebookLM notebook as a few topic books. Each book can hold up to NotebookLM's 500,000 words per source. You can drive it from the command line or connect it via MCP to **Claude Desktop**, **ChatGPT Desktop** (Codex & Apps/Connectors), and **Antigravity**.
+**Notebook Alchemy** takes a YouTube channel, playlist or video link, reads what every video says, keeps each point once, and uploads the result to a Google NotebookLM notebook as a few topic books. Each book can hold up to NotebookLM's 500,000 words per source. You can drive it from the command line or connect it via automatic local `stdio` MCP to **Claude Desktop**, **ChatGPT Desktop** (Codex / Work mode), and **Antigravity**.
 
 The books hold the speakers' own words, never an AI rewrite (except optional `--watch N` transcriptions, which are explicitly marked):
 - **Claude's job:** it decides which passages are worth keeping, files each one under a topic and section, puts each section in teaching order, and marks information that has gone out of date.
@@ -111,7 +111,7 @@ link       yt-dlp   captions,  filler,   Claude,   topics,  order, dupes,    pla
 | Self-test | `notebook-alchemy test` | Nothing | A temporary folder | You want to check that everything installed correctly |
 | Keep a sign-in fresh (optional) | `notebook-alchemy keep-signed-in` (`--off` to stop) | NotebookLM, every 20 minutes | A scheduled task for your user | Your computer keeps a refreshed sign-in alive (`status` shows whether it does) |
 | Watch blocked videos | `notebook-alchemy run <url> --watch 5` | YouTube, NotebookLM, Claude, Gemini (`gemini-4-hydrogen`) | One notebook | Captions are unavailable for a few videos and you want opt-in Gemini transcription (marked in `_OVERVIEW.md`) |
-| Desktop LLM connector | `notebook-alchemy mcp install all` | Local `stdio` or authenticated `streamable-http` | Client MCP config | You want Claude Desktop, ChatGPT Desktop (Codex & Connectors), or Antigravity to drive the pipeline directly |
+| Desktop LLM connector | `notebook-alchemy mcp install all` | Local `stdio` (automatic per chat) | Client MCP config | You want Claude Desktop, ChatGPT Desktop (Codex / Work mode), or Antigravity to drive the pipeline directly |
 | Move computers | `notebook-alchemy export-state FILE`, then `import-state FILE` | Nothing | A zip, then `~/.notebook-alchemy/` | You want to carry on from another computer without paying again |
 | Set up | `notebook-alchemy setup` | `notebooklm` login, only if you sign in | `~/.notebook-alchemy/.env` | You want to save your Claude/Gemini keys or upload profile once for CLI and MCP clients |
 
@@ -183,7 +183,7 @@ src/notebook_alchemy/
   - When YouTube blocks your connection, NotebookLM reads the transcripts instead.
   - Pass `--watch N` (with `GEMINI_API_KEY`) to transcribe up to `N` remaining blocked videos via Gemini 4 Hydrogen (`Interactions API`), clearly flagged in `_OVERVIEW.md`.
   - Requests are spaced so a long channel is not refused in the first place, and a refused route pauses without stopping the run.
-- **Desktop LLM connector (MCP).** Drive previews, notebook lists, cleanups, and guarded builds from **Claude Desktop**, **ChatGPT Desktop** (Codex & Apps/Connectors), and **Antigravity** over `stdio` or bearer-protected `streamable-http`.
+- **Desktop LLM connector (MCP).** Drive previews, notebook lists, cleanups, and guarded builds from **Claude Desktop**, **ChatGPT Desktop** (Codex / Work mode), and **Antigravity** over automatic zero-port `stdio` (plus authenticated loopback `streamable-http` on `127.0.0.1` for local tooling).
 - **Cheap to run again.**
   - Captions, labels, the topics, every passage's place and every section's order are cached by what produced them.
   - A rerun with no new videos asks the AI nothing and uploads nothing, unless a new year or a passage crossing a date rule changes a section's order.
@@ -358,9 +358,9 @@ A real preview of that channel, recorded from the terminal:
 
 ### Connect to Desktop LLMs (MCP)
 
-Notebook Alchemy includes a dual-transport [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server exposing five tools (`alchemy_status`, `alchemy_preview`, `alchemy_run`, `alchemy_notebooks`, `alchemy_clean`), two read-only resources (`alchemy://status`, `alchemy://notebooks`), and the `distill_youtube_channel` prompt.
+Notebook Alchemy includes an [MCP](https://modelcontextprotocol.io) server exposing five tools (`alchemy_status`, `alchemy_preview`, `alchemy_run`, `alchemy_notebooks`, `alchemy_clean`), two read-only resources (`alchemy://status`, `alchemy://notebooks`), and the `distill_youtube_channel` prompt.
 
-Register it in **Claude Desktop**, **Antigravity**, and **ChatGPT Codex** with one command (merges cleanly into each client's config file; preview with `--dry-run`):
+Register it in **Claude Desktop**, **Antigravity**, and **ChatGPT Desktop (Codex / Work mode)** with one command (merges cleanly into each client's config file; preview with `--dry-run`). Each app launches and stops local `stdio` automatically with zero open network ports or tunnels:
 
 ```bash
 notebook-alchemy mcp install all --dry-run
@@ -369,24 +369,21 @@ notebook-alchemy mcp status
 ```
 
 Or install one client at a time:
-- **Claude Desktop** (`claude_desktop_config.json`): `notebook-alchemy mcp install claude-desktop`
-- **Antigravity** (`~/.gemini/antigravity/mcp_config.json`): `notebook-alchemy mcp install antigravity`
+- **Claude Desktop** (`claude_desktop_config.json`, auto-detecting Windows Store/MSIX `LocalCache` or `%APPDATA%\Claude`): `notebook-alchemy mcp install claude-desktop`
+- **Antigravity** (`~/.gemini/config/mcp_config.json`): `notebook-alchemy mcp install antigravity`
 - **ChatGPT Desktop / Codex CLI** (`~/.codex/config.toml`): `notebook-alchemy mcp install chatgpt-codex`
 
-**ChatGPT Desktop Apps & Connectors (`streamable-http`):** ChatGPT Desktop connectors connect over Streamable HTTP (HTTPS via a reverse tunnel such as `cloudflared` or `ngrok`, with a bearer token):
+**Local HTTP debugging (`streamable-http`):** For local inspectors on the same machine, HTTP binds strictly to `127.0.0.1` with DNS-rebinding protection and requires `ALCHEMY_MCP_TOKEN` (or `--token`):
 
 ```bash
-# Put ALCHEMY_MCP_TOKEN=<random-secret> in ~/.notebook-alchemy/.env first
-notebook-alchemy mcp install chatgpt-http
-notebook-alchemy mcp serve --transport streamable-http --allow-tunnel
+# Put ALCHEMY_MCP_TOKEN=<long-random-secret> in ~/.notebook-alchemy/.env
+notebook-alchemy mcp serve --transport streamable-http --port 8765
 ```
-
-In ChatGPT Settings -> Apps & Connectors -> Create, point it at `<your-https-tunnel-url>/mcp` with Bearer authentication matching `ALCHEMY_MCP_TOKEN`.
 
 **Shared MCP safety rules:**
 - `mcp serve` routes Rich/status output strictly to `stderr` so JSON-RPC on `stdout` stays clean.
-- Tool inputs never accept raw YouTube URLs containing secrets or overwrite first-time NotebookLM accounts silently (`confirm_upload=True` is required for first-time uploads, and `confirm=True` for destructive cleans).
-- Any Claude/Gemini API key or bearer token is scrubbed from MCP errors before reaching the client.
+- `alchemy_preview` and `alchemy_run` accept only YouTube URLs / `@handles` (unless `mock=True`), and never overwrite first-time NotebookLM accounts silently (`confirm_upload=True` is required for first-time uploads, and `confirm=True` for destructive cleans).
+- Any Claude/Gemini API key or `ALCHEMY_MCP_TOKEN` is scrubbed from MCP errors before reaching the client.
 
 ### Exit codes
 

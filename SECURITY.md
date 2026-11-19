@@ -20,9 +20,11 @@
   command's own variables. Two settings choose the sign-in that receives uploads (`ALCHEMY_SESSION_FILE`,
   `ALCHEMY_NOTEBOOKLM_PROFILE`); `status` names that account, and the first upload to an account asks first.
 - The local MCP server defaults to `stdio` for desktop clients (Claude Desktop, Antigravity, ChatGPT
-  Codex). When served over `streamable-http` for ChatGPT Apps & Connectors, DNS rebinding protection is
-  enabled by default on `127.0.0.1`, and exposing `--allow-tunnel` requires a bearer token (`ALCHEMY_MCP_TOKEN`
-  or `--token`), checked with constant-time comparison.
+  Desktop Codex/Work mode), opening zero network ports. When served over `streamable-http`, binding
+  is restricted to loopback (`127.0.0.1`), DNS-rebinding protection is always enabled, and a bearer
+  token (`ALCHEMY_MCP_TOKEN` or `--token`, checked with constant-time comparison) is always required.
+  MCP tools reject non-YouTube URLs/handles (unless `mock=True`) and scrub `ALCHEMY_MCP_TOKEN` along
+  with API keys from errors.
 - The NotebookLM sign-in is kept by the notebooklm-py library under
   `~/.notebooklm/profiles/<profile>/`. This tool opens it through that library, in its own process,
   only to talk to NotebookLM; the library keeps the file's cookies current. This tool's own code never

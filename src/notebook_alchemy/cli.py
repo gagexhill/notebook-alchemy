@@ -1712,13 +1712,13 @@ def mcp_group() -> None:
     type=click.Choice(["stdio", "streamable-http"]),
     default="stdio",
     show_default=True,
-    help="MCP transport: stdio (local) or streamable-http (ChatGPT/network).",
+    help="MCP transport: stdio (local) or streamable-http (loopback).",
 )
 @click.option(
     "--host",
     default=mcp_server.DEFAULT_HTTP_HOST,
     show_default=True,
-    help="Bind address for streamable-http.",
+    help="Loopback bind address for streamable-http.",
 )
 @click.option(
     "--port",
@@ -1739,17 +1739,6 @@ def mcp_group() -> None:
     default=None,
     help="Bearer token for streamable-http (or set ALCHEMY_MCP_TOKEN).",
 )
-@click.option(
-    "--allowed-host",
-    "allowed_hosts",
-    multiple=True,
-    help="Additional allowed Host header(s) for tunneled HTTP requests.",
-)
-@click.option(
-    "--allow-tunnel",
-    is_flag=True,
-    help="Allow external tunnel hosts on streamable-http (requires a token).",
-)
 @verbose_option
 @handle_errors
 def mcp_serve_cmd(
@@ -1758,8 +1747,6 @@ def mcp_serve_cmd(
     port: int,
     http_path: str,
     token: str | None,
-    allowed_hosts: tuple[str, ...],
-    allow_tunnel: bool,
 ) -> None:
     """Start the Notebook Alchemy MCP connector."""
     mcp_server.serve(
@@ -1768,8 +1755,6 @@ def mcp_serve_cmd(
         port=port,
         path=http_path,
         token=token,
-        allowed_hosts=list(allowed_hosts) or None,
-        allow_tunnel=allow_tunnel,
     )
 
 
@@ -1780,7 +1765,7 @@ def mcp_serve_cmd(
         "  notebook-alchemy mcp install all --dry-run\n"
         "  notebook-alchemy mcp install claude-desktop\n"
         "  notebook-alchemy mcp install antigravity\n"
-        "  notebook-alchemy mcp install chatgpt-http\n"
+        "  notebook-alchemy mcp install chatgpt-codex\n"
     ),
 )
 @click.argument("client", type=click.Choice(mcp_install.SUPPORTED_INSTALL_TARGETS))
@@ -1795,14 +1780,6 @@ def mcp_serve_cmd(
 @handle_errors
 def mcp_install_cmd(client: str, config_path: Path | None, dry_run: bool) -> None:
     """Register Notebook Alchemy as an MCP connector for desktop LLMs."""
-    if client == "chatgpt-http":
-        cfg = _config()
-        guide = mcp_install.chatgpt_http_guide(has_token=bool(cfg.mcp_token))
-        ui.info(f"[bold]{esc(guide['display_name'])}[/bold]")
-        for i, step_text in enumerate(guide["steps"], 1):
-            ui.info(f"  {i}. {esc(step_text)}")
-        return
-
     targets = mcp_install.DESKTOP_ALL_CLIENTS if client == "all" else (client,)
     if config_path is not None and len(targets) > 1:
         raise click.UsageError("--config-path cannot be combined with `all`.")
@@ -1815,13 +1792,7 @@ def mcp_install_cmd(client: str, config_path: Path | None, dry_run: bool) -> Non
         prefix = "[Dry run] " if dry_run else ""
         ui.success(f"{prefix}{verb} connector for {esc(res['display_name'])}.")
         ui.detail(f"  Config: {esc(res['path'])}")
-    if client == "all":
-        cfg = _config()
-        guide = mcp_install.chatgpt_http_guide(has_token=bool(cfg.mcp_token))
-        ui.info("\nFor standard ChatGPT Desktop (Apps & Connectors, HTTPS Streamable HTTP):")
-        for i, step_text in enumerate(guide["steps"], 1):
-            ui.info(f"  {i}. {esc(step_text)}")
-    ui.info("\nRestart the desktop app(s) to load the connector.")
+    ui.info("\nRestart Claude Desktop, Antigravity, or ChatGPT Desktop (Codex / Work mode) to load it.")
 
 
 @mcp_group.command(

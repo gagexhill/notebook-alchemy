@@ -23,7 +23,7 @@ from mcp.types import ToolAnnotations
 from pydantic import AnyHttpUrl
 
 from . import __version__, ui
-from .channel import CHANNEL_TABS, DEFAULT_TABS
+from .channel import CHANNEL_TABS, DEFAULT_TABS, ChannelScanner
 from .claude import scrub as scrub_claude
 from .config import AlchemyConfig, validate_profile_name
 from .errors import AlchemyError, ConfigError
@@ -66,7 +66,20 @@ def _scrub_error(exc: AlchemyError, config: AlchemyConfig) -> ToolError:
     if exc.hint:
         msg = f"{msg} Next: {exc.hint}"
     msg = scrub_claude(scrub_gemini(msg, config.gemini_api_key), config.api_key)
+    if config.mcp_token:
+        msg = msg.replace(config.mcp_token, "***")
     return ToolError(msg)
+
+
+def _validate_youtube_source(source: str, *, mock: bool) -> str:
+    if mock:
+        return source
+    if not ChannelScanner().is_youtube_url(source):
+        raise ConfigError(
+            "MCP tools only accept YouTube channel, playlist, or video URLs (or @handles).",
+            hint="Pass a youtube.com / youtu.be URL or @handle, or set mock=True for sample data.",
+        )
+    return source
 
 
 def _config_for(profile: str | None = None) -> AlchemyConfig:
@@ -161,9 +174,10 @@ def build_mcp_server(
         cfg = AlchemyConfig()
         try:
             cfg = _config_for(profile)
+            safe_source = _validate_youtube_source(source, mock=mock)
             return preview_channel(
                 cfg,
-                source,
+                safe_source,
                 limit=limit,
                 tabs=_parse_tabs(tabs),
                 mock=mock,
@@ -201,9 +215,10 @@ def build_mcp_server(
         cfg = AlchemyConfig()
         try:
             cfg = _config_for(profile)
+            safe_source = _validate_youtube_source(source, mock=mock)
             return run_pipeline_service(
                 cfg,
-                source,
+                safe_source,
                 notebook_name=notebook_name,
                 save_dir=Path(save_dir).expanduser() if save_dir else None,
                 limit=limit,
@@ -288,6 +303,9 @@ def build_mcp_server(
     return server
 
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
 def serve(
     *,
     transport: Literal["stdio", "streamable-http"] = "stdio",
@@ -295,21 +313,25 @@ def serve(
     port: int = DEFAULT_HTTP_PORT,
     path: str = DEFAULT_HTTP_PATH,
     token: str | None = None,
-    allowed_hosts: list[str] | None = None,
-    allow_tunnel: bool = False,
 ) -> None:
-    """Start the Notebook Alchemy MCP server over stdio or Streamable HTTP."""
+    """Start the Notebook Alchemy MCP server over stdio or loopback-only Streamable HTTP."""
     ui.route_to_stderr()
     logging.basicConfig(
         level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr
     )
     config = AlchemyConfig.from_env()
     resolved_token = (token if token is not None else config.mcp_token).strip()
-    if allow_tunnel and not resolved_token:
-        raise ConfigError(
-            "Exposing the Streamable HTTP server to a public tunnel requires an access token.",
-            hint="Set ALCHEMY_MCP_TOKEN in ~/.notebook-alchemy/.env or pass --token <secret>.",
-        )
+    if transport == "streamable-http":
+        if host.strip().lower() not in LOOPBACK_HOSTS:
+            raise ConfigError(
+                f"Streamable HTTP refuses non-loopback host {host!r}; use 127.0.0.1.",
+                hint="For desktop LLMs, use `notebook-alchemy mcp install all` (automatic stdio).",
+            )
+        if not resolved_token:
+            raise ConfigError(
+                "Streamable HTTP requires an access token even on localhost.",
+                hint="Set ALCHEMY_MCP_TOKEN in ~/.notebook-alchemy/.env or pass --token <secret>.",
+            )
 
     scheme = "http"
     resource_url = f"{scheme}://{host}:{port}{path}"
@@ -318,16 +340,10 @@ def serve(
         server.run(transport="stdio")
         return
 
-    if allow_tunnel:
-        security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    elif allowed_hosts:
-        security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=[f"{host}:{port}", f"localhost:{port}", *allowed_hosts],
-        )
-    else:
-        security = None
-
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"],
+    )
     server.run(
         transport="streamable-http",
         host=host,

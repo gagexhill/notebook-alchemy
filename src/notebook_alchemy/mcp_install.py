@@ -1,8 +1,7 @@
 """Atomic MCP client installer for Claude Desktop, Antigravity, ChatGPT Codex, and editors.
 
 Reads and merges only the `notebook-alchemy` server entry into each client's configuration file
-without clobbering unrelated servers or settings, and prints exact Streamable HTTP + tunnel setup
-guidance for standard ChatGPT Desktop ("Apps & Connectors").
+without clobbering unrelated servers or settings, using automatic local `stdio` transport.
 """
 
 from __future__ import annotations
@@ -39,16 +38,29 @@ def _windows_appdata(home: Path) -> Path:
     return Path(appdata) if appdata else home / "AppData" / "Roaming"
 
 
-def _claude_desktop_path(system: str, home: Path) -> Path:
+def _claude_desktop_path(system: str, home: Path, *, localappdata: Path | None = None) -> Path:
     if system == "Darwin":
         return home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
     if system == "Windows":
-        return _windows_appdata(home) / "Claude" / "claude_desktop_config.json"
+        roaming = _windows_appdata(home) / "Claude"
+        if (roaming / "claude_desktop_config.json").exists():
+            return roaming / "claude_desktop_config.json"
+        # Windows Store / MSIX installs virtualize AppData under Packages\Claude_*\LocalCache\Roaming.
+        local_root = localappdata or (
+            Path(os.environ["LOCALAPPDATA"]) if os.environ.get("LOCALAPPDATA") else home / "AppData" / "Local"
+        )
+        packages = local_root / "Packages"
+        if packages.is_dir():
+            for pkg in sorted(packages.glob("Claude_*")):
+                msix_dir = pkg / "LocalCache" / "Roaming" / "Claude"
+                if msix_dir.is_dir():
+                    return msix_dir / "claude_desktop_config.json"
+        return roaming / "claude_desktop_config.json"
     return home / ".config" / "Claude" / "claude_desktop_config.json"
 
 
 def _antigravity_path(_system: str, home: Path) -> Path:
-    return home / ".gemini" / "antigravity" / "mcp_config.json"
+    return home / ".gemini" / "config" / "mcp_config.json"
 
 
 def _chatgpt_codex_path(_system: str, home: Path) -> Path:
@@ -76,7 +88,7 @@ MCP_CLIENTS: dict[str, McpClientSpec] = {
 }
 
 DESKTOP_ALL_CLIENTS = ("claude-desktop", "antigravity", "chatgpt-codex")
-SUPPORTED_INSTALL_TARGETS = (*MCP_CLIENTS, "chatgpt-http", "all")
+SUPPORTED_INSTALL_TARGETS = (*MCP_CLIENTS, "all")
 
 
 def resolve_server_command() -> tuple[str, list[str]]:
@@ -233,26 +245,4 @@ def install_client(client: str, *, config_path: Path | None = None, dry_run: boo
         "action": action,
         "dry_run": dry_run,
         "block": block,
-    }
-
-
-def chatgpt_http_guide(*, port: int = 8765, has_token: bool = False) -> dict[str, Any]:
-    """Setup instructions for ChatGPT Desktop Apps & Connectors (HTTPS Streamable HTTP)."""
-    serve_cmd = f"notebook-alchemy mcp serve --transport streamable-http --port {port} --allow-tunnel"
-    return {
-        "client": "chatgpt-http",
-        "display_name": "ChatGPT Desktop (Apps & Connectors)",
-        "serve_command": serve_cmd,
-        "local_endpoint": f"http://127.0.0.1:{port}/mcp",
-        "auth_env": "ALCHEMY_MCP_TOKEN",
-        "token_configured": has_token,
-        "steps": [
-            "Set ALCHEMY_MCP_TOKEN=<long-random-secret> in ~/.notebook-alchemy/.env.",
-            f"Start the HTTP server: {serve_cmd}",
-            f"Expose http://127.0.0.1:{port} over HTTPS (e.g. cloudflared tunnel or Tailscale Funnel).",
-            (
-                "In ChatGPT Desktop -> Settings -> Apps & Connectors -> Add custom MCP server, "
-                "enter https://<your-tunnel-host>/mcp and your Bearer token."
-            ),
-        ],
     }
