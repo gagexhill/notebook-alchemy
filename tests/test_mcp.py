@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tomllib
@@ -148,192 +149,202 @@ def test_service_list_notebooks_reports_preparing_sources(
 # --- mcp_server.py --------------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_mcp_server_tools_resources_prompts_and_stdout_purity(
+def test_mcp_server_tools_resources_prompts_and_stdout_purity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from notebook_alchemy import ui
     from notebook_alchemy.client import AccountIdentity, NotebookLMClient
 
-    ui.route_to_stderr()
-    monkeypatch.setattr(
-        NotebookLMClient, "upload_account", lambda self: AccountIdentity("default", "u@example.test")
-    )
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-TEST-ONLY-secret-key-0000")
-    monkeypatch.setenv("GEMINI_API_KEY", "AIzaTESTonlySecretGemini000000")
-    server = build_mcp_server()
-    tools = await server.list_tools()
-    names = {t.name for t in tools}
-    assert {
-        "alchemy_status",
-        "alchemy_preview",
-        "alchemy_run",
-        "alchemy_notebooks",
-        "alchemy_clean",
-    } <= names
+    async def _run() -> None:
+        ui.route_to_stderr()
+        monkeypatch.setattr(
+            NotebookLMClient, "upload_account", lambda self: AccountIdentity("default", "u@example.test")
+        )
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-TEST-ONLY-secret-key-0000")
+        monkeypatch.setenv("GEMINI_API_KEY", "AIzaTESTonlySecretGemini000000")
+        server = build_mcp_server()
+        tools = await server.list_tools()
+        names = {t.name for t in tools}
+        assert {
+            "alchemy_status",
+            "alchemy_preview",
+            "alchemy_run",
+            "alchemy_notebooks",
+            "alchemy_clean",
+        } <= names
 
-    status_res = await server.call_tool("alchemy_status", {"check_live": False})
-    assert status_res.is_error is False
-    structured = status_res.structured_content or {}
-    assert structured["claude"]["configured"] is True
-    assert "sk-ant-TEST-ONLY" not in json.dumps(structured)
-    assert "AIzaTESTonly" not in json.dumps(structured)
+        status_res = await server.call_tool("alchemy_status", {"check_live": False})
+        assert status_res.is_error is False
+        structured = status_res.structured_content or {}
+        assert structured["claude"]["configured"] is True
+        assert "sk-ant-TEST-ONLY" not in json.dumps(structured)
+        assert "AIzaTESTonly" not in json.dumps(structured)
 
-    save_dir = tmp_path / "mcp_books"
-    run_tool_res = await server.call_tool(
-        "alchemy_run", {"source": "sample", "mock": True, "save_dir": str(save_dir)}
-    )
-    assert run_tool_res.is_error is False
-    run_res = run_tool_res.structured_content or {}
-    assert run_res["status"] == "saved"
+        save_dir = tmp_path / "mcp_books"
+        run_tool_res = await server.call_tool(
+            "alchemy_run", {"source": "sample", "mock": True, "save_dir": str(save_dir)}
+        )
+        assert run_tool_res.is_error is False
+        run_res = run_tool_res.structured_content or {}
+        assert run_res["status"] == "saved"
 
-    resources = await server.list_resources()
-    assert {str(r.uri) for r in resources} >= {"alchemy://status", "alchemy://notebooks"}
-    prompt = await server.get_prompt("distill_youtube_channel", {"channel_url": "https://youtube.com/@x"})
-    assert "alchemy_preview" in prompt.messages[0].content.text
+        resources = await server.list_resources()
+        assert {str(r.uri) for r in resources} >= {"alchemy://status", "alchemy://notebooks"}
+        prompt = await server.get_prompt("distill_youtube_channel", {"channel_url": "https://youtube.com/@x"})
+        assert "alchemy_preview" in prompt.messages[0].content.text
 
-    # Nothing was printed to stdout when running tools.
-    captured = capsys.readouterr()
-    assert captured.out == ""
+        # Nothing was printed to stdout when running tools.
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_mcp_server_scrubs_secrets_in_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_server_scrubs_secrets_in_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     from mcp.server.mcpserver.exceptions import ToolError
 
-    secret = "sk-ant-TEST-ONLY-scrub-me-123456"
-    mcp_secret = "mcp-TEST-ONLY-bearer-999"
-    monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
-    monkeypatch.setenv("ALCHEMY_MCP_TOKEN", mcp_secret)
-    monkeypatch.setattr(
-        "notebook_alchemy.mcp_server.preview_channel",
-        lambda *a, **kw: (_ for _ in ()).throw(AlchemyError(f"boom {secret} {mcp_secret}", hint="retry")),
-    )
-    server = build_mcp_server()
-    with pytest.raises(ToolError) as err:
-        await server.call_tool("alchemy_preview", {"source": "@x"})
-    assert secret not in str(err.value) and mcp_secret not in str(err.value) and "***" in str(err.value)
+    async def _run() -> None:
+        secret = "sk-ant-TEST-ONLY-scrub-me-123456"
+        mcp_secret = "mcp-TEST-ONLY-bearer-999"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+        monkeypatch.setenv("ALCHEMY_MCP_TOKEN", mcp_secret)
+        monkeypatch.setattr(
+            "notebook_alchemy.mcp_server.preview_channel",
+            lambda *a, **kw: (_ for _ in ()).throw(AlchemyError(f"boom {secret} {mcp_secret}", hint="retry")),
+        )
+        server = build_mcp_server()
+        with pytest.raises(ToolError) as err:
+            await server.call_tool("alchemy_preview", {"source": "@x"})
+        assert secret not in str(err.value) and mcp_secret not in str(err.value) and "***" in str(err.value)
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_mcp_server_guards_youtube_urls_and_loopback_http(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_server_guards_youtube_urls_and_loopback_http(monkeypatch: pytest.MonkeyPatch) -> None:
     from mcp.server.mcpserver.exceptions import ToolError
 
     from notebook_alchemy.errors import ConfigError
 
-    server = build_mcp_server()
-    for bad_source in ("http://127.0.0.1:8080/secret", "file:///etc/passwd", "not a url"):
-        with pytest.raises(ToolError, match="only accept YouTube"):
-            await server.call_tool("alchemy_preview", {"source": bad_source})
-        with pytest.raises(ToolError, match="only accept YouTube"):
-            await server.call_tool("alchemy_run", {"source": bad_source})
+    async def _run() -> None:
+        server = build_mcp_server()
+        for bad_source in ("http://127.0.0.1:8080/secret", "file:///etc/passwd", "not a url"):
+            with pytest.raises(ToolError, match="only accept YouTube"):
+                await server.call_tool("alchemy_preview", {"source": bad_source})
+            with pytest.raises(ToolError, match="only accept YouTube"):
+                await server.call_tool("alchemy_run", {"source": bad_source})
 
-    monkeypatch.delenv("ALCHEMY_MCP_TOKEN", raising=False)
-    with pytest.raises(ConfigError, match="non-loopback host"):
-        serve(transport="streamable-http", host="0.0.0.0", token="secret-token")  # noqa: S104
-    with pytest.raises(ConfigError, match="requires an access token"):
-        serve(transport="streamable-http", host="127.0.0.1", token="")
+        monkeypatch.delenv("ALCHEMY_MCP_TOKEN", raising=False)
+        with pytest.raises(ConfigError, match="non-loopback host"):
+            serve(transport="streamable-http", host="0.0.0.0", token="secret-token")  # noqa: S104
+        with pytest.raises(ConfigError, match="requires an access token"):
+            serve(transport="streamable-http", host="127.0.0.1", token="")
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_mcp_client_session_memory_stream_roundtrip() -> None:
+def test_mcp_client_session_memory_stream_roundtrip() -> None:
     import anyio
     from mcp.client.session import ClientSession
     from mcp.shared.memory import create_client_server_memory_streams
 
-    server = build_mcp_server()
-    lowlevel = server._lowlevel_server
-    async with create_client_server_memory_streams() as (client_streams, server_streams):
-        c_read, c_write = client_streams
-        s_read, s_write = server_streams
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(lowlevel.run, s_read, s_write, lowlevel.create_initialization_options())
-            async with ClientSession(c_read, c_write) as client:
-                await client.initialize()
-                tools = await client.list_tools()
-                assert "alchemy_preview" in {t.name for t in tools.tools}
-                call_res = await client.call_tool("alchemy_preview", {"source": "sample", "mock": True})
-                assert not call_res.is_error
-                assert call_res.structured_content and call_res.structured_content["is_mock"] is True
-                tg.cancel_scope.cancel()
+    async def _run() -> None:
+        server = build_mcp_server()
+        lowlevel = server._lowlevel_server
+        async with create_client_server_memory_streams() as (client_streams, server_streams):
+            c_read, c_write = client_streams
+            s_read, s_write = server_streams
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(lowlevel.run, s_read, s_write, lowlevel.create_initialization_options())
+                async with ClientSession(c_read, c_write) as client:
+                    await client.initialize()
+                    tools = await client.list_tools()
+                    assert "alchemy_preview" in {t.name for t in tools.tools}
+                    call_res = await client.call_tool("alchemy_preview", {"source": "sample", "mock": True})
+                    assert not call_res.is_error
+                    assert call_res.structured_content and call_res.structured_content["is_mock"] is True
+                    tg.cancel_scope.cancel()
+
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_mcp_bearer_verifier_and_streamable_http_roundtrip(
+def test_mcp_bearer_verifier_and_streamable_http_roundtrip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import httpx
 
     from notebook_alchemy.client import AccountIdentity, NotebookLMClient
 
-    monkeypatch.setattr(
-        NotebookLMClient, "upload_account", lambda self: AccountIdentity("default", "u@example.test")
-    )
-    verifier = StaticBearerVerifier("secret-token-123", f"http://127.0.0.1:8765{DEFAULT_HTTP_PATH}")
-    assert await verifier.verify_token("wrong") is None
-    tok = await verifier.verify_token("secret-token-123")
-    assert tok is not None and tok.client_id == "notebook-alchemy-client"
+    async def _run() -> None:
+        monkeypatch.setattr(
+            NotebookLMClient, "upload_account", lambda self: AccountIdentity("default", "u@example.test")
+        )
+        verifier = StaticBearerVerifier("secret-token-123", f"http://127.0.0.1:8765{DEFAULT_HTTP_PATH}")
+        assert await verifier.verify_token("wrong") is None
+        tok = await verifier.verify_token("secret-token-123")
+        assert tok is not None and tok.client_id == "notebook-alchemy-client"
 
-    server = build_mcp_server(bearer_token="secret-token-123")
-    app = server.streamable_http_app(streamable_http_path=DEFAULT_HTTP_PATH, json_response=True)
-    assert any(getattr(r, "path", "") == DEFAULT_HTTP_PATH for r in app.routes)
-    headers_ok = {
-        "Authorization": "Bearer secret-token-123",
-        "Accept": "application/json, text/event-stream",
-    }
-    async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765"
-        ) as http:
-            unauth = await http.post(
-                DEFAULT_HTTP_PATH, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
-            )
-            assert unauth.status_code == 401
-            bad = await http.post(
-                DEFAULT_HTTP_PATH,
-                headers={"Authorization": "Bearer wrong-token"},
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-            )
-            assert bad.status_code == 401
+        server = build_mcp_server(bearer_token="secret-token-123")
+        app = server.streamable_http_app(streamable_http_path=DEFAULT_HTTP_PATH, json_response=True)
+        assert any(getattr(r, "path", "") == DEFAULT_HTTP_PATH for r in app.routes)
+        headers_ok = {
+            "Authorization": "Bearer secret-token-123",
+            "Accept": "application/json, text/event-stream",
+        }
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8765"
+            ) as http:
+                unauth = await http.post(
+                    DEFAULT_HTTP_PATH, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+                )
+                assert unauth.status_code == 401
+                bad = await http.post(
+                    DEFAULT_HTTP_PATH,
+                    headers={"Authorization": "Bearer wrong-token"},
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                )
+                assert bad.status_code == 401
 
-            init = await http.post(
-                DEFAULT_HTTP_PATH,
-                headers=headers_ok,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2025-03-26",
-                        "capabilities": {},
-                        "clientInfo": {"name": "test", "version": "1.0"},
+                init = await http.post(
+                    DEFAULT_HTTP_PATH,
+                    headers=headers_ok,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-03-26",
+                            "capabilities": {},
+                            "clientInfo": {"name": "test", "version": "1.0"},
+                        },
                     },
-                },
-            )
-            assert init.status_code == 200
-            session_id = init.headers["mcp-session-id"]
-            session_headers = {**headers_ok, "mcp-session-id": session_id}
+                )
+                assert init.status_code == 200
+                session_id = init.headers["mcp-session-id"]
+                session_headers = {**headers_ok, "mcp-session-id": session_id}
 
-            notif = await http.post(
-                DEFAULT_HTTP_PATH,
-                headers=session_headers,
-                json={"jsonrpc": "2.0", "method": "notifications/initialized"},
-            )
-            assert notif.status_code == 202
+                notif = await http.post(
+                    DEFAULT_HTTP_PATH,
+                    headers=session_headers,
+                    json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+                )
+                assert notif.status_code == 202
 
-            call = await http.post(
-                DEFAULT_HTTP_PATH,
-                headers=session_headers,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {"name": "alchemy_status", "arguments": {"check_live": False}},
-                },
-            )
-            assert call.status_code == 200
-            payload = call.json()
-            assert payload["result"]["structuredContent"]["notebooklm_profile"] == "default"
+                call = await http.post(
+                    DEFAULT_HTTP_PATH,
+                    headers=session_headers,
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {"name": "alchemy_status", "arguments": {"check_live": False}},
+                    },
+                )
+                assert call.status_code == 200
+                payload = call.json()
+                assert payload["result"]["structuredContent"]["notebooklm_profile"] == "default"
+
+    asyncio.run(_run())
 
 
 # --- mcp_install.py -------------------------------------------------------------------------------
