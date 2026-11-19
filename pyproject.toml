@@ -28,6 +28,10 @@ classifiers = [
 dependencies = [
     # The official Claude SDK: labelling and sorting. 2.8 is the version this was built and tested with.
     "anthropic>=2.8,<3",
+    # Official Google GenAI SDK: 2026 Interactions API (--watch fallback for blocked YouTube videos).
+    "google-genai>=3.2.0,<4",
+    # Official Python MCP SDK: dual-transport (stdio + Streamable HTTP) desktop LLM connector.
+    "mcp>=2.0,<3",
     "click>=8.1.0",
     "rich>=13.0.0",
     # YouTube changes often; recent yt-dlp releases carry the fixes. [default] adds the JavaScript
@@ -38,6 +42,8 @@ dependencies = [
     # Only the `browser` extra (the sign-in window). The `cookies` extra installs rookie-cookies, which
     # reads every browser's saved sign-ins and which antivirus flags; nothing here needs it (#55).
     "notebooklm-py[browser]>=0.8.6,<0.9",
+    # Minimum bound avoids known CVE-2026-112940 family in filelock 3.x pulled transitively.
+    "filelock>=4.2.1,<5",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +55,7 @@ dev = [
 
 [project.scripts]
 notebook-alchemy = "notebook_alchemy.cli:main"
+notebook-alchemy-mcp = "notebook_alchemy.mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/gagexhill/notebook-alchemy"
@@ -83,3 +90,4 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+asyncio_default_fixture_loop_scope = "function"

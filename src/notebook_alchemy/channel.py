@@ -499,6 +499,7 @@ class TranscriptManager:
         block_pause: float = 180.0,
         clock: Callable[[], float] = time.monotonic,
         rand: Callable[[float, float], float] = random.uniform,
+        include_model_written: bool = False,
     ) -> None:
         self.cache_dir = cache_dir or (Path.home() / ".notebook-alchemy" / "cache")
         self.transcripts_dir = transcripts_dir
@@ -512,6 +513,7 @@ class TranscriptManager:
         # side), used for videos the per-video routes could not read.
         self.bulk = bulk
         self.block_pause = block_pause
+        self.include_model_written = include_model_written
         self.notices: list[str] = []  # route problems to tell the user once
         self._pacer = _Pacer(spacing, sleep, clock, rand)
         # Per route: the clock time until which it is paused after a block (0 = open).
@@ -578,7 +580,9 @@ class TranscriptManager:
 
     # -- cache --
 
-    def _read_cache(self, video_id: str) -> TranscriptResult | None:
+    def _read_cache(
+        self, video_id: str, *, include_model_written: bool | None = None
+    ) -> TranscriptResult | None:
         path = self._cache_path(video_id)
         if path is None or not path.is_file():
             return None
@@ -588,7 +592,8 @@ class TranscriptManager:
             logger.warning("Ignoring unreadable transcript cache %s: %s", path, exc)
             return None
         text = str(data.get("full_text", "")).strip()
-        if text and data.get("method") == MODEL_WRITTEN:
+        allow_model = self.include_model_written if include_model_written is None else include_model_written
+        if text and data.get("method") == MODEL_WRITTEN and not allow_model:
             return None
         if text:
             return TranscriptResult(

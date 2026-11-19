@@ -62,6 +62,13 @@ def configure(*, quiet: bool = False, no_color: bool = False, debug: bool = Fals
         err_console = Console(stderr=True, highlight=False, no_color=True)
 
 
+def route_to_stderr() -> None:
+    """Keep stdout clean for structured protocols (MCP stdio) by routing Rich output to stderr."""
+    global console
+    UiState.quiet = True
+    console = Console(stderr=True, highlight=False, no_color=True)
+
+
 def info(message: str) -> None:
     if not UiState.quiet:
         console.print(message)

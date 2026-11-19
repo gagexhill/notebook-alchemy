@@ -793,7 +793,16 @@ def test_closing_frees_a_request_that_will_not_stop(tmp_path: Path, monkeypatch:
 def test_ctrl_c_while_waiting_tells_the_request_to_stop(tmp_path: Path) -> None:
     from notebook_alchemy import client as client_module
 
+    started = threading.Event()
     fake = FakeNotebookLM(delay={"list": 30})
+    real_pause = fake.pause
+
+    async def tracked_pause(verb: str) -> None:
+        if verb == "list":
+            started.set()
+        await real_pause(verb)
+
+    fake.pause = tracked_pause  # type: ignore[method-assign]
     session = client_module._Session(lambda: fake("work", None))
 
     async def ask(library: SimpleNamespace) -> int:
@@ -802,10 +811,9 @@ def test_ctrl_c_while_waiting_tells_the_request_to_stop(tmp_path: Path) -> None:
     class Interrupted(client_module._Pending):
         def __init__(self) -> None:
             super().__init__()
-            real_wait = self.done.wait
 
             def wait(timeout: float | None = None) -> bool:
-                real_wait(0.2)  # the request is under way
+                assert started.wait(5)  # wait until the request is actively under way on the loop
                 raise KeyboardInterrupt
 
             self.done.wait = wait  # type: ignore[method-assign]

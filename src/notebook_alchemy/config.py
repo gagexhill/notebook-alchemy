@@ -16,8 +16,11 @@ logger = logging.getLogger(__name__)
 # Default model: Claude Haiku 5.5, which matched careful labels best of the models measured on this
 # task (DEVLOG 0.3.0) and is the lowest-cost Claude model. ALCHEMY_MODEL chooses another.
 DEFAULT_MODEL = "claude-haiku-5-5"
-# Where a Claude API key is made.
+# Default Gemini model for opt-in `--watch` fallback on uncaptioned/blocked YouTube videos.
+DEFAULT_GEMINI_MODEL = "gemini-4-hydrogen"
+# Where a Claude API key is made, and where a Gemini API key is made.
 KEY_URL = "https://platform.claude.com/settings/keys"
+GEMINI_KEY_URL = "https://aistudio.google.com/app/api-keys"
 DEFAULT_NOTEBOOKLM_PROFILE = "default"
 # notebooklm-py 0.8.6 accepts ^[a-zA-Z0-9][a-zA-Z0-9_-]*$; the name is also a folder, so Windows
 # device names are refused too.
@@ -51,17 +54,54 @@ def is_usable_api_key(key: str | None) -> bool:
 
 # The only names a .env may set. Anything else (ANTHROPIC_BASE_URL, NOTEBOOKLM_*, PATH) would change
 # where the key is sent or how the tools this one starts behave, so it is ignored. GEMINI_API_KEY is
-# read only to tell an old setup apart from one with no key at all.
+# used only by opt-in `--watch` fallback when captions and NotebookLM transcripts both fail.
 DOTENV_NAMES = ("ANTHROPIC_API_KEY", "GEMINI_API_KEY")
 DOTENV_PREFIX = "ALCHEMY_"
 
 
-def _load_dotenv_simple(env_path: Path | None = None) -> None:
-    """Load this tool's KEY=VALUE pairs from a .env file into os.environ, without overriding real
-    variables. Names that are not this tool's are ignored, and said so in the log."""
-    path = env_path or Path(".env")
-    if not path.is_file():
-        return
+def global_env_path() -> Path:
+    """Canonical user-wide .env file so desktop MCP hosts and CLI shortcuts share settings."""
+    return Path.home() / ".notebook-alchemy" / ".env"
+
+
+def resolve_env_paths() -> list[Path]:
+    """Existing .env files in priority order (explicit env file, cwd .env, then user-wide .env)."""
+    candidates: list[Path] = []
+    explicit = os.getenv("ALCHEMY_ENV_FILE", "").strip()
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    candidates.append(Path(".env"))
+    candidates.append(global_env_path())
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        if resolved not in seen:
+            seen.add(resolved)
+            found.append(candidate)
+    return found
+
+
+def default_write_env_path(*, local: bool = False) -> Path:
+    """Where `setup` and `guided` save settings: cwd .env when --local or already present, else
+    ALCHEMY_ENV_FILE, else ~/.notebook-alchemy/.env so MCP servers find it from any cwd."""
+    if local:
+        return Path(".env")
+    explicit = os.getenv("ALCHEMY_ENV_FILE", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    cwd_env = Path(".env")
+    if cwd_env.is_file():
+        return cwd_env
+    return global_env_path()
+
+
+def _load_dotenv_file(path: Path) -> None:
     try:
         lines = path.read_text(encoding="utf-8-sig").splitlines()  # -sig: tolerate a BOM
     except (OSError, UnicodeDecodeError) as exc:
@@ -80,7 +120,9 @@ def _load_dotenv_simple(env_path: Path | None = None) -> None:
             continue
         if key not in DOTENV_NAMES and not key.startswith(DOTENV_PREFIX):
             logger.warning(
-                "Ignoring %s in %s: only ANTHROPIC_API_KEY and ALCHEMY_* settings are read.", key, path
+                "Ignoring %s in %s: only ANTHROPIC_API_KEY, GEMINI_API_KEY and ALCHEMY_* settings are read.",
+                key,
+                path,
             )
             continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
@@ -88,6 +130,20 @@ def _load_dotenv_simple(env_path: Path | None = None) -> None:
         elif " #" in value:
             value = value.split(" #", 1)[0].rstrip()
         os.environ[key] = value
+
+
+def _load_dotenv_simple(env_path: Path | None = None) -> None:
+    """Load this tool's KEY=VALUE pairs from .env into os.environ without overriding real variables.
+
+    When `env_path` is None, checks ALCHEMY_ENV_FILE, cwd `.env`, and `~/.notebook-alchemy/.env`
+    in order so earlier files win per key and desktop MCP servers work from any working directory.
+    """
+    if env_path is not None:
+        if env_path.is_file():
+            _load_dotenv_file(env_path)
+        return
+    for path in resolve_env_paths():
+        _load_dotenv_file(path)
 
 
 def validate_profile_name(name: str, *, source: str = "ALCHEMY_NOTEBOOKLM_PROFILE") -> str:
@@ -187,6 +243,9 @@ class AlchemyConfig:
     cache_dir: Path = field(default_factory=lambda: Path.home() / ".notebook-alchemy" / "cache")
     api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
     model: str = DEFAULT_MODEL
+    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
+    gemini_model: str = DEFAULT_GEMINI_MODEL
+    mcp_token: str = field(default_factory=lambda: os.getenv("ALCHEMY_MCP_TOKEN", ""))
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY
     notebooklm_profile: str = DEFAULT_NOTEBOOKLM_PROFILE
     caption_languages: tuple[str, ...] = ("en", "en-US", "en-GB")
@@ -197,9 +256,13 @@ class AlchemyConfig:
     def has_api_key(self) -> bool:
         return is_usable_api_key(self.api_key)
 
+    @property
+    def has_gemini_key(self) -> bool:
+        return is_usable_api_key(self.gemini_api_key)
+
     @classmethod
     def from_env(cls) -> AlchemyConfig:
-        """Create configuration from environment variables and a local .env."""
+        """Create configuration from environment variables and .env files."""
         _load_dotenv_simple()
 
         level = os.getenv("ALCHEMY_LOG_LEVEL", "INFO").strip().upper() or "INFO"
@@ -219,6 +282,9 @@ class AlchemyConfig:
             cache_dir=_path("ALCHEMY_CACHE_DIR", Path.home() / ".notebook-alchemy" / "cache"),  # type: ignore[arg-type]
             api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             model=os.getenv("ALCHEMY_MODEL", "").strip() or DEFAULT_MODEL,
+            gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+            gemini_model=os.getenv("ALCHEMY_GEMINI_MODEL", "").strip() or DEFAULT_GEMINI_MODEL,
+            mcp_token=os.getenv("ALCHEMY_MCP_TOKEN", "").strip(),
             max_concurrency=_int_env(
                 "ALCHEMY_MAX_CONCURRENCY",
                 DEFAULT_MAX_CONCURRENCY,

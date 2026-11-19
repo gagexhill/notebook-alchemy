@@ -48,6 +48,24 @@ class ClaudeError(AlchemyError):
         self.unusable = unusable
 
 
+class GeminiError(AlchemyError):
+    """A Gemini Interactions API call failed (`--watch` fallback). Never contains the key."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        status: int | None = None,
+        detail: str | None = None,
+        stop_run: bool = False,
+    ) -> None:
+        super().__init__(message, hint=hint)
+        self.status = status
+        self.detail = detail or message
+        self.stop_run = stop_run
+
+
 class NotebookLMError(AlchemyError):
     """NotebookLM, or the notebooklm library or command, failed, timed out or answered unusably.
 
@@ -67,7 +85,3 @@ class SyncError(NotebookLMError):
     def __init__(self, message: str, *, failed: list[str], hint: str | None = None) -> None:
         super().__init__(message, hint=hint)
         self.failed = failed
-
-
-class VaultError(AlchemyError):
-    """The local vault could not be read or written."""

@@ -11,7 +11,6 @@ import contextlib
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -24,7 +23,7 @@ from typing import Any
 import click
 from rich.table import Table
 
-from . import __version__, ui
+from . import __version__, mcp_install, mcp_server, service, ui
 from .channel import CHANNEL_TABS, DEFAULT_TABS
 from .claude import price_for
 from .client import (
@@ -38,10 +37,13 @@ from .client import (
 )
 from .config import (
     COOKIE_BROWSERS,
+    GEMINI_KEY_URL,
     KEY_URL,
     LOG_LEVELS,
     AlchemyConfig,
+    default_write_env_path,
     is_usable_api_key,
+    resolve_env_paths,
     update_dotenv,
     validate_profile_name,
 )
@@ -50,6 +52,7 @@ from .errors import AlchemyError, ConfigError, NotebookLMError, SessionError
 from .keepalive import INTERVAL_MINUTES, KeepAlive, KeepAliveState
 from .state import count_existing, export_state, import_state
 from .ui import esc, handle_errors
+from .watch import price_for as gemini_price_for
 from .writer import OVERVIEW_TITLE
 
 MOCK_NOTE = "This is sample data for trying the tool. It is never uploaded to NotebookLM."
@@ -277,10 +280,19 @@ def _same_account_as_confirmed(engine: AlchemyEngine, confirmed: AccountIdentity
 
 def _show_ai_cost(engine: AlchemyEngine) -> None:
     """What the AI actually used, as the API reported it, priced at the listed rates."""
-    rows = engine.ai.usage() if engine.ai else []
+    rows = list(engine.ai.usage()) if engine.ai else []
+    if engine.watcher and (wrow := engine.watcher.usage()):
+        rows.append(wrow)
     if not rows:
         return
-    _warn_unlisted_price(engine.config.model)
+    if engine.ai and engine.ai.usage():
+        _warn_unlisted_price(engine.config.model)
+    if (
+        engine.watcher
+        and engine.watcher.usage()
+        and (wnote := gemini_price_for(engine.config.gemini_model)[2])
+    ):
+        ui.warn(wnote)
     ui.info(f"  AI cost: {_money(sum(cost for *_rest, cost in rows))}")
     for model, tokens_in, tokens_out, cost in rows:
         ui.detail(f"  {esc(model)}: {tokens_in:,} input and {tokens_out:,} output tokens (${cost:.4f})")
@@ -460,12 +472,10 @@ def cli(ctx: click.Context, quiet: bool, verbose: int, no_color: bool, debug: bo
 )
 @click.option(
     "--watch",
-    hidden=True,
-    expose_value=False,
-    callback=_removed(
-        "--watch was removed: Claude cannot watch a video, so a video no route can read stays listed as "
-        "unread in the overview, and the next run tries it again."
-    ),
+    "watch_limit",
+    type=click.IntRange(min=0),
+    default=0,
+    help="Watch up to N blocked videos with Gemini (needs GEMINI_API_KEY).",
 )
 @click.option(
     "-n",
@@ -511,6 +521,7 @@ def run_pipeline(
     cookies_browser: str | None,
     yes: bool,
     allow_fewer: bool,
+    watch_limit: int,
     profile: str | None,
 ) -> None:
     """Build topic books from a YouTube channel, playlist or video, and upload them to NotebookLM."""
@@ -523,10 +534,10 @@ def run_pipeline(
         # A key from before the move to Claude: building without AI would replace a sorted notebook's
         # books with unsorted ones, so stop instead of guessing.
         raise ConfigError(
-            "GEMINI_API_KEY is set, but Notebook Alchemy now uses Claude, and ANTHROPIC_API_KEY is not set. "
-            "Nothing was read or uploaded.",
+            "GEMINI_API_KEY is set (used for --watch), but Notebook Alchemy uses Claude for topic "
+            "sorting and ANTHROPIC_API_KEY is not set. Nothing was read or uploaded.",
             hint="Add a Claude API key with `notebook-alchemy setup`, or add --offline to build the books "
-            "without AI.",
+            "without AI sorting.",
         )
     upload = save_dir is None and not mock  # sample data is never uploaded
     if not upload and not mock and engine.client.is_authenticated():
@@ -559,6 +570,7 @@ def run_pipeline(
             offline=offline,
             resort=resort,
             use_batch=not now,
+            watch_limit=watch_limit,
             progress=reporter,
         )
     _show_build(report, engine)
@@ -687,9 +699,18 @@ def _show_sync_result(name: str, synced) -> None:
 @tabs_option
 @click.option("--mock", is_flag=True, help="Use the bundled sample catalog instead of a real channel.")
 @click.option("--now", is_flag=True, help="Price standard calls instead of the half-price batch.")
+@click.option(
+    "--watch",
+    "watch_limit",
+    type=click.IntRange(min=0),
+    default=0,
+    help="Estimate watching up to N videos with Gemini if captions are blocked.",
+)
 @verbose_option
 @handle_errors
-def dry_run(source: str | None, limit: int | None, tabs: tuple[str, ...], mock: bool, now: bool) -> None:
+def dry_run(
+    source: str | None, limit: int | None, tabs: tuple[str, ...], mock: bool, now: bool, watch_limit: int
+) -> None:
     """Preview the videos, the words already read, and the cost. Spends nothing, uploads nothing."""
     target = _source_or_mock(source, mock)
     engine = _engine()
@@ -697,9 +718,15 @@ def dry_run(source: str | None, limit: int | None, tabs: tuple[str, ...], mock: 
     channel, videos = engine.scan(target, limit=limit, tabs=tabs, mock=mock)
     if mock:
         ui.warn(MOCK_NOTE, always=True)
-    est = engine.estimate(videos, mock=mock, batch=not now)
+    est = engine.estimate(videos, mock=mock, batch=not now, watch_limit=watch_limit)
     if engine.config.has_api_key and not mock:
         _warn_unlisted_price(est.model)
+    if (
+        watch_limit > 0
+        and not mock
+        and (wnote := gemini_price_for(est.gemini_model or engine.config.gemini_model)[2])
+    ):
+        ui.warn(wnote)
     console = ui.console
     console.print(f"\n[bold]{esc(channel)}[/bold]")
     console.print(f"  {_plural(est.videos, 'video')}; words already read for {est.videos_known}")
@@ -717,6 +744,11 @@ def dry_run(source: str | None, limit: int | None, tabs: tuple[str, ...], mock: 
         console.print("  Cost: free without AI (every video's words, sorted by title words)")
         if not mock:
             ui.warn(NO_KEY_WARNING)
+    if watch_limit > 0 and not mock:
+        console.print(
+            f"  Estimated Gemini --watch cost: {_money(est.watch_cost_usd)} for up to "
+            f"{_plural(est.watch_videos, 'video')} (model {esc(est.gemini_model)})"
+        )
     if not mock:
         ui.next_command("build the books and upload them", f"notebook-alchemy run {target}")
 
@@ -777,6 +809,8 @@ def status(profile: str | None) -> None:
         )
 
     if ui.UiState.verbose:
+        has_gemini = facts["gemini_api_key"] == "set"
+        env_paths = ", ".join(str(p) for p in resolve_env_paths()) or "none"
         table = Table(title="\nSettings", header_style="bold magenta", title_justify="left")
         table.add_column("", width=1)
         table.add_column("Setting", style="bold")
@@ -787,7 +821,10 @@ def status(profile: str | None) -> None:
             (has_session, "Sign-in file", esc(facts["session_file"])),
             (bool(identity.email) if has_session else None, "Upload account", _who(identity)),
             (has_key, "Claude API key", esc(facts["api_key"])),
-            (None, "Model", esc(facts["model"])),
+            (None, "Claude model", esc(facts["model"])),
+            (True if has_gemini else None, "Gemini --watch key", esc(facts["gemini_api_key"])),
+            (None, "Gemini model", esc(facts["gemini_model"])),
+            (None, "Settings (.env)", esc(env_paths)),
             (None, "Working files", esc(facts["cache_dir"])),
             (None, "Parallel downloads", esc(facts["max_concurrency"])),
             (None, "Environment", esc(facts["environment"])),
@@ -1149,7 +1186,8 @@ def guided(ctx: click.Context) -> None:
             click.launch(KEY_URL)
             entered = _prompt_for_key()
             if entered:
-                update_dotenv({"ANTHROPIC_API_KEY": entered}, Path(".env"))
+                target_env = default_write_env_path()
+                update_dotenv({"ANTHROPIC_API_KEY": entered}, target_env)
                 os.environ["ANTHROPIC_API_KEY"] = entered  # this process; .env keeps it for next time
                 config = _config()
                 ui.success("Key saved. AI sorting is on.")
@@ -1180,15 +1218,27 @@ def guided(ctx: click.Context) -> None:
         "\b\nRun it again any time to change the key or the account.\nExample:\n  notebook-alchemy setup\n"
     ),
 )
+@click.option(
+    "--local",
+    "local_env",
+    is_flag=True,
+    help="Save settings to ./.env in this folder instead of ~/.notebook-alchemy/.env.",
+)
+@click.option(
+    "--gemini-key",
+    "gemini_key",
+    default=None,
+    help="Optional GEMINI_API_KEY to save for --watch fallback on blocked videos.",
+)
 @verbose_option
 @handle_errors
-def setup() -> None:
+def setup(local_env: bool, gemini_key: str | None) -> None:
     """Guided setup: Claude API key and the Google account to upload to."""
     if not _interactive():
         raise click.UsageError("setup asks questions, so run it in a terminal.")
-    env_file = Path(".env")  # the file AlchemyConfig.from_env reads
+    env_file = default_write_env_path(local=local_env)  # the file AlchemyConfig.from_env reads
     # Read before .env is loaded: a value already in the process environment wins over .env.
-    from_process = {name for name in SETUP_KEYS if os.getenv(name)}
+    from_process = {name for name in (*SETUP_KEYS, "GEMINI_API_KEY") if os.getenv(name)}
     try:
         config = _config()
     except ConfigError as exc:
@@ -1207,6 +1257,17 @@ def setup() -> None:
                 f"{name} is also set in your environment, and that value wins over .env. "
                 "Remove it from the environment to use what you entered here."
             )
+
+    if gemini_key is not None:
+        cleaned_gemini = gemini_key.strip()
+        if not is_usable_api_key(cleaned_gemini):
+            raise ConfigError(
+                "That does not look like a Gemini API key.",
+                hint=f"Paste a valid key from {GEMINI_KEY_URL}.",
+            )
+        save("GEMINI_API_KEY", cleaned_gemini)
+        os.environ["GEMINI_API_KEY"] = cleaned_gemini
+        ui.success("Gemini --watch key saved.")
 
     ui.step(1, 2, "AI sorting (optional)")
     ui.info(
@@ -1369,48 +1430,15 @@ def import_state_command(file: Path, replace: bool, yes: bool) -> None:
 
 
 def _json(path: Path) -> object:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    return service._read_json(path)
 
 
-def _is_sync_record(path: Path) -> bool:
-    """A record this tool wrote after an upload: a JSON object whose `titles` is a list of strings."""
-    data = _json(path)
-    titles = data.get("titles") if isinstance(data, dict) else None
-    return isinstance(titles, list) and all(isinstance(t, str) for t in titles)
-
-
-def _is_cache_record(path: Path) -> bool:
-    """True for a caption cache file this tool wrote (JSON object with a video_id)."""
-    data = _json(path)
-    return isinstance(data, dict) and "video_id" in data
-
-
-def _is_library_cache(path: Path) -> bool:
-    """The sorting answers this tool keeps per channel: keys are hashes or map:/placed:/sub: names."""
-    data = _json(path)
-    return isinstance(data, dict) and all(
-        k == "parts" or k.startswith(("map:", "placed:", "sub:")) or re.fullmatch(r"[0-9a-f]{32}", k)
-        for k in data
-    )
-
-
-def _is_batch_state(path: Path) -> bool:
-    """A labelling batch's state: only the keys this tool writes there."""
-    data = _json(path)
-    return isinstance(data, dict) and set(data) <= {"job", "keys", "model", "answers"}
-
-
-def _is_string_map(path: Path) -> bool:
-    data = _json(path)
-    return isinstance(data, dict) and all(isinstance(v, str) for v in data.values())
-
-
-def _is_label_record(path: Path) -> bool:
-    data = _json(path)
-    return isinstance(data, dict) and "segments" in data and "key" in data
+_is_sync_record = service.is_sync_record
+_is_cache_record = service.is_cache_record
+_is_library_cache = service.is_library_cache
+_is_batch_state = service.is_batch_state
+_is_string_map = service.is_string_map
+_is_label_record = service.is_label_record
 
 
 def _legacy_vaults() -> list[Path]:
@@ -1655,6 +1683,151 @@ def run_automated_test() -> None:
             "[bold]Next:[/bold] Run `notebook-alchemy --debug test` and include the output in a bug report."
         )
         sys.exit(1)
+
+
+@cli.group(
+    name="mcp",
+    cls=OrderedGroup,
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy mcp install all     configure Claude, Antigravity & Codex\n"
+        "  notebook-alchemy mcp serve           run the stdio MCP server\n"
+        "  notebook-alchemy mcp status          show desktop connector status\n"
+    ),
+)
+def mcp_group() -> None:
+    """Connect Notebook Alchemy to Claude Desktop, ChatGPT, and Antigravity."""
+
+
+@mcp_group.command(
+    name="serve",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy mcp serve\n"
+        "  notebook-alchemy mcp serve --transport streamable-http --port 8765\n"
+    ),
+)
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "streamable-http"]),
+    default="stdio",
+    show_default=True,
+    help="MCP transport: stdio (local) or streamable-http (loopback).",
+)
+@click.option(
+    "--host",
+    default=mcp_server.DEFAULT_HTTP_HOST,
+    show_default=True,
+    help="Loopback bind address for streamable-http.",
+)
+@click.option(
+    "--port",
+    type=click.IntRange(min=1, max=65535),
+    default=mcp_server.DEFAULT_HTTP_PORT,
+    show_default=True,
+    help="Port for streamable-http.",
+)
+@click.option(
+    "--path",
+    "http_path",
+    default=mcp_server.DEFAULT_HTTP_PATH,
+    show_default=True,
+    help="HTTP endpoint path for streamable-http.",
+)
+@click.option(
+    "--token",
+    default=None,
+    help="Bearer token for streamable-http (or set ALCHEMY_MCP_TOKEN).",
+)
+@verbose_option
+@handle_errors
+def mcp_serve_cmd(
+    transport: str,
+    host: str,
+    port: int,
+    http_path: str,
+    token: str | None,
+) -> None:
+    """Start the Notebook Alchemy MCP connector."""
+    mcp_server.serve(
+        transport=transport,  # type: ignore[arg-type]
+        host=host,
+        port=port,
+        path=http_path,
+        token=token,
+    )
+
+
+@mcp_group.command(
+    name="install",
+    epilog=(
+        "\b\nExamples:\n"
+        "  notebook-alchemy mcp install all --dry-run\n"
+        "  notebook-alchemy mcp install claude-desktop\n"
+        "  notebook-alchemy mcp install antigravity\n"
+        "  notebook-alchemy mcp install chatgpt-codex\n"
+    ),
+)
+@click.argument("client", type=click.Choice(mcp_install.SUPPORTED_INSTALL_TARGETS))
+@click.option(
+    "--config-path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Override the target config file path (single client only).",
+)
+@click.option("--dry-run", is_flag=True, help="Preview changes without writing files.")
+@verbose_option
+@handle_errors
+def mcp_install_cmd(client: str, config_path: Path | None, dry_run: bool) -> None:
+    """Register Notebook Alchemy as an MCP connector for desktop LLMs."""
+    targets = mcp_install.DESKTOP_ALL_CLIENTS if client == "all" else (client,)
+    if config_path is not None and len(targets) > 1:
+        raise click.UsageError("--config-path cannot be combined with `all`.")
+
+    for target_client in targets:
+        res = mcp_install.install_client(target_client, config_path=config_path, dry_run=dry_run)
+        verb = {"created": "Installed", "updated": "Updated", "unchanged": "Already up to date"}[
+            res["action"]
+        ]
+        prefix = "[Dry run] " if dry_run else ""
+        ui.success(f"{prefix}{verb} connector for {esc(res['display_name'])}.")
+        ui.detail(f"  Config: {esc(res['path'])}")
+    ui.info("\nRestart Claude Desktop, Antigravity, or ChatGPT Desktop (Codex / Work mode) to load it.")
+
+
+@mcp_group.command(
+    name="status",
+    epilog="\b\nExample:\n  notebook-alchemy mcp status\n",
+)
+@verbose_option
+@handle_errors
+def mcp_status_cmd() -> None:
+    """Show which desktop LLM clients have Notebook Alchemy configured."""
+    cfg = _config()
+    cmd, args = mcp_install.resolve_server_command()
+    ui.detail(f"  Server command: {esc(cmd)} {esc(' '.join(args))}")
+    for key, spec in mcp_install.MCP_CLIENTS.items():
+        path = mcp_install.resolve_client_path(key)
+        configured = False
+        if path.is_file():
+            try:
+                raw = path.read_text(encoding="utf-8-sig")
+                if spec.fmt == "json":
+                    data = json.loads(raw)
+                    configured = mcp_install.SERVER_KEY in (data.get(spec.config_key) or {})
+                else:
+                    import tomllib
+
+                    data = tomllib.loads(raw)
+                    configured = mcp_install.SERVER_KEY in (data.get(spec.config_key) or {})
+            except (OSError, ValueError):
+                configured = False
+        mark = "[green]✓[/green]" if configured else "[dim]-[/dim]"
+        state = "configured" if configured else "not configured"
+        ui.console.print(f"{mark} {esc(spec.display_name)}: {state}")
+        ui.detail(f"  {esc(path)}")
+    token_state = "set" if cfg.mcp_token else "unset"
+    ui.info(f"\nHTTP bearer token (ALCHEMY_MCP_TOKEN): {token_state}")
 
 
 def main() -> None:

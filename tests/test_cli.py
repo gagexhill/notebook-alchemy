@@ -450,7 +450,7 @@ def test_setup_rejects_a_bad_key_and_signs_in_through_a_window(
     assert len(calls) == 1 and calls[0][:4] == ["notebooklm", "--profile", "default", "login"]
     assert "--fresh" in calls[0] and "--browser-cookies" not in calls[0]
     assert "cookies" not in result.output  # reusing a browser's sign-in is no longer offered
-    text = (isolated_environment.work / ".env").read_text(encoding="utf-8")
+    text = (isolated_environment.home / ".notebook-alchemy" / ".env").read_text(encoding="utf-8")
     assert "ANTHROPIC_API_KEY" not in text and "ALCHEMY_NOTEBOOKLM_PROFILE=default" in text
 
 
@@ -1186,7 +1186,9 @@ def test_the_guided_run_can_add_a_claude_api_key(
     result = runner.invoke(cli, [], input=f"y\n{key}\nhttps://www.youtube.com/@example-channel\n")
     assert result.exit_code == 0, result.output
     assert opened == ["https://platform.claude.com/settings/keys"] and key not in result.output
-    assert f"ANTHROPIC_API_KEY={key}" in (isolated_environment.work / ".env").read_text(encoding="utf-8")
+    assert f"ANTHROPIC_API_KEY={key}" in (isolated_environment.home / ".notebook-alchemy" / ".env").read_text(
+        encoding="utf-8"
+    )
     assert runs == [
         {
             "source": "https://www.youtube.com/@example-channel",
@@ -1283,9 +1285,11 @@ def test_a_clean_window_that_still_fails_is_reported_not_retried_again(
     assert len(logins) == 2  # the first sign-in and one clean retry
 
 
-def test_watch_says_it_was_removed(runner: CliRunner) -> None:
-    result = runner.invoke(cli, ["run", "@my", "--watch", "3"])
-    assert result.exit_code == 2 and "--watch was removed" in " ".join(result.output.split())
+def test_watch_validates_limit_and_gemini_key(runner: CliRunner) -> None:
+    bad = runner.invoke(cli, ["run", "@my", "--watch", "-1"])
+    assert bad.exit_code == 2 and "x>=0" in " ".join(bad.output.split())
+    missing_key = runner.invoke(cli, ["run", "@my", "--watch", "3", "--offline", "--save", "b"])
+    assert missing_key.exit_code != 0 and "GEMINI_API_KEY" in " ".join(missing_key.output.split())
 
 
 def test_an_old_gemini_key_alone_stops_the_run_before_it_replaces_sorted_books(
@@ -1294,7 +1298,9 @@ def test_an_old_gemini_key_alone_stops_the_run_before_it_replaces_sorted_books(
     monkeypatch.setenv("GEMINI_API_KEY", "TEST-ONLY-old-gemini-key-0000")
     result = runner.invoke(cli, ["run", "@my", "--save", "b"])
     flat = " ".join(result.output.split())
-    assert result.exit_code != 0 and "now uses Claude" in flat and "notebook-alchemy setup" in flat
+    assert (
+        result.exit_code != 0 and "uses Claude for topic sorting" in flat and "notebook-alchemy setup" in flat
+    )
     assert runner.invoke(cli, ["run", "--mock", "--save", "b"]).exit_code == 0  # sample data needs no key
 
 
@@ -1486,7 +1492,7 @@ def test_every_typed_error_carries_a_next_step() -> None:
 
     family = {
         "AlchemyError", "ConfigError", "ChannelScanError", "ClaudeError",
-        "NotebookLMError", "SessionError", "SyncError", "VaultError",
+        "NotebookLMError", "SessionError", "SyncError",
     }  # fmt: skip
     source_dir = Path(cli_module.__file__).parent
     missing = []

@@ -8,12 +8,12 @@
 
 <img src="docs/brand/icon.svg" width="96" height="96" alt="Notebook Alchemy icon: three nested blue arches with a gold alchemy bottle carrying a blue plus badge under the innermost one">
 
-![Notebook Alchemy](https://img.shields.io/badge/Notebook%20Alchemy-0.3.0-5B3FD0?style=for-the-badge)
+![Notebook Alchemy](https://img.shields.io/badge/Notebook%20Alchemy-0.4.0-5B3FD0?style=for-the-badge)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![Click](https://img.shields.io/badge/Click-8.1%2B-4EAA25?style=for-the-badge)
-![Rich](https://img.shields.io/badge/Rich-13%2B-FF6F61?style=for-the-badge)
+![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-2D7D9A?style=for-the-badge)
 ![yt-dlp](https://img.shields.io/badge/yt--dlp-2026.10%2B-FF0000?style=for-the-badge&logo=youtube&logoColor=white)
 ![Claude](https://img.shields.io/badge/Claude-Haiku%205.5-D97757?style=for-the-badge&logo=claude&logoColor=white)
+![Gemini](https://img.shields.io/badge/Gemini-4%20Hydrogen%20(--watch)-4285F4?style=for-the-badge&logo=googlegemini&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
 
 **Maintainer:** [gagexhill](https://github.com/gagexhill) — open source, MIT licensed, unofficial and not affiliated with Google
@@ -41,14 +41,15 @@
 - [Getting Started](#-getting-started)
 - [File Structure](#-file-structure)
 - [Concepts & References](#-concepts--references)
+- [About the Owner](#-about-the-owner)
 
 ---
 
 ## 🌐 Project Overview
 
-**Notebook Alchemy** takes a YouTube channel, playlist or video link, reads what every video says, keeps each point once, and uploads the result to a Google NotebookLM notebook as a few topic books. Each book can hold up to NotebookLM's 500,000 words per source.
+**Notebook Alchemy** takes a YouTube channel, playlist or video link, reads what every video says, keeps each point once, and uploads the result to a Google NotebookLM notebook as a few topic books. Each book can hold up to NotebookLM's 500,000 words per source. You can drive it from the command line or connect it via automatic local `stdio` MCP to **Claude Desktop**, **ChatGPT Desktop** (Codex / Work mode), and **Antigravity**.
 
-The books hold the speakers' own words, never an AI rewrite:
+The books hold the speakers' own words, never an AI rewrite (except optional `--watch N` transcriptions, which are explicitly marked):
 - **Claude's job:** it decides which passages are worth keeping, files each one under a topic and section, puts each section in teaching order, and marks information that has gone out of date.
 - **Each passage names its source:** the video it came from and the date, so NotebookLM's answers, quizzes and Audio Overviews cite something you can check.
 - **Without a Claude API key:** the books hold every video's cleaned words, sorted by title.
@@ -109,8 +110,10 @@ link       yt-dlp   captions,  filler,   Claude,   topics,  order, dupes,    pla
 | Try it | `notebook-alchemy run --mock --save books` | Nothing | `books/` | You want to see the output before pointing it at a channel |
 | Self-test | `notebook-alchemy test` | Nothing | A temporary folder | You want to check that everything installed correctly |
 | Keep a sign-in fresh (optional) | `notebook-alchemy keep-signed-in` (`--off` to stop) | NotebookLM, every 20 minutes | A scheduled task for your user | Your computer keeps a refreshed sign-in alive (`status` shows whether it does) |
+| Watch blocked videos | `notebook-alchemy run <url> --watch 5` | YouTube, NotebookLM, Claude, Gemini (`gemini-4-hydrogen`) | One notebook | Captions are unavailable for a few videos and you want opt-in Gemini transcription (marked in `_OVERVIEW.md`) |
+| Desktop LLM connector | `notebook-alchemy mcp install all` | Local `stdio` (automatic per chat) | Client MCP config | You want Claude Desktop, ChatGPT Desktop (Codex / Work mode), or Antigravity to drive the pipeline directly |
 | Move computers | `notebook-alchemy export-state FILE`, then `import-state FILE` | Nothing | A zip, then `~/.notebook-alchemy/` | You want to carry on from another computer without paying again |
-| Set up | `notebook-alchemy setup` | `notebooklm` login, only if you sign in | `.env` | You want to set the Claude API key or the upload account; run it again to change either |
+| Set up | `notebook-alchemy setup` | `notebooklm` login, only if you sign in | `~/.notebook-alchemy/.env` | You want to save your Claude/Gemini keys or upload profile once for CLI and MCP clients |
 
 Run `run` again whenever the channel posts. Only new videos cost anything, new passages join the sections they belong to, and only the books that changed are uploaded again.
 
@@ -121,16 +124,16 @@ Run `run` again whenever the channel posts. Only new videos cost anything, new p
 | Technology | Version | Role |
 |---|---|---|
 | Python | >=3.11 | Runtime |
-| Click | >=8.1.0 | Command-line parsing, prompts, help |
-| Rich | >=13.0.0 | Tables, progress bars, colour |
-| anthropic | >=2.8, <3 | The official Claude SDK: structured answers, batches, retries |
+| Click & Rich | >=8.1 / >=13.0 | Command-line parsing, prompts, progress bars, tables |
+| anthropic | >=2.8, <3 | Official Claude SDK: structured answers, batches, retries (`claude-haiku-5-5`) |
+| google-genai | >=3.2.0, <4 | Official Google GenAI SDK (`gemini-4-hydrogen` via Interactions API for opt-in `--watch`) |
+| mcp | >=2.0, <3 | Official MCP Python SDK: dual-transport (`stdio` + `streamable-http`) connector |
 | yt-dlp[default] | >=2026.10.21 | Channel listings with dates, and subtitles; `[default]` adds the JavaScript solver YouTube requires |
 | youtube-transcript-api | >=1.2.4, <2 | Captions when no local transcript exists |
 | notebooklm-py | >=0.8.6, <0.9 | Its Python API for notebooks, uploads and reading transcripts on Google's side; its `notebooklm` command for the sign-in window |
-| Claude API | `claude-haiku-5-5` by default | Labelling passages, naming topics, sorting and ordering |
 | pytest, ruff, pip-audit | dev extras | Tests, lint and format, dependency audit |
 
-Versions are the ranges declared in `pyproject.toml`; the upper bounds keep out a next major release until it is tested. Override the model with `ALCHEMY_MODEL`; another model must accept thinking turned off, as Claude Haiku 5.5 does.
+Versions are the ranges declared in `pyproject.toml`; the upper bounds keep out a next major release until it is tested. Override models with `ALCHEMY_MODEL` or `ALCHEMY_GEMINI_MODEL`; another Claude model must accept thinking turned off at low effort, as Claude Haiku 5.5 does.
 
 ---
 
@@ -138,32 +141,36 @@ Versions are the ranges declared in `pyproject.toml`; the upper bounds keep out 
 
 ```text
 src/notebook_alchemy/
-├── cli.py          # Commands, options, prompts, exit codes
-├── ui.py           # Steps, progress bars, warnings and errors, detail behind -v, markup-safe text
-├── engine.py       # The pipeline, the NotebookLM transcript route, and the upload
+├── cli.py          # Commands, options, prompts, exit codes (incl. `mcp serve|install|status`)
+├── service.py      # Shared JSON-serializable service layer backing CLI and MCP tools
+├── mcp_server.py   # Dual-transport MCP server (`stdio` + bearer-authenticated `streamable-http`)
+├── mcp_install.py  # Atomic installers for Claude Desktop, Antigravity, ChatGPT Codex & HTTP guide
+├── ui.py           # Steps, progress bars, warnings and errors, stderr routing for MCP stdio
+├── engine.py       # The pipeline, the NotebookLM transcript route, slot-safe publish & --watch
 ├── channel.py      # YouTube scanning, dates, and every route to a video's words
+├── watch.py        # Opt-in Gemini 4 Hydrogen video transcription via Interactions API (--watch)
 ├── cleanup.py      # Local cleanup, numbered chunks, passages repeated across videos
 ├── knowledge.py    # Claude labels per video, cached; a half-price batch with a standard-call fallback
 ├── library.py      # Passages, date rules, topics and sections, consolidation, request cache
-├── writer.py       # The topic books and the overview
+├── writer.py       # The topic books and the overview (marks Gemini-transcribed videos)
 ├── offline.py      # The no-key path: every video's words, sorted by title words
 ├── state.py        # export-state / import-state: the working files, moved as a checked zip
 ├── keepalive.py    # keep-signed-in: the scheduled `notebooklm auth refresh`, per profile
 ├── claude.py       # Claude client: the official SDK, JSON-schema answers, batches, scrubbed errors, prices
 ├── client.py       # NotebookLM through notebooklm-py's Python API, with typed errors
-├── config.py       # Environment and .env settings
+├── config.py       # Environment and ~/.notebook-alchemy/.env + local .env settings
 ├── errors.py       # Typed errors that carry a next action
 └── mock_data.py    # Synthetic sample catalog and transcripts, used only with --mock
 ```
 
-`cli.py` builds an `AlchemyEngine` from `AlchemyConfig` and passes `ui.Reporter` as a progress callback. `AlchemyEngine.build` runs the pipeline:
-- `TranscriptManager` gets the words;
-- `cleanup` chunks and dedupes them;
-- `Labeler` labels them;
-- `LibraryBuilder` sorts and consolidates;
-- `render_library` writes the books.
+`cli.py` and `mcp_server.py` both call `service.py` (or `AlchemyEngine` directly in `cli.py`), with `AlchemyEngine.build` orchestrating:
+- `TranscriptManager` and optional `GeminiWatcher` (`--watch N`) to gather words;
+- `cleanup` to chunk and dedupe them;
+- `Labeler` (`claude.py`) to label them;
+- `LibraryBuilder` to sort and consolidate;
+- `render_library` to write the books.
 
-`AlchemyEngine.publish` uploads them through `NotebookLMClient`. Every failure is an `AlchemyError`; `ui.handle_errors` prints its message and next step and sets the exit code.
+`AlchemyEngine.publish` frees stale/owned unready sources first, replaces changed books in slot-safe waves, waits for processing, corrects NotebookLM-reset titles, and reads the notebook back before recording success. Every failure is an `AlchemyError`; CLI prints it via `ui.handle_errors`, and MCP tools return a scrubbed `ToolError`.
 
 ---
 
@@ -174,8 +181,9 @@ src/notebook_alchemy/
 - **Dated.** Every passage carries its video's date. Old news is left out; old rules and figures are marked "As of 2023: check the current rules"; the overview lists what was left out.
 - **Captions even when YouTube refuses.**
   - When YouTube blocks your connection, NotebookLM reads the transcripts instead.
-  - Requests are spaced so a long channel is not refused in the first place.
-  - A refused route pauses without stopping the run.
+  - Pass `--watch N` (with `GEMINI_API_KEY`) to transcribe up to `N` remaining blocked videos via Gemini 4 Hydrogen (`Interactions API`), clearly flagged in `_OVERVIEW.md`.
+  - Requests are spaced so a long channel is not refused in the first place, and a refused route pauses without stopping the run.
+- **Desktop LLM connector (MCP).** Drive previews, notebook lists, cleanups, and guarded builds from **Claude Desktop**, **ChatGPT Desktop** (Codex / Work mode), and **Antigravity** over automatic zero-port `stdio` (plus authenticated loopback `streamable-http` on `127.0.0.1` for local tooling).
 - **Cheap to run again.**
   - Captions, labels, the topics, every passage's place and every section's order are cached by what produced them.
   - A rerun with no new videos asks the AI nothing and uploads nothing, unless a new year or a passage crossing a date rule changes a section's order.
@@ -299,7 +307,7 @@ notebook-alchemy
 
 For more control, the separate commands below do the same steps one at a time.
 
-The guided setup asks for the Claude API key (hidden as you type) and the Google account to upload to, and writes them to `.env`. Run it again whenever you want to change either:
+The guided setup asks for the Claude API key (hidden as you type), optional Gemini API key (`--watch`), and Google account to upload to, and writes them to `~/.notebook-alchemy/.env` (shared across CLI runs and Desktop MCP clients; pass `--local` to write `./.env` instead). Run it again whenever you want to change any of them:
 
 ```bash
 notebook-alchemy setup
@@ -348,6 +356,35 @@ A real preview of that channel, recorded from the terminal:
 
 **Channel tabs:** a channel link reads the Videos and Live tabs; add Shorts with `--tabs videos,streams,shorts`. Playlist and video links are read as they are.
 
+### Connect to Desktop LLMs (MCP)
+
+Notebook Alchemy includes an [MCP](https://modelcontextprotocol.io) server exposing five tools (`alchemy_status`, `alchemy_preview`, `alchemy_run`, `alchemy_notebooks`, `alchemy_clean`), two read-only resources (`alchemy://status`, `alchemy://notebooks`), and the `distill_youtube_channel` prompt.
+
+Register it in **Claude Desktop**, **Antigravity**, and **ChatGPT Desktop (Codex / Work mode)** with one command (merges cleanly into each client's config file; preview with `--dry-run`). Each app launches and stops local `stdio` automatically with zero open network ports or tunnels:
+
+```bash
+notebook-alchemy mcp install all --dry-run
+notebook-alchemy mcp install all
+notebook-alchemy mcp status
+```
+
+Or install one client at a time:
+- **Claude Desktop** (`claude_desktop_config.json`, auto-detecting Windows Store/MSIX `LocalCache` or `%APPDATA%\Claude`): `notebook-alchemy mcp install claude-desktop`
+- **Antigravity** (`~/.gemini/config/mcp_config.json`): `notebook-alchemy mcp install antigravity`
+- **ChatGPT Desktop / Codex CLI** (`~/.codex/config.toml`): `notebook-alchemy mcp install chatgpt-codex`
+
+**Local HTTP debugging (`streamable-http`):** For local inspectors on the same machine, HTTP binds strictly to `127.0.0.1` with DNS-rebinding protection and requires `ALCHEMY_MCP_TOKEN` (or `--token`):
+
+```bash
+# Put ALCHEMY_MCP_TOKEN=<long-random-secret> in ~/.notebook-alchemy/.env
+notebook-alchemy mcp serve --transport streamable-http --port 8765
+```
+
+**Shared MCP safety rules:**
+- `mcp serve` routes Rich/status output strictly to `stderr` so JSON-RPC on `stdout` stays clean.
+- `alchemy_preview` and `alchemy_run` accept only YouTube URLs / `@handles` (unless `mock=True`), and never overwrite first-time NotebookLM accounts silently (`confirm_upload=True` is required for first-time uploads, and `confirm=True` for destructive cleans).
+- Any Claude/Gemini API key or `ALCHEMY_MCP_TOKEN` is scrubbed from MCP errors before reaching the client.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -364,7 +401,7 @@ Everything stays on your machine. `notebook-alchemy clean --all` removes the wor
 
 | Where | What | Removed by |
 |---|---|---|
-| `.env` in the folder you run from | Your Claude API key and profile, written by `setup` | Delete the file |
+| `~/.notebook-alchemy/.env` (or `./.env` with `--local`) | Your Claude/Gemini API keys, profile, and optional `ALCHEMY_MCP_TOKEN`, written by `setup` | Delete the file |
 | `~/.notebook-alchemy/cache/` | Downloaded words per video, and which videos had none (for a week) | `clean --cache` |
 | `~/.notebook-alchemy/knowledge/`, `library/`, `batches/` | The AI's labels, topics, placements and section orders, so reruns cost nothing, and per channel a labelling batch still running and its answers until they are stored | `clean --labels` |
 | `~/.notebook-alchemy/sync/`, `notebooks.json`, `upload_accounts.json` | What the last upload added, which notebook each channel uses, and a salted hash of the account you confirmed uploads to (not the email) | `clean --records` |
@@ -403,7 +440,7 @@ notebook-alchemy/
 ├── scripts/                # Regenerate the recordings, preview and icons; check the NotebookLM library
 ├── docs/images/            # README recordings and the social preview image
 ├── docs/brand/             # icon.svg, the generated favicons and app icons, and the concept sheet
-├── AGENTS.md               # Rules every change keeps (CLAUDE.md points here)
+├── AGENTS.md               # Rules every change keeps
 ├── DEVLOG.md               # Past design decisions and why
 ├── OPERATIONS.md           # Maintainer runbook
 ├── SECURITY.md             # Credential handling and private reporting
@@ -430,9 +467,17 @@ notebook-alchemy/
 | Read-back verification after an upload | `src/notebook_alchemy/engine.py` (`publish`) |
 | Identity read from the credential's own record, never guessed | `src/notebook_alchemy/client.py` (`upload_account`) |
 | Answers that must match a JSON schema (structured outputs) | `src/notebook_alchemy/claude.py` (`request_params`), `src/notebook_alchemy/knowledge.py` (`label_schema`) |
-| Header-based API authentication and secret scrubbing | `src/notebook_alchemy/claude.py` (`scrub`) |
+| Header-based API authentication and secret scrubbing | `src/notebook_alchemy/claude.py` (`scrub`), `src/notebook_alchemy/watch.py` (`scrub`) |
+| Google GenAI Interactions API for video watch fallback | `src/notebook_alchemy/watch.py` (`GeminiWatcher.watch_video`) |
+| Dual-transport MCP server (`stdio` + bearer-protected `streamable-http`) | `src/notebook_alchemy/mcp_server.py` (`build_mcp_server`), `src/notebook_alchemy/service.py` |
 | Typed errors that carry a next action | `src/notebook_alchemy/errors.py`, `src/notebook_alchemy/ui.py` |
 | Hermetic tests with blocked processes and sockets | `tests/conftest.py` |
+
+---
+
+## 👤 About the Owner
+
+Built and maintained by **Gage Hill** ([`@gagexhill`](https://github.com/gagexhill)) as a personal open-source project under the MIT License. Issues and pull requests are welcome at [gagexhill/notebook-alchemy](https://github.com/gagexhill/notebook-alchemy).
 
 ---
 

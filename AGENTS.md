@@ -9,21 +9,25 @@ to propose a change; this file covers what a change must keep true.
   completed design decisions and why. Open work is a GitHub issue, never a document or an inline comment.
 - Source is `src/notebook_alchemy/`, in pipeline order:
   - `channel.py`: YouTube scanning and every route to a video's words.
+  - `watch.py`: opt-in `--watch N` fallback via `google-genai` Interactions API (`gemini-4-hydrogen`).
   - `cleanup.py`: local cleanup, chunks and dedupe.
   - `knowledge.py`: Claude labels, cached per video.
   - `library.py`: passages, topics, sections, consolidation and dates; the topic map grows, it is
     not rebuilt.
   - `writer.py`: the topic books and overview.
-  - `engine.py`: the pipeline and the upload.
+  - `engine.py`: the pipeline and slot-safe upload (`publish`).
+  - `service.py`: shared JSON-serializable service layer backing `cli.py` and `mcp_server.py`.
+  - `mcp_server.py`: dual-transport MCP server (`stdio` + bearer-protected `streamable-http`).
+  - `mcp_install.py`: desktop MCP config installers (Claude Desktop, Antigravity, ChatGPT Codex, HTTP guide).
   - `cli.py`: commands.
-  - `ui.py`: output.
+  - `ui.py`: output, including `route_to_stderr()` for MCP stdio isolation.
   - `client.py`: NotebookLM through the notebooklm-py Python API, on one session per run; the
     `notebooklm` command only for the sign-in window and for reading the recorded account.
   - `claude.py`: the Claude API through the official SDK, including batches.
   - `offline.py`: the no-key path.
   - `state.py`: `export-state` and `import-state`.
   - `keepalive.py`: the scheduled sign-in refresh (`keep-signed-in`).
-  - `config.py`: settings.
+  - `config.py`: settings and `.env` resolution (`ALCHEMY_ENV_FILE`, `./.env`, `~/.notebook-alchemy/.env`).
   - `errors.py`: typed errors.
   - `mock_data.py`: the sample catalog behind `--mock`.
 
@@ -35,11 +39,14 @@ to propose a change; this file covers what a change must keep true.
   raise a typed error from `errors.py` with a message and a next action. No broad `except` that discards
   an outcome.
 - The Claude API key reaches the API only through the official `anthropic` SDK, which sends it in a
-  request header, to the fixed `claude.API_BASE_URL`. Never log, print or store it outside `.env`, and
-  never put it in a URL. Every raised message passes through `claude.scrub`. A `.env` sets only the
-  names in `config.DOTENV_NAMES` and `ALCHEMY_*`, so it cannot redirect the key or set the
-  `notebooklm` command's own variables. (`ALCHEMY_SESSION_FILE` and `ALCHEMY_NOTEBOOKLM_PROFILE` choose
-  the sign-in that uploads; the first upload to an account asks first.)
+  request header, to the fixed `claude.API_BASE_URL`. Optional `GEMINI_API_KEY` (used only when
+  explicit `--watch N` is passed) reaches only the official `google-genai` SDK. Never log, print or
+  store keys outside `.env`, and never put a key in a URL. Every raised message (including MCP `ToolError`
+  results) passes through `claude.scrub` and `watch.scrub`. `.env` files (`./.env` and
+  `~/.notebook-alchemy/.env`) set only the names in `config.DOTENV_NAMES` and `ALCHEMY_*`, so they
+  cannot redirect keys or set the `notebooklm` command's own variables. (`ALCHEMY_SESSION_FILE` and
+  `ALCHEMY_NOTEBOOKLM_PROFILE` choose the sign-in that uploads; the first upload to an account asks first,
+  and MCP `alchemy_run` requires explicit `confirm_upload=True`.)
 - An upload never quietly shrinks a notebook: unsorted books do not replace AI-sorted ones without
   `--offline`, and books from under half the videos of the last upload need `--allow-fewer`. No
   sorting is asked for while videos still wait for labels, and no topic map is made from no passages.
@@ -54,7 +61,9 @@ to propose a change; this file covers what a change must keep true.
 - The books hold the speakers' own words. The AI labels, sorts and orders passages; it never writes the
   passages. Punctuation it adds is copied onto the original words by `knowledge.apply_punctuation`,
   which keeps every original word in order and never takes a word the model added. A kept chunk the
-  model leaves unlabelled is kept, never dropped.
+  model leaves unlabelled is kept, never dropped. When opt-in `--watch N` falls back to Gemini
+  (`gemini-4-hydrogen` via Interactions API) on blocked videos, those transcripts are explicitly marked
+  as model-written and listed in `_OVERVIEW.md`.
 - Every paid answer is cached by what the request saw (transcript, chunking, prompt version and model;
   passages and taxonomy; section contents and year), so a rerun pays only for what changed. A passage
   keeps its section (stored by name) across runs; only `--resort` rebuilds the map. Every request asks
