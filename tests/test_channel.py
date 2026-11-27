@@ -235,8 +235,17 @@ def test_a_channel_reads_videos_and_streams_but_not_shorts_by_default(ydl: type[
     result = ChannelScanner().scan("@x")
     assert result.channel_name == "X"
     assert [v.id for v in result.videos] == ["vid00000001", "vid00000002", "vid00000003"]  # deduplicated
+    assert result.excluded_shorts == 1
+    assert result.tab_counts == {"videos": 2, "streams": 2, "shorts": 1}
     everything = ChannelScanner().scan("https://www.youtube.com/@x", tabs=("videos", "streams", "shorts"))
     assert "vid00000009" in [v.id for v in everything.videos]
+
+
+def test_unavailable_tab_is_reported_as_incomplete(ydl: type[_FakeYDL]) -> None:
+    ydl.script["https://www.youtube.com/@x/videos"] = {"title": "X - Videos", "entries": [_entry(1)]}
+    result = ChannelScanner().scan("@x")
+    assert result.incomplete_tabs == ["streams", "shorts"]
+    assert result.tab_counts == {"videos": 1}
 
 
 def test_a_tab_the_channel_lacks_is_skipped_and_the_limit_counts_all_tabs(ydl: type[_FakeYDL]) -> None:
@@ -340,7 +349,7 @@ def test_disabled_captions_are_remembered(tmp_path: Path) -> None:
     tm = _manager(tmp_path, api)
     assert tm.resolve("abcdefghijk").source == "unavailable"
     assert tm.resolve("abcdefghijk").source == "unavailable"
-    assert len(api.fetches) == 1  # the second call never reached the network
+    assert len(api.fetches) == 2  # one route cannot prove every other route has no words
 
 
 def test_negative_cache_expires(tmp_path: Path) -> None:
@@ -395,14 +404,14 @@ def test_only_youtube_video_ids_reach_the_captions_api(tmp_path: Path) -> None:
         assert tm.resolve(vid).source == "skipped"
 
 
-def test_any_other_retrieval_failure_is_remembered_as_unavailable(tmp_path: Path) -> None:
+def test_route_specific_failure_is_retried(tmp_path: Path) -> None:
     def behaviour(vid: str):
         raise AgeRestricted(vid)
 
     api = _Api(behaviour)
     tm = _manager(tmp_path, api)
     assert tm.resolve("abcdefghijk").source == "unavailable"
-    assert tm.resolve("abcdefghijk").detail == "AgeRestricted" and len(api.fetches) == 1
+    assert tm.resolve("abcdefghijk").detail == "AgeRestricted" and len(api.fetches) == 2
 
 
 class _Track(SimpleNamespace):
@@ -516,13 +525,27 @@ def test_a_block_moves_on_to_yt_dlp_instead_of_stopping_the_run(tmp_path: Path) 
     assert tm.resolve("vid00000002").published == "2024-03-02"  # read back from the cache
 
 
-def test_no_captions_on_youtube_is_final_and_skips_yt_dlp(tmp_path: Path) -> None:
+def test_no_captions_from_api_still_tries_yt_dlp(tmp_path: Path) -> None:
     def disabled(vid: str):
         raise TranscriptsDisabled(vid)
 
     subs = _Subs()
-    assert _manager(tmp_path, _Api(disabled), subtitles=subs).resolve("abcdefghijk").source == "unavailable"
-    assert subs.calls == []
+    result = _manager(tmp_path, _Api(disabled), subtitles=subs).resolve("abcdefghijk")
+    assert result.source == "subtitles"
+    assert result.routes == {"api": "TranscriptsDisabled", "subtitles": "subtitles"}
+    assert subs.calls == ["abcdefghijk"]
+
+
+def test_corroborated_absence_cache_changes_with_retrieval_settings(tmp_path: Path) -> None:
+    api = _Api(lambda vid: (_ for _ in ()).throw(TranscriptsDisabled(vid)))
+    subs = _Subs({"abcdefghijk": SubtitlesUnavailable("no subtitle track")})
+    first = _manager(tmp_path, api, subtitles=subs)
+    assert first.resolve("abcdefghijk").source == "unavailable"
+    assert first.resolve("abcdefghijk").source == "unavailable"
+    assert len(api.fetches) == 1
+    changed = _manager(tmp_path, api, subtitles=subs, languages=("es",))
+    assert changed.resolve("abcdefghijk").source == "unavailable"
+    assert len(api.fetches) == 2
 
 
 class _Clock:
@@ -663,7 +686,7 @@ def test_videos_youtube_refuses_are_read_through_notebooklm_and_cached(tmp_path:
 
     tm = _manager(tmp_path, _Api(disabled_or_blocked), bulk=bulk, block_pause=0)
     results = tm.fetch_many([("vid00000001", "a"), ("nocaptions1", "b"), ("vid00000002", "c")])
-    assert asked == [["vid00000001", "vid00000002"]]  # a video with no captions at all is not sent
+    assert asked == [["vid00000001", "nocaptions1", "vid00000002"]]
     assert results["vid00000001"].source == "notebooklm" and tm.blocked_total == 0
     cached = json.loads((tmp_path / "cache" / "vid00000002.json").read_text(encoding="utf-8"))
     assert cached["method"] == "notebooklm" and cached["full_text"] == "notebooklm words vid00000002"

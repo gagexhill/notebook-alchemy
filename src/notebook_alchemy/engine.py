@@ -16,6 +16,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import math
 import re
 import threading
 from collections.abc import Callable
@@ -27,6 +28,7 @@ from typing import Any
 from .channel import (
     MODEL_WRITTEN,
     ChannelScanner,
+    ChannelScanResult,
     ChannelVideo,
     TranscriptManager,
     TranscriptResult,
@@ -120,6 +122,7 @@ class BuildReport:
     is_mock: bool = False
     used_ai: bool = True
     watched: set[str] = field(default_factory=set)
+    unread: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _content_hash(text: str) -> str:
@@ -190,6 +193,7 @@ class AlchemyEngine:
             else None
         )
         self.route_notices: list[str] = []  # said once per build by the NotebookLM transcript route
+        self.last_scan: ChannelScanResult | None = None
         self.transcripts = TranscriptManager(
             cache_dir=self.config.cache_dir,
             max_workers=self.config.max_concurrency,
@@ -248,6 +252,7 @@ class AlchemyEngine:
         self, source: str, *, limit: int | None, tabs: tuple[str, ...], mock: bool
     ) -> tuple[str, list[ChannelVideo]]:
         if mock:
+            self.last_scan = None
             sources = get_mock_sources()[:limit] if limit else get_mock_sources()
             return MOCK_NOTEBOOK_TITLE, [
                 ChannelVideo(s["id"], s["title"], s["url"], 600, "2026-01-01") for s in sources
@@ -258,6 +263,7 @@ class AlchemyEngine:
                 hint="Give a channel (@handle or its URL), a playlist or a video URL.",
             )
         scan = ChannelScanner().scan(source, limit=limit, tabs=tabs)
+        self.last_scan = scan
         return scan.channel_name, scan.videos
 
     def estimate(
@@ -333,6 +339,7 @@ class AlchemyEngine:
         resort: bool = False,
         use_batch: bool = True,
         watch_limit: int = 0,
+        watch_budget_usd: float = 0.0,
         progress: ProgressFn | None = None,
     ) -> BuildReport:
         if watch_limit < 0:
@@ -345,11 +352,25 @@ class AlchemyEngine:
                 "`--watch` needs a Gemini API key to read blocked videos.",
                 hint=f"Add GEMINI_API_KEY to your .env (create one at {GEMINI_KEY_URL}), or omit --watch.",
             )
+        if watch_limit > 0 and not mock and (not math.isfinite(watch_budget_usd) or watch_budget_usd <= 0):
+            raise ConfigError(
+                "--watch needs a positive estimated USD budget before it can spend.",
+                hint="Preview with dry-run --watch N, then pass --watch-budget-usd AMOUNT to run.",
+            )
         self.route_notices = []
         channel, videos = self.scan(source, limit=limit, tabs=tabs, mock=mock)
+        incomplete = [t for t in self.last_scan.incomplete_tabs if t in tabs] if self.last_scan else []
+        if incomplete:
+            raise ChannelScanError(
+                f"Could not verify channel tabs: {', '.join(incomplete)}. Nothing was uploaded.",
+                hint="Check the channel and network, then run again after every tab can be counted.",
+            )
         today = dt.datetime.now(dt.UTC).date().isoformat()
         notices: list[str] = []
+        if self.last_scan and "shorts" in self.last_scan.incomplete_tabs and "shorts" not in tabs:
+            notices.append("Shorts count could not be verified; no Shorts were processed.")
         watched: set[str] = set()
+        unread: list[dict[str, Any]] = []
 
         # 2. words
         if mock:
@@ -393,12 +414,29 @@ class AlchemyEngine:
                 ]
                 skipped_long = len(missing_videos) - len(eligible)
                 if skipped_long:
-                    notices.append(f"Skipped {skipped_long} video(s) longer than 90 minutes for `--watch`.")
+                    notices.append(f"Skipped {skipped_long} video(s) longer than 120 minutes for `--watch`.")
                 watch_targets = eligible[:watch_limit]
+                watch_estimated = 0.0
                 for done, v in enumerate(watch_targets, 1):
+                    if results[v.id].detail == "GeminiUnusable":
+                        results[v.id].routes["gemini"] = "earlier paid answer unusable"
+                        continue
+                    estimated, _note = watch_cost(v.duration_seconds or 600, self.config.gemini_model)
+                    usage = self.watcher.usage()
+                    charged_so_far = usage[3] if usage else 0.0
+                    if max(watch_estimated, charged_so_far) + estimated > watch_budget_usd:
+                        notices.append(
+                            f"Stopped --watch before {v.title}: the estimated ${watch_budget_usd:.2f} "
+                            "budget would be exceeded."
+                        )
+                        break
+                    watch_estimated += estimated
                     try:
                         wres = self.watcher.watch_video(v.id)
                     except GeminiError as exc:
+                        if exc.unusable:
+                            self.transcripts._write_cache(v.id, v.title, "", reason="GeminiUnusable")
+                        results[v.id].routes["gemini"] = "unusable" if exc.unusable else "failed"
                         if exc.stop_run:
                             notices.append(f"{exc.message} {exc.hint or ''}".strip())
                             break
@@ -415,6 +453,16 @@ class AlchemyEngine:
                     by_source[MODEL_WRITTEN] = by_source.get(MODEL_WRITTEN, 0) + 1
                     if progress:
                         progress("Watching blocked videos with Gemini", done, len(watch_targets))
+            unread = [
+                {
+                    "video_id": v.id,
+                    "title": v.title,
+                    "routes": results[v.id].routes,
+                    "next_action": "retry or provide a transcript",
+                }
+                for v in videos
+                if v.id not in texts and v.id in results
+            ]
             notices += self.transcripts.notices + self.route_notices
             blocked_left = sum(
                 1
@@ -483,6 +531,7 @@ class AlchemyEngine:
                     by_source=by_source,
                     is_mock=mock,
                     used_ai=use_ai,
+                    unread=unread,
                 )
             # 5. library
             builder = LibraryBuilder(self.ai, RequestCache(self.library_cache_path(channel)), today, channel)
@@ -528,6 +577,7 @@ class AlchemyEngine:
             is_mock=mock,
             used_ai=use_ai,
             watched=watched,
+            unread=unread,
         )
 
     @staticmethod
@@ -767,8 +817,8 @@ class AlchemyEngine:
             "orphans": [str(o) for o in orphans],
             "sorted_by_ai": data.get("sorted_by_ai") if isinstance(data.get("sorted_by_ai"), bool) else None,
             "videos_read": data.get("videos_read") if isinstance(data.get("videos_read"), int) else 0,
-            # Titles a version 0.2 upload recorded under its own file name; matched by title until a
-            # successful upload has replaced or removed them.
+            # A version 0.2 title-only record is removed after a successful upload; its titles
+            # never establish ownership of NotebookLM sources.
             "legacy_titles": [str(t) for t in legacy.get("titles", []) if isinstance(t, str)],
         }
 
@@ -849,9 +899,8 @@ class AlchemyEngine:
             self.remember_notebook(channel_key, nb_id)
         before = [] if created else [s for s in self.client.list_sources(nb_id) if s.get("id")]
 
-        # Only sources this tool uploaded are ever replaced or removed: by the ids it recorded, or, for
-        # a record from version 0.2 (titles only), by those titles. A source of yours with the same
-        # title as a book is left alone.
+        # Only source ids this tool recorded as its own may be replaced or removed. A title-only
+        # legacy record cannot distinguish an earlier upload from a user's source with that title.
         record = self._read_record(nb_id)
         if record["sorted_by_ai"] and not sorted_by_ai and not allow_unsorted:
             raise AlchemyError(
@@ -871,13 +920,7 @@ class AlchemyEngine:
         built = {"sorted_by_ai": sorted_by_ai, "videos_read": videos_read}
         orphans = set(record["orphans"])
         mine_ids = set(record["ids"].values()) | orphans
-        legacy = {normalize_title(t) for t in record["titles"]} if not record["ids"] else set()
-        legacy |= {normalize_title(t) for t in record["legacy_titles"]}
-        ours = [
-            s
-            for s in before
-            if str(s["id"]) in mine_ids or normalize_title(str(s.get("title", ""))) in legacy
-        ]
+        ours = [s for s in before if str(s["id"]) in mine_ids]
         book_titles = {normalize_title(b.title) for b in books}
         title_by_id = {str(s["id"]): str(s.get("title", "")) for s in before}
         status_by_id = {str(s["id"]): str(s.get("status", "ready") or "ready").lower() for s in before}
@@ -906,9 +949,7 @@ class AlchemyEngine:
             stuck_unowned = sum(
                 1
                 for s in before
-                if str(s["id"]) not in mine_ids
-                and normalize_title(str(s.get("title", ""))) not in legacy
-                and str(s.get("status", "")).lower() in ("preparing", "error")
+                if str(s["id"]) not in mine_ids and str(s.get("status", "")).lower() in ("preparing", "error")
             )
             stuck_note = (
                 f" ({stuck_unowned} other source(s) in the notebook are stuck in preparing/error)"

@@ -2,6 +2,27 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## Transcript coverage, bounded fallback, and durable MCP receipts (#68, #67, 2026-11-27)
+
+- A channel scan counts Shorts separately and excludes them by default. A requested Videos or Live tab
+  that cannot be verified stops the build before upload. The preview and run result expose tab counts,
+  missing words, and per-video route outcomes so a partial read is visible.
+- A captions API failure no longer decides another route's result. The tool tries yt-dlp and NotebookLM
+  for eligible unread videos, then caches only corroborated absence for one day and invalidates that
+  cache when retrieval settings change.
+- Gemini transcription remains opt-in. `--watch N` requires an estimated USD ceiling, checks the
+  ceiling before each request using both estimates and reported usage, records billed unusable answers,
+  and labels model-written words in the overview. A single request can exceed its estimate, so the
+  ceiling is not a provider-enforced spending limit.
+- MCP runs return a durable local receipt immediately. Polling reads the final pipeline result;
+  concurrent calls receive the active run ID, and a stopped server leaves an interrupted receipt that
+  tells the operator to resume from caches.
+- External titles, transcript chunks, and passage text are treated as untrusted input in AI prompts
+  and rendered books. The prompt versions changed, so cached Claude labels and library answers are
+  regenerated. Source ownership is by recorded NotebookLM ID, never title alone (#66).
+- Local QA passed Ruff, formatting, 522 hermetic tests, the seven CLI checks, and a project-scoped
+  dependency audit. Account-backed comparison with the earlier notebook is still open in #68.
+
 ## Desktop LLM MCP connector, global `.env`, `--watch`, and slot-safe uploads (`0.4.0`, `#43`, `#60`, `#61`, `#63`, `#64`, 2026-11-19)
 
 - **Shared service layer & global `.env` (#60).** Extracted `service.py` from `cli.py` so CLI commands and MCP tools share one pipeline, validation, and error path. `config.py` now loads `~/.notebook-alchemy/.env` after `./.env` (and supports `ALCHEMY_ENV_FILE`), and `setup` writes global by default (`--local` opts into `./.env`), so MCP desktop hosts spawned from arbitrary working directories see the same keys and profile.

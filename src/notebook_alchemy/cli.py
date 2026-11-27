@@ -50,6 +50,7 @@ from .config import (
 from .engine import AlchemyEngine, BuildReport
 from .errors import AlchemyError, ConfigError, NotebookLMError, SessionError
 from .keepalive import INTERVAL_MINUTES, KeepAlive, KeepAliveState
+from .run_registry import is_completed_run_receipt, receipts_dir
 from .state import count_existing, export_state, import_state
 from .ui import esc, handle_errors
 from .watch import price_for as gemini_price_for
@@ -478,6 +479,12 @@ def cli(ctx: click.Context, quiet: bool, verbose: int, no_color: bool, debug: bo
     help="Watch up to N blocked videos with Gemini (needs GEMINI_API_KEY).",
 )
 @click.option(
+    "--watch-budget-usd",
+    type=click.FloatRange(min=0),
+    default=0.0,
+    help="Estimated USD ceiling for opt-in Gemini video transcription.",
+)
+@click.option(
     "-n",
     "--notebook",
     "old_notebook",
@@ -522,6 +529,7 @@ def run_pipeline(
     yes: bool,
     allow_fewer: bool,
     watch_limit: int,
+    watch_budget_usd: float,
     profile: str | None,
 ) -> None:
     """Build topic books from a YouTube channel, playlist or video, and upload them to NotebookLM."""
@@ -571,6 +579,7 @@ def run_pipeline(
             resort=resort,
             use_batch=not now,
             watch_limit=watch_limit,
+            watch_budget_usd=watch_budget_usd,
             progress=reporter,
         )
     _show_build(report, engine)
@@ -639,6 +648,12 @@ def run_pipeline(
 def _show_build(report: BuildReport, engine: AlchemyEngine) -> None:
     videos = len(report.videos)
     ui.info(f"  {esc(report.channel)}: read {len(report.read)} of {_plural(videos, 'video')}")
+    if engine.last_scan and engine.last_scan.excluded_shorts:
+        ui.info(f"  {engine.last_scan.excluded_shorts} Shorts found and excluded")
+    if report.unread:
+        ui.warn(f"{len(report.unread)} full videos still have no words; see -v for each route.", always=True)
+        for item in report.unread:
+            ui.detail(f"  {esc(item['title'])}: {esc(str(item['routes']))}")
     for route, count in sorted(report.by_source.items()):
         ui.detail(f"  {route}: {count}")
     if report.used_ai:
@@ -730,6 +745,20 @@ def dry_run(
     console = ui.console
     console.print(f"\n[bold]{esc(channel)}[/bold]")
     console.print(f"  {_plural(est.videos, 'video')}; words already read for {est.videos_known}")
+    if engine.last_scan and engine.last_scan.excluded_shorts:
+        console.print(f"  {engine.last_scan.excluded_shorts} Shorts found and excluded")
+    if engine.last_scan and engine.last_scan.incomplete_tabs:
+        processing_gaps = [t for t in engine.last_scan.incomplete_tabs if t in tabs]
+        ui.warn(
+            f"Could not verify channel tabs: {', '.join(engine.last_scan.incomplete_tabs)}. "
+            + (
+                "A run will stop before upload until the scan is complete."
+                if processing_gaps
+                else "The Shorts count is unknown; Shorts remain excluded."
+            ),
+            always=True,
+        )
+    console.print(f"  {est.videos - est.videos_known} full videos do not yet have cached words")
     console.print(f"  About {est.words_estimated:,} words in all")
     if engine.config.has_api_key and not mock:
         left = est.videos - est.labelled
@@ -1521,6 +1550,9 @@ def clean_pipeline(
         if watched.is_file():
             (targets.append(("labels", watched)) if _is_string_map(watched) else skipped.append(str(watched)))
     if do_records:
+        runs = receipts_dir()
+        for f in sorted(runs.glob("*.json")) if runs.is_dir() else []:
+            (targets.append(("record", f)) if is_completed_run_receipt(f) else skipped.append(str(f)))
         records_dir = engine.sync_records_dir()
         for f in sorted(records_dir.glob("*.json")) if records_dir.is_dir() else []:
             (targets.append(("record", f)) if _is_sync_record(f) else skipped.append(str(f)))

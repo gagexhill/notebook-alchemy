@@ -47,14 +47,14 @@
 
 ## 🌐 Project Overview
 
-**Notebook Alchemy** takes a YouTube channel, playlist or video link, reads what every video says, keeps each point once, and uploads the result to a Google NotebookLM notebook as a few topic books. Each book can hold up to NotebookLM's 500,000 words per source. You can drive it from the command line or connect it via automatic local `stdio` MCP to **Claude Desktop**, **ChatGPT Desktop** (Codex / Work mode), and **Antigravity**.
+**Notebook Alchemy** takes a YouTube channel, playlist or video link, seeks words for every full video and stream, keeps each available point once, and uploads the result to a Google NotebookLM notebook as a few topic books. The preview counts Shorts separately; they are excluded by default. Each book can hold up to NotebookLM's 500,000 words per source. You can drive it from the command line or connect it via automatic local `stdio` MCP to **Claude Desktop**, **ChatGPT Desktop** (Codex / Work mode), and **Antigravity**.
 
 The books hold the speakers' own words, never an AI rewrite (except optional `--watch N` transcriptions, which are explicitly marked):
 - **Claude's job:** it decides which passages are worth keeping, files each one under a topic and section, puts each section in teaching order, and marks information that has gone out of date.
 - **Each passage names its source:** the video it came from and the date, so NotebookLM's answers, quizzes and Audio Overviews cite something you can check.
 - **Without a Claude API key:** the books hold every video's cleaned words, sorted by title.
 
-Everything runs on your machine. The books go straight to NotebookLM; nothing is kept unless you ask for a copy with `--save`. The tool keeps no account data beyond what a feature needs (see [What It Stores](#what-it-stores)), sends nothing anywhere except YouTube, the Claude API and NotebookLM, and has no telemetry.
+Everything runs on your machine. The books go straight to NotebookLM; nothing is kept unless you ask for a copy with `--save`. The tool keeps no account data beyond what a feature needs (see [What It Stores](#what-it-stores)), sends nothing anywhere except YouTube, the Claude API, opt-in Gemini and NotebookLM, and has no telemetry.
 
 ---
 
@@ -64,7 +64,7 @@ A NotebookLM notebook accepts a limited number of sources: 50 on the free plan, 
 
 Even when the videos fit, each arrives as its own source, full of intros, sponsor reads and the same advice repeated across dozens of videos. Summaries are no better: NotebookLM answers from the text it is given, so a short summary leaves it little to answer from.
 
-Notebook Alchemy changes the unit. Every video's words are read, repeated passages are kept once, and what remains is filed by subject into a few books. A channel of hundreds of videos becomes a handful of rich sources plus an overview.
+Notebook Alchemy changes the unit. Available words from full videos and streams are read, repeated passages are kept once, and what remains is filed by subject into a few books. A channel of hundreds of videos becomes a handful of rich sources plus an overview that names videos still missing words.
 
 ---
 
@@ -77,14 +77,14 @@ link       yt-dlp   captions,  filler,   Claude,   topics,  order, dupes,    pla
                     NotebookLM removed   per video cached    cached
 ```
 
-1. **Find.** `yt-dlp` reads every video's id, title, duration and date from the channel's listings; no video is downloaded.
+1. **Find.** `yt-dlp` reads each full video's and stream's id, title, duration and date, and counts excluded Shorts separately; no video is downloaded. An unreadable Videos or Live tab stops a build before upload.
 2. **Words.** Each video's text comes from the first of these routes that works:
    - your own `.txt`, `.vtt` or `.srt` files, then the local cache;
    - YouTube's captions, spaced a few seconds apart;
    - yt-dlp's subtitle download;
    - NotebookLM, which fetches a video's transcript on Google's side and is not affected when YouTube refuses your connection.
 
-   A refused route pauses while the others carry on. A video still missing is listed in the overview and retried on the next run.
+   A refused route pauses while the others carry on. A result from one route never proves another has no words. A video still missing is listed in the overview and returned with its route outcomes; a corroborated absence is retried after one day or when retrieval settings change. Opt-in `--watch N` can ask Gemini to transcribe a still missing public video within an explicit estimated USD budget.
 3. **Clean.** On your machine, free: caption noise and filler go, short calls to action and sponsor sentences go, and a passage repeated across videos (or within one) is kept once, in the newest video.
 4. **Label.** One Claude request per video reads its numbered chunks and returns labels only: keep or drop, a headline, how long the information stays true, and an editor's note where a passage needs context. Captions without punctuation also come back punctuated; the punctuation is copied onto the original words, and no word is added or lost. Labels are cached per video.
 5. **Sort.**
@@ -93,7 +93,7 @@ link       yt-dlp   captions,  filler,   Claude,   topics,  order, dupes,    pla
    - When new videos bring passages that fit nowhere, the map grows: new sections or topics are added, and nothing already placed moves. A section past 200 passages is divided into named subsections.
    - One request per section orders it, finds duplicates and finds passages a newer one replaces.
    - Old news is left out; old rules and figures are kept, marked "As of".
-6. **Books and upload.** One plain-Markdown book per topic (split into parts only past 450,000 words; a section stays in its part from run to run), plus an `_OVERVIEW`. Each goes to NotebookLM as a file. The tool waits for processing, corrects any title NotebookLM changes, replaces earlier copies of books whose text changed (the rest are left as they are), removes books the last run made that this one no longer has, and reads the notebook back. A rerun updates the same notebook.
+6. **Books and upload.** One plain-Markdown book per topic (split into parts only past 450,000 words; a section stays in its part from run to run), plus an `_OVERVIEW`. Each goes to NotebookLM as a file. The tool waits for processing, corrects any title NotebookLM changes, replaces earlier copies of books whose text changed (the rest are left as they are), removes books the last run made that this one no longer has, and reads the notebook back. It replaces or removes only sources recorded by ID as its own. Older title-only records cannot prove ownership, so their sources stay in the notebook. A rerun updates the same notebook.
 
 ---
 
@@ -110,7 +110,7 @@ link       yt-dlp   captions,  filler,   Claude,   topics,  order, dupes,    pla
 | Try it | `notebook-alchemy run --mock --save books` | Nothing | `books/` | You want to see the output before pointing it at a channel |
 | Self-test | `notebook-alchemy test` | Nothing | A temporary folder | You want to check that everything installed correctly |
 | Keep a sign-in fresh (optional) | `notebook-alchemy keep-signed-in` (`--off` to stop) | NotebookLM, every 20 minutes | A scheduled task for your user | Your computer keeps a refreshed sign-in alive (`status` shows whether it does) |
-| Watch blocked videos | `notebook-alchemy run <url> --watch 5` | YouTube, NotebookLM, Claude, Gemini (`gemini-4-hydrogen`) | One notebook | Captions are unavailable for a few videos and you want opt-in Gemini transcription (marked in `_OVERVIEW.md`) |
+| Watch blocked videos | `notebook-alchemy run <url> --watch 5 --watch-budget-usd 2` | YouTube, NotebookLM, Claude, Gemini (`gemini-4-hydrogen`) | One notebook | Captions are unavailable for a few videos and you want opt-in Gemini transcription (marked in `_OVERVIEW.md`) within an estimated budget |
 | Desktop LLM connector | `notebook-alchemy mcp install all` | Local `stdio` (automatic per chat) | Client MCP config | You want Claude Desktop, ChatGPT Desktop (Codex / Work mode), or Antigravity to drive the pipeline directly |
 | Move computers | `notebook-alchemy export-state FILE`, then `import-state FILE` | Nothing | A zip, then `~/.notebook-alchemy/` | You want to carry on from another computer without paying again |
 | Set up | `notebook-alchemy setup` | `notebooklm` login, only if you sign in | `~/.notebook-alchemy/.env` | You want to save your Claude/Gemini keys or upload profile once for CLI and MCP clients |
@@ -144,6 +144,7 @@ src/notebook_alchemy/
 ├── cli.py          # Commands, options, prompts, exit codes (incl. `mcp serve|install|status`)
 ├── service.py      # Shared JSON-serializable service layer backing CLI and MCP tools
 ├── mcp_server.py   # Dual-transport MCP server (`stdio` + bearer-authenticated `streamable-http`)
+├── run_registry.py # Durable MCP run receipts and duplicate-run guard
 ├── mcp_install.py  # Atomic installers for Claude Desktop, Antigravity, ChatGPT Codex & HTTP guide
 ├── ui.py           # Steps, progress bars, warnings and errors, stderr routing for MCP stdio
 ├── engine.py       # The pipeline, the NotebookLM transcript route, slot-safe publish & --watch
@@ -181,7 +182,7 @@ src/notebook_alchemy/
 - **Dated.** Every passage carries its video's date. Old news is left out; old rules and figures are marked "As of 2023: check the current rules"; the overview lists what was left out.
 - **Captions even when YouTube refuses.**
   - When YouTube blocks your connection, NotebookLM reads the transcripts instead.
-  - Pass `--watch N` (with `GEMINI_API_KEY`) to transcribe up to `N` remaining blocked videos via Gemini 4 Hydrogen (`Interactions API`), clearly flagged in `_OVERVIEW.md`.
+  - Pass `--watch N --watch-budget-usd AMOUNT` (with `GEMINI_API_KEY`) to attempt up to `N` remaining public videos via Gemini 4 Hydrogen (`Interactions API`), clearly flagged in `_OVERVIEW.md`. The budget is estimated, so check the receipt for actual usage.
   - Requests are spaced so a long channel is not refused in the first place, and a refused route pauses without stopping the run.
 - **Desktop LLM connector (MCP).** Drive previews, notebook lists, cleanups, and guarded builds from **Claude Desktop**, **ChatGPT Desktop** (Codex / Work mode), and **Antigravity** over automatic zero-port `stdio` (plus authenticated loopback `streamable-http` on `127.0.0.1` for local tooling).
 - **Cheap to run again.**
@@ -358,7 +359,7 @@ A real preview of that channel, recorded from the terminal:
 
 ### Connect to Desktop LLMs (MCP)
 
-Notebook Alchemy includes an [MCP](https://modelcontextprotocol.io) server exposing five tools (`alchemy_status`, `alchemy_preview`, `alchemy_run`, `alchemy_notebooks`, `alchemy_clean`), two read-only resources (`alchemy://status`, `alchemy://notebooks`), and the `distill_youtube_channel` prompt.
+Notebook Alchemy includes an [MCP](https://modelcontextprotocol.io) server exposing six tools (`alchemy_status`, `alchemy_preview`, `alchemy_run`, `alchemy_run_status`, `alchemy_notebooks`, `alchemy_clean`), two read-only resources (`alchemy://status`, `alchemy://notebooks`), and the `distill_youtube_channel` prompt. `alchemy_run` returns a run ID immediately; `alchemy_run_status` reads the durable result, including upload outcome and API usage. A receipt marked `waiting_for_batch` needs a later `alchemy_run` call to collect the batch; cached work is reused.
 
 Register it in **Claude Desktop**, **Antigravity**, and **ChatGPT Desktop (Codex / Work mode)** with one command (merges cleanly into each client's config file; preview with `--dry-run`). Each app launches and stops local `stdio` automatically with zero open network ports or tunnels:
 
@@ -402,9 +403,10 @@ Everything stays on your machine. `notebook-alchemy clean --all` removes the wor
 | Where | What | Removed by |
 |---|---|---|
 | `~/.notebook-alchemy/.env` (or `./.env` with `--local`) | Your Claude/Gemini API keys, profile, and optional `ALCHEMY_MCP_TOKEN`, written by `setup` | Delete the file |
-| `~/.notebook-alchemy/cache/` | Downloaded words per video, and which videos had none (for a week) | `clean --cache` |
+| `~/.notebook-alchemy/cache/` | Downloaded words per video and short-lived corroborated absence records (one day, invalidated by retrieval setting changes) | `clean --cache` |
 | `~/.notebook-alchemy/knowledge/`, `library/`, `batches/` | The AI's labels, topics, placements and section orders, so reruns cost nothing, and per channel a labelling batch still running and its answers until they are stored | `clean --labels` |
 | `~/.notebook-alchemy/sync/`, `notebooks.json`, `upload_accounts.json` | What the last upload added, which notebook each channel uses, and a salted hash of the account you confirmed uploads to (not the email) | `clean --records` |
+| `~/.notebook-alchemy/runs/` | MCP run receipts with status, coverage, and usage; active receipts are retained until the run ends | `clean --records` after completion |
 | `~/.notebooklm/profiles/<profile>/` | The Google sign-in, kept by notebooklm-py | `notebooklm auth logout` |
 | Your system scheduler, and `~/.notebook-alchemy/keepalive.json` | The 20-minute sign-in refresh (only if you turned it on) and when it last ran | `keep-signed-in --off` (asks first in a terminal; `--yes` skips); `clean --records` |
 | Your NotebookLM account | The notebook itself, and the "Notebook Alchemy workspace" notebook used to read blocked videos (left empty after each run) | Delete them in NotebookLM |

@@ -59,11 +59,13 @@ class GeminiError(AlchemyError):
         status: int | None = None,
         detail: str | None = None,
         stop_run: bool = False,
+        unusable: bool = False,
     ) -> None:
         super().__init__(message, hint=hint)
         self.status = status
         self.detail = detail or message
         self.stop_run = stop_run
+        self.unusable = unusable
 
 
 class NotebookLMError(AlchemyError):

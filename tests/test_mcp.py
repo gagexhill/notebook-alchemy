@@ -122,6 +122,20 @@ def test_service_clean_requires_confirm_for_labels_and_records(tmp_path: Path) -
     assert res["removed"] == 1 and not (knowledge / "vid1.json").exists()
 
 
+def test_record_cleanup_removes_finished_run_receipts_only(tmp_path: Path) -> None:
+    from notebook_alchemy.run_registry import RunRegistry, receipts_dir
+
+    registry = RunRegistry(receipts_dir())
+    done = "a" * 32
+    active = "b" * 32
+    registry._write({"run_id": done, "status": "completed", "result": {"status": "saved"}})
+    registry._write({"run_id": active, "status": "running"})
+    result = clean_service(_cfg(tmp_path), records=True, confirm=True)
+    assert result["removed"] == 1
+    assert not (receipts_dir() / f"{done}.json").exists()
+    assert (receipts_dir() / f"{active}.json").exists()
+
+
 def test_service_list_notebooks_reports_preparing_sources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -169,6 +183,7 @@ def test_mcp_server_tools_resources_prompts_and_stdout_purity(
             "alchemy_status",
             "alchemy_preview",
             "alchemy_run",
+            "alchemy_run_status",
             "alchemy_notebooks",
             "alchemy_clean",
         } <= names
@@ -186,7 +201,15 @@ def test_mcp_server_tools_resources_prompts_and_stdout_purity(
         )
         assert run_tool_res.is_error is False
         run_res = run_tool_res.structured_content or {}
-        assert run_res["status"] == "saved"
+        assert run_res["status"] == "running"
+        for _ in range(100):
+            receipt = await server.call_tool("alchemy_run_status", {"run_id": run_res["run_id"]})
+            run_res = receipt.structured_content or {}
+            if run_res["status"] != "running":
+                break
+            await asyncio.sleep(0.01)
+        assert run_res["status"] == "completed"
+        assert run_res["result"]["status"] == "saved"
 
         resources = await server.list_resources()
         assert {str(r.uri) for r in resources} >= {"alchemy://status", "alchemy://notebooks"}

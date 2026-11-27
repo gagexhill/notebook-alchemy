@@ -29,7 +29,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # Caption languages to try first, in order; ALCHEMY_CAPTION_LANGUAGES overrides them. When none
 # exists, a caption track the uploader wrote is preferred over an automatic one in any language.
 PREFERRED_LANGUAGES = ("en", "en-US", "en-GB")
-NEGATIVE_CACHE_DAYS = 7
+NEGATIVE_CACHE_DAYS = 1
 # Channel tabs a scan can read. Videos and live streams have captions worth reading; Shorts are
 # usually under a minute, so they are left out unless asked for.
 CHANNEL_TABS = ("videos", "streams", "shorts")
@@ -58,6 +58,9 @@ class ChannelScanResult:
 
     channel_name: str
     videos: list[ChannelVideo] = field(default_factory=list)
+    tab_counts: dict[str, int] = field(default_factory=dict)
+    excluded_shorts: int | None = None
+    incomplete_tabs: list[str] = field(default_factory=list)
 
 
 class _YdlLogger:
@@ -164,17 +167,23 @@ class ChannelScanner:
         name = ""
         videos: list[ChannelVideo] = []
         seen: set[str] = set()
+        tab_counts: dict[str, int] = {}
+        incomplete_tabs: list[str] = []
         for index, tab in enumerate(dict.fromkeys(tabs)):  # each tab once, in the order given
             try:
                 result = self._scan_one(f"{root}/{tab}", limit)
             except ChannelScanError as exc:
                 missing = f"does not have a {tab} tab" in exc.message or "No videos found" in exc.message
-                if missing or index > 0:
-                    # A tab the channel lacks is normal. A later tab failing after the first one
-                    # worked is not worth losing the scan over, so it is skipped and logged.
+                if missing:
                     logger.info("Skipped the %s tab of %s: %s", tab, root, exc.message)
+                    tab_counts[tab] = 0
+                    continue
+                if index > 0:
+                    logger.warning("Could not verify the %s tab of %s: %s", tab, root, exc.message)
+                    incomplete_tabs.append(tab)
                     continue
                 raise
+            tab_counts[tab] = len(result.videos)
             name = name or result.channel_name
             for video in result.videos:
                 if video.id not in seen:
@@ -185,7 +194,23 @@ class ChannelScanner:
                 f"No videos found at '{url}' (tabs: {', '.join(tabs)}).",
                 hint="Use a channel (@handle), a playlist, or a video URL that has public videos.",
             )
-        return ChannelScanResult(channel_name=name, videos=videos[:limit] if limit else videos)
+        excluded_shorts: int | None = 0
+        if "shorts" not in tabs:
+            try:
+                excluded_shorts = len(self._scan_one(f"{root}/shorts", None).videos)
+            except ChannelScanError as exc:
+                if not ("does not have a shorts tab" in exc.message or "No videos found" in exc.message):
+                    incomplete_tabs.append("shorts")
+                    excluded_shorts = None
+            if "shorts" not in incomplete_tabs:
+                tab_counts["shorts"] = excluded_shorts
+        return ChannelScanResult(
+            channel_name=name,
+            videos=videos[:limit] if limit else videos,
+            tab_counts=tab_counts,
+            excluded_shorts=excluded_shorts,
+            incomplete_tabs=incomplete_tabs,
+        )
 
     def _scan_one(self, url: str, limit: int | None, _depth: int = 0) -> ChannelScanResult:
         """Read one channel tab, playlist or video."""
@@ -333,6 +358,7 @@ class TranscriptResult:
     detail: str = ""
     published: str = ""  # YYYY-MM-DD when a source reported the exact upload date
     method: str = ""  # for cached words: how they were first got
+    routes: dict[str, str] = field(default_factory=dict)
 
 
 class SubtitlesBlocked(Exception):
@@ -447,8 +473,8 @@ class YtDlpSubtitles:
         return None
 
 
-# Reasons the captions API gives that hold for any route to the same video; others may differ by route.
-_FINAL_REASONS = frozenset({"TranscriptsDisabled", "NoTranscriptFound", "VideoUnavailable", "InvalidVideoId"})
+# A failure in one transcript client does not prove that another client has no words.
+_CACHEABLE_ABSENCE = frozenset({"TranscriptsDisabled", "NoTranscriptFound"})
 
 
 class _Pacer:
@@ -580,6 +606,17 @@ class TranscriptManager:
 
     # -- cache --
 
+    def _negative_cache_key(self) -> str:
+        """Invalidate an absence when languages, sign-in route, or available routes change."""
+        route = self.subtitles
+        settings = {
+            "languages": self.languages,
+            "subtitles": route is not None,
+            "cookies_browser": getattr(route, "cookies_browser", None),
+            "version": 2,
+        }
+        return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
+
     def _read_cache(
         self, video_id: str, *, include_model_written: bool | None = None
     ) -> TranscriptResult | None:
@@ -608,12 +645,28 @@ class TranscriptManager:
                 checked = datetime.fromisoformat(str(data.get("checked_at", "")))
             except ValueError:
                 return None
-            if datetime.now(UTC) - checked < timedelta(days=NEGATIVE_CACHE_DAYS):
-                return TranscriptResult(video_id, "", "unavailable", str(data.get("reason", "no captions")))
+            if data.get("route_key") == self._negative_cache_key() and datetime.now(
+                UTC
+            ) - checked < timedelta(days=NEGATIVE_CACHE_DAYS):
+                return TranscriptResult(
+                    video_id,
+                    "",
+                    "unavailable",
+                    str(data.get("reason", "no captions")),
+                    routes=dict(data.get("routes") or {}),
+                )
         return None
 
     def _write_cache(
-        self, video_id: str, title: str, text: str, *, reason: str = "", method: str = "", published: str = ""
+        self,
+        video_id: str,
+        title: str,
+        text: str,
+        *,
+        reason: str = "",
+        method: str = "",
+        published: str = "",
+        routes: dict[str, str] | None = None,
     ) -> None:
         path = self._cache_path(video_id)
         if path is None:
@@ -622,7 +675,13 @@ class TranscriptManager:
         if text:
             record.update(method=method, published=published)
         else:
-            record.update(unavailable=True, reason=reason, checked_at=datetime.now(UTC).isoformat())
+            record.update(
+                unavailable=True,
+                reason=reason,
+                checked_at=datetime.now(UTC).isoformat(),
+                route_key=self._negative_cache_key(),
+                routes=routes or {},
+            )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(record), encoding="utf-8")
@@ -644,11 +703,12 @@ class TranscriptManager:
         return self._fetch_remote(video_id, title)
 
     def _fetch_remote(self, video_id: str, title: str) -> TranscriptResult:
-        """Each open route in turn. A final "no captions" is cached; a block is not."""
+        """Try each independent route. Cache only corroborated caption absence."""
         routes: list[tuple[str, Callable[[str, str], TranscriptResult]]] = [("api", self._via_api)]
         if self.subtitles is not None:
             routes.append(("subtitles", self._via_subtitles))
         outcome: TranscriptResult | None = None
+        route_details: dict[str, str] = {}
         for route, fetch in routes:
             # One remote request per route at a time, and the pause is checked under the lock, so a
             # route closed by one worker is not called again by another already waiting.
@@ -659,29 +719,35 @@ class TranscriptManager:
                     self._pacer.wait()
                     result = fetch(video_id, title)
             if result is None:
+                route_details[route] = "paused"
                 outcome = outcome or TranscriptResult(
                     video_id, "", "blocked", f"YouTube blocked an earlier {route} request in this run"
                 )
                 continue
+            route_details[route] = (
+                result.source
+                if result.text
+                else result.detail
+                if result.detail.isidentifier() or result.detail == "subtitles: no subtitle track"
+                else result.source
+            )
             if result.text:
                 self._write_cache(
                     video_id, title, result.text, method=result.source, published=result.published
                 )
-                return result
-            if result.source == "unavailable" and result.detail in _FINAL_REASONS:
-                self._write_cache(video_id, title, "", reason=result.detail)
+                result.routes = route_details
                 return result
             # Blocked, or a reason another route may not share: keep the most telling, try the next.
             if outcome is None or result.source == "blocked":
                 outcome = result
         if outcome is None:
             return TranscriptResult(video_id, "", "unavailable", "no route to YouTube")
-        if outcome.source == "unavailable" and not outcome.detail.startswith(
-            ("fetch failed", "subtitles failed")
+        outcome.routes = route_details
+        if (
+            route_details.get("api") in _CACHEABLE_ABSENCE
+            and route_details.get("subtitles") == "subtitles: no subtitle track"
         ):
-            # Every route said the video has nothing to read (age-restricted, removed, no track):
-            # remembered for a week. A network failure is not remembered.
-            self._write_cache(video_id, title, "", reason=outcome.detail)
+            self._write_cache(video_id, title, "", reason=outcome.detail, routes=route_details)
         return outcome
 
     def _via_api(self, video_id: str, title: str) -> TranscriptResult:
@@ -764,10 +830,8 @@ class TranscriptManager:
 
     @staticmethod
     def _worth_another_route(result: TranscriptResult) -> bool:
-        """Blocked, or failed for a reason that is not "this video has no captions"."""
-        if result.text or result.source in ("skipped", "local", "cache"):
-            return False
-        return result.source == "blocked" or result.detail not in _FINAL_REASONS
+        """Any unread video with a valid id can still have an independent NotebookLM route."""
+        return not result.text and result.source not in ("skipped", "local", "cache")
 
     def fetch_many(
         self,
@@ -797,7 +861,11 @@ class TranscriptManager:
                 text = " ".join(str(texts.get(vid, "")).split())
                 if text:
                     self._write_cache(vid, title, text, method="notebooklm")
-                    results[vid] = TranscriptResult(vid, text, "notebooklm")
+                    results[vid] = TranscriptResult(
+                        vid, text, "notebooklm", routes={**results[vid].routes, "notebooklm": "read"}
+                    )
+                else:
+                    results[vid].routes["notebooklm"] = "no text returned"
         retry = [(vid, title) for vid, title in items if results[vid].source == "blocked"]
         wait = self.next_reopening()
         if retry and wait is not None and wait <= self.block_pause:

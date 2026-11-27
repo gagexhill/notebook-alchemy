@@ -27,7 +27,7 @@ PRICING_USD_PER_M: dict[str, tuple[float, float]] = {
 FALLBACK_PRICING_MODEL = DEFAULT_GEMINI_MODEL
 WATCH_TOKENS_PER_SECOND = 100
 WATCH_MAX_OUTPUT_TOKENS = 32768
-MAX_WATCH_DURATION_SECONDS = 5400  # 90 minutes per video cap
+MAX_WATCH_DURATION_SECONDS = 7200  # bounded opt-in attempt; provider may reject a long video
 DEFAULT_WATCH_TIMEOUT = 600.0
 
 WATCH_SYSTEM = (
@@ -156,6 +156,14 @@ class GeminiWatcher:
                 f"Gemini could not transcribe {video_id} ({err_detail}).",
                 hint="The video may be private, unlisted, or have no speech; it waits for the next run.",
                 detail=err_detail[:200],
+                unusable=bool(in_tok or out_tok),
+            )
+        if out_tok >= WATCH_MAX_OUTPUT_TOKENS - 128:
+            raise GeminiError(
+                f"Gemini's transcript for {video_id} reached the output limit.",
+                hint="Provide a transcript file or retry after a different transcription route is available.",
+                detail="output limit",
+                unusable=True,
             )
         return WatchResult(
             video_id=video_id,

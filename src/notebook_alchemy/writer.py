@@ -9,12 +9,22 @@ NotebookLM's limit of 500,000 words per source.
 from __future__ import annotations
 
 import datetime as dt
+import html
+import re
 from dataclasses import dataclass
 
 from .library import MISC, Library, Passage, Section, Topic
 
 SOURCE_WORD_LIMIT = 450_000
 OVERVIEW_TITLE = "_OVERVIEW"
+
+
+def _source_text(value: str) -> str:
+    """Keep source words while preventing them from creating Markdown/HTML structure."""
+    one_line = " ".join(str(value).split())
+    safe = re.sub(r"([\\`*_{}|])", r"\\\1", html.escape(one_line, quote=False))
+    safe = safe.replace("](", "]\\(")
+    return "\\" + safe if re.match(r"^(?:#{1,6}\s|>\s|[-+*]\s|\d+[.)]\s)", safe) else safe
 
 
 @dataclass
@@ -40,10 +50,10 @@ def date_label(published: str, exact: bool) -> str:
 
 def _source_line(p: Passage, titles: dict[str, str], exact: set[str]) -> str:
     when = date_label(p.published, p.video_id in exact)
-    line = f'*From "{p.title}"' + (f" ({when})" if when else "") + "*"
+    line = f'*From "{_source_text(p.title)}"' + (f" ({when})" if when else "") + "*"
     others = [titles[v] for v in p.also_in if v in titles]
     if others:
-        line += "; also said in " + ", ".join(f'"{t}"' for t in others[:5])
+        line += "; also said in " + ", ".join(f'"{_source_text(t)}"' for t in others[:5])
         if len(others) > 5:
             line += f" and {len(others) - 5} more"
     if p.as_of:
@@ -52,22 +62,23 @@ def _source_line(p: Passage, titles: dict[str, str], exact: set[str]) -> str:
 
 
 def _passage(p: Passage, titles: dict[str, str], exact: set[str]) -> str:
-    parts = [f"### {p.headline}\n"]
+    parts = [f"### {_source_text(p.headline)}\n"]
     if p.note:
-        parts.append(f"> Editor's note: {p.note}\n")
-    parts.append(f"{p.text}\n")
+        parts.append(f"> Editor's note: {_source_text(p.note)}\n")
+    parts.append(f"{_source_text(p.text)}\n")
     parts.append(_source_line(p, titles, exact) + "\n")
     return "\n".join(parts)
 
 
 def _section(s: Section, titles: dict[str, str], exact: set[str]) -> str:
-    head = f"## {s.name}\n\n" + (f"{s.intro}\n\n" if s.intro else "")
+    head = f"## {_source_text(s.name)}\n\n" + (f"{_source_text(s.intro)}\n\n" if s.intro else "")
     return head + "\n".join(_passage(p, titles, exact) for p in s.passages)
 
 
 def _intro(channel: str) -> str:
     return (
-        f"A study book from {channel}'s videos, in the speakers' own words. Each passage names the video "
+        f"A study book from {_source_text(channel)}'s videos, in the speakers' own words. "
+        "Each passage names the video "
         'it comes from. Passages marked "As of" describe rules or figures that may have changed.\n'
     )
 
@@ -93,12 +104,15 @@ def render_topic(
             blocks.append((s.name, text))
             continue
         # A single section too large for one source is cut between passages.
-        current, piece_no = f"## {s.name}\n\n" + (f"{s.intro}\n\n" if s.intro else ""), 1
+        current, piece_no = (
+            f"## {_source_text(s.name)}\n\n" + (f"{_source_text(s.intro)}\n\n" if s.intro else ""),
+            1,
+        )
         for p in s.passages:
             piece = _passage(p, titles, exact) + "\n"
             if len((current + piece).split()) > SOURCE_WORD_LIMIT:
                 blocks.append((f"{s.name} #{piece_no}", current))
-                current, piece_no = f"## {s.name} (continued)\n\n", piece_no + 1
+                current, piece_no = f"## {_source_text(s.name)} (continued)\n\n", piece_no + 1
             current += piece
         blocks.append((f"{s.name} #{piece_no}", current))
 
@@ -124,7 +138,7 @@ def render_topic(
         n = len(books) + 1  # numbered without gaps, should a part empty out
         title = topic.name if n == 1 else f"{topic.name} (Part {n})"
         body = "\n".join(texts[k] for k in sorted(keys, key=order.__getitem__))
-        books.append(Book(title, f"# {title}\n\n{_intro(channel)}\n{body}"))
+        books.append(Book(title, f"# {_source_text(title)}\n\n{_intro(channel)}\n{body}"))
         parts.update(dict.fromkeys(keys, n))
     return books
 
@@ -141,15 +155,17 @@ def render_overview(
 ) -> Book:
     """What the notebook holds, how it was made, what is missing and what was left out."""
     lines = [
-        f"# {library.notebook_title}: Overview\n",
+        f"# {_source_text(library.notebook_title)}: Overview\n",
         (
-            f"This notebook was built from the YouTube channel {channel} by Notebook Alchemy. Every "
-            "video's words were read, repeated passages were kept once, and each point was filed under "
+            f"This notebook was built from the YouTube channel {_source_text(channel)} by Notebook Alchemy. "
+            "Available video words were read, repeated passages were kept once, and each point was "
+            "filed under "
             "a topic and section. The topic books hold the speakers' own words; each passage names its "
             "video.\n"
             if library.sorted_by_ai
-            else f"This notebook was built from the YouTube channel {channel} by Notebook Alchemy, "
-            "without AI. Every video's words were read and repeated passages were kept once; each "
+            else f"This notebook was built from the YouTube channel {_source_text(channel)} "
+            "by Notebook Alchemy, "
+            "without AI. Available video words were read and repeated passages were kept once; each "
             "video's words are one passage, in a section named after the words its title shares with "
             "others. The books hold the speakers' own words; each passage names its video.\n"
         ),
@@ -159,12 +175,14 @@ def render_overview(
     ]
     for t in library.topics:
         passages = sum(len(s.passages) for s in t.sections)
-        lines.append(f"| {t.name} | {len(t.sections)} | {passages} | {t.words:,} |")
+        lines.append(f"| {_source_text(t.name)} | {len(t.sections)} | {passages} | {t.words:,} |")
     lines.append("")
     for t in library.topics:
-        lines.append(f"### {t.name}\n")
+        lines.append(f"### {_source_text(t.name)}\n")
         lines += [
-            f"- {s.name}" + (f": {s.about}" if s.about and library.sorted_by_ai else "") for s in t.sections
+            f"- {_source_text(s.name)}"
+            + (f": {_source_text(s.about)}" if s.about and library.sorted_by_ai else "")
+            for s in t.sections
         ]
         lines.append("")
     known = sorted(d for v, d in dates.items() if d and v in read)
@@ -180,7 +198,7 @@ def render_overview(
             f"- Not read yet ({len(missing)}): YouTube or NotebookLM could not give their words this "
             "time. The next run tries them again.\n"
         )
-        lines += [f"  - {videos[v]}" for v in missing]
+        lines += [f"  - {_source_text(videos[v])}" for v in missing]
     lines.append("")
     if library.removed_outdated:
         lines.append("## Left out as outdated\n")
@@ -191,7 +209,8 @@ def render_overview(
         for p in library.removed_outdated:
             when = date_label(p.published, p.video_id in exact)
             lines.append(
-                f'- {p.headline}: "{titles.get(p.video_id, p.title)}"' + (f" ({when})" if when else "")
+                f'- {_source_text(p.headline)}: "{_source_text(titles.get(p.video_id, p.title))}"'
+                + (f" ({when})" if when else "")
             )
         lines.append("")
     if watched:
@@ -200,9 +219,10 @@ def render_overview(
             lines.append("## Transcribed from video (Gemini)\n")
             lines.append(
                 f"- {len(watched_ids)} video(s) had no YouTube or NotebookLM captions, so Gemini watched "
-                "the public video directly:\n"
+                "the public video directly. These words are model transcriptions; verify them against "
+                "the video before relying on a quotation:\n"
             )
-            lines += [f"  - {videos[v]}" for v in watched_ids]
+            lines += [f"  - {_source_text(videos[v])}" for v in watched_ids]
             lines.append("")
     if any(t.name == MISC for t in library.topics):
         lines.append(f"Passages that fit no topic are in the {MISC} book.\n")

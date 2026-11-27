@@ -24,10 +24,19 @@ python -m ruff check .
 python -m ruff format --check .
 python -m pytest
 python -m notebook_alchemy.cli test
-python -m pip_audit
+python -m pip_audit .
 ```
 
-`pip_audit` reports known vulnerabilities in installed dependencies.
+`pip_audit .` resolves this project's dependencies. Auditing the shared interpreter without a project
+path includes unrelated workstation packages and can report findings that do not affect this tool.
+
+For transcript, prompt, or MCP run changes, finish local tests and a source diff review before an
+account-backed run. Record a read-only baseline (tab counts, words found, labels, source titles and
+readiness) in the owning issue. After the account owner approves the stated API model and estimated
+cost, use `alchemy_preview` and the run receipt to compare recovered full videos, unchanged older
+videos, source readback, and actual usage against that baseline. Shorts are counted but excluded by
+default. A ready source count alone does not prove improved content; inspect newly recovered passages
+and a sample of older ones for omissions and formatting regressions.
 
 ## Hosted Execution
 

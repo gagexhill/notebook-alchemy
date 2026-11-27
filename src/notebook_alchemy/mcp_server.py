@@ -27,6 +27,7 @@ from .channel import CHANNEL_TABS, DEFAULT_TABS, ChannelScanner
 from .claude import scrub as scrub_claude
 from .config import AlchemyConfig, validate_profile_name
 from .errors import AlchemyError, ConfigError
+from .run_registry import RunRegistry, receipts_dir
 from .service import (
     clean_service,
     get_status,
@@ -129,12 +130,14 @@ def build_mcp_server(
             "Use `alchemy_status` first to check NotebookLM sign-in and AI API key readiness. "
             "Use `alchemy_preview` before `alchemy_run` to show video counts and estimated API cost. "
             "On a first upload (or unrecorded account), confirm the target Google account with the user "
-            "and pass `confirm_upload=True`."
+            "and pass `confirm_upload=True`. `alchemy_run` returns a run ID; poll `alchemy_run_status` "
+            "for the result. Do not start another run while one is active."
         ),
         version=__version__,
         token_verifier=token_verifier,
         auth=auth_settings,
     )
+    runs = RunRegistry(receipts_dir())
 
     @server.tool(
         name="alchemy_status",
@@ -192,8 +195,9 @@ def build_mcp_server(
         title="Build & Upload Topic Books",
         description=(
             "Build deduplicated, dated topic books from a YouTube channel/playlist/video and upload them "
-            "to NotebookLM (or save locally to `save_dir`). Confirm the Google upload account with the "
-            "user and set `confirm_upload=True` for first-time or unrecorded accounts."
+            "to NotebookLM (or save locally to `save_dir`). Returns a run ID immediately; read the "
+            "durable result with `alchemy_run_status`. Confirm the Google upload account with the user "
+            "and set `confirm_upload=True` for first-time or unrecorded accounts."
         ),
         annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True),
     )
@@ -208,6 +212,7 @@ def build_mcp_server(
         now: bool = False,
         resort: bool = False,
         watch_limit: int = 0,
+        watch_budget_usd: float = 0.0,
         allow_fewer: bool = False,
         confirm_upload: bool = False,
         profile: str | None = None,
@@ -216,23 +221,46 @@ def build_mcp_server(
         try:
             cfg = _config_for(profile)
             safe_source = _validate_youtube_source(source, mock=mock)
-            return run_pipeline_service(
-                cfg,
-                safe_source,
-                notebook_name=notebook_name,
-                save_dir=Path(save_dir).expanduser() if save_dir else None,
-                limit=limit,
-                tabs=_parse_tabs(tabs),
-                offline=offline,
-                mock=mock,
-                now=now,
-                resort=resort,
-                watch_limit=watch_limit,
-                allow_fewer=allow_fewer,
-                confirm_upload=confirm_upload,
-            )
+            parsed_tabs = _parse_tabs(tabs)
+
+            def task() -> dict[str, Any]:
+                return run_pipeline_service(
+                    cfg,
+                    safe_source,
+                    notebook_name=notebook_name,
+                    save_dir=Path(save_dir).expanduser() if save_dir else None,
+                    limit=limit,
+                    tabs=parsed_tabs,
+                    offline=offline,
+                    mock=mock,
+                    now=now,
+                    resort=resort,
+                    watch_limit=watch_limit,
+                    watch_budget_usd=watch_budget_usd,
+                    allow_fewer=allow_fewer,
+                    confirm_upload=confirm_upload,
+                )
+
+            def error_text(exc: Exception) -> str:
+                if isinstance(exc, AlchemyError):
+                    return str(_scrub_error(exc, cfg))
+                return f"Run failed ({type(exc).__name__}). Check local logs before retrying."
+
+            return runs.start(task, error_text)
         except AlchemyError as exc:
             raise _scrub_error(exc, cfg) from None
+
+    @server.tool(
+        name="alchemy_run_status",
+        title="Read Notebook Alchemy Run Receipt",
+        description="Read a long run's durable result, usage, and upload outcome by run ID.",
+        annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True, openWorldHint=False),
+    )
+    def alchemy_run_status(run_id: str) -> dict[str, Any]:
+        try:
+            return runs.status(run_id)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
 
     @server.tool(
         name="alchemy_notebooks",

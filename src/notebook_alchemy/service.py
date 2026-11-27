@@ -19,6 +19,7 @@ from .config import AlchemyConfig, resolve_env_paths
 from .engine import AlchemyEngine, ProgressFn, _home_relative
 from .errors import AlchemyError, SessionError
 from .keepalive import KeepAlive
+from .run_registry import is_completed_run_receipt, receipts_dir
 from .watch import price_for as gemini_price_for
 from .writer import OVERVIEW_TITLE
 
@@ -154,7 +155,11 @@ def preview_channel(
             "source": source,
             "is_mock": mock,
             "videos": est.videos,
+            "tab_counts": engine.last_scan.tab_counts if engine.last_scan else {},
+            "shorts_excluded": engine.last_scan.excluded_shorts if engine.last_scan else None,
+            "incomplete_tabs": engine.last_scan.incomplete_tabs if engine.last_scan else [],
             "videos_known": est.videos_known,
+            "videos_without_words": est.videos - est.videos_known,
             "words_known": est.words_known,
             "words_estimated": est.words_estimated,
             "labelled": est.labelled,
@@ -210,6 +215,7 @@ def run_pipeline_service(
     now: bool = False,
     resort: bool = False,
     watch_limit: int = 0,
+    watch_budget_usd: float = 0.0,
     allow_fewer: bool = False,
     confirm_upload: bool = False,
     progress: ProgressFn | None = None,
@@ -236,6 +242,7 @@ def run_pipeline_service(
             resort=resort,
             use_batch=not now,
             watch_limit=watch_limit,
+            watch_budget_usd=watch_budget_usd,
             progress=progress,
         )
         ai_usage = [
@@ -256,7 +263,11 @@ def run_pipeline_service(
                 "status": "waiting_for_batch",
                 "channel": report.channel,
                 "videos_total": len(report.videos),
+                "tab_counts": engine.last_scan.tab_counts if engine.last_scan else {},
+                "shorts_excluded": engine.last_scan.excluded_shorts if engine.last_scan else None,
                 "videos_read": len(report.read),
+                "videos_without_words": len(report.unread),
+                "unread_videos": report.unread,
                 "labelled_now": report.labelled,
                 "waiting_videos": len(report.waiting),
                 "notices": report.notices,
@@ -269,7 +280,11 @@ def run_pipeline_service(
             "channel": report.channel,
             "notebook_title": notebook_name or report.library.notebook_title,
             "videos_total": len(report.videos),
+            "tab_counts": engine.last_scan.tab_counts if engine.last_scan else {},
+            "shorts_excluded": engine.last_scan.excluded_shorts if engine.last_scan else None,
             "videos_read": len(report.read),
+            "videos_without_words": len(report.unread),
+            "unread_videos": report.unread,
             "watched_videos": sorted(report.watched),
             "used_ai": report.used_ai,
             "labelled_now": report.labelled,
@@ -433,6 +448,9 @@ def clean_service(
         if watched.is_file():
             (targets.append(("labels", watched)) if is_string_map(watched) else skipped.append(str(watched)))
     if records:
+        runs = receipts_dir()
+        for f in sorted(runs.glob("*.json")) if runs.is_dir() else []:
+            (targets.append(("record", f)) if is_completed_run_receipt(f) else skipped.append(str(f)))
         records_dir = engine.sync_records_dir()
         for f in sorted(records_dir.glob("*.json")) if records_dir.is_dir() else []:
             (targets.append(("record", f)) if is_sync_record(f) else skipped.append(str(f)))

@@ -9,7 +9,8 @@ to propose a change; this file covers what a change must keep true.
   completed design decisions and why. Open work is a GitHub issue, never a document or an inline comment.
 - Source is `src/notebook_alchemy/`, in pipeline order:
   - `channel.py`: YouTube scanning and every route to a video's words.
-  - `watch.py`: opt-in `--watch N` fallback via `google-genai` Interactions API (`gemini-4-hydrogen`).
+  - `watch.py`: opt-in `--watch N` fallback via `google-genai` Interactions API (`gemini-4-hydrogen`),
+    with an explicit estimated USD budget.
   - `cleanup.py`: local cleanup, chunks and dedupe.
   - `knowledge.py`: Claude labels, cached per video.
   - `library.py`: passages, topics, sections, consolidation and dates; the topic map grows, it is
@@ -18,6 +19,7 @@ to propose a change; this file covers what a change must keep true.
   - `engine.py`: the pipeline and slot-safe upload (`publish`).
   - `service.py`: shared JSON-serializable service layer backing `cli.py` and `mcp_server.py`.
   - `mcp_server.py`: dual-transport MCP server (`stdio` + bearer-protected `streamable-http`).
+  - `run_registry.py`: durable MCP run receipts and one active run across local server processes.
   - `mcp_install.py`: desktop MCP config installers (Claude Desktop, Antigravity, ChatGPT Codex, HTTP guide).
   - `cli.py`: commands.
   - `ui.py`: output, including `route_to_stderr()` for MCP stdio isolation.
@@ -50,6 +52,14 @@ to propose a change; this file covers what a change must keep true.
 - An upload never quietly shrinks a notebook: unsorted books do not replace AI-sorted ones without
   `--offline`, and books from under half the videos of the last upload need `--allow-fewer`. No
   sorting is asked for while videos still wait for labels, and no topic map is made from no passages.
+- Channel scans count excluded Shorts separately and report an unknown count when their tab cannot be
+  read. An unreadable Videos or Live tab stops a build before upload. A failure from one transcript
+  route cannot close independent routes; corroborated absence is cached for one day and invalidated
+  when retrieval settings change. Every unread full video is reported with route outcomes.
+- MCP `alchemy_run` returns a run ID immediately. `alchemy_run_status` reads the durable receipt;
+  a receipt distinguishes a finished upload from a batch still waiting. Another local server process
+  cannot start a second paid run against the same working state. `clean --records` removes completed
+  receipts, leaving an active receipt intact.
 - The install never includes a browser-cookie reader: the dependency is `notebooklm-py[browser]`, without
   the `cookies` extra, and NotebookLM sign-in is through the browser window only.
 - Nothing identifying the user is stored that a feature does not need. The upload confirmation keeps a
@@ -100,6 +110,9 @@ to propose a change; this file covers what a change must keep true.
 - `import-state` writes only the working-file folders it knows, checks every file before writing any,
   and never carries sign-ins, the Claude API key or the upload confirmation.
 - Text that comes from outside (titles, errors, paths) is passed through `ui.esc` before Rich prints it.
+- Video titles, captions, and model-written transcripts are untrusted data. Claude receives a fixed
+  instruction boundary; generated books neutralize Markdown/HTML structure from source text. AI
+  answers never gain tool authority, and source ownership is checked before any removal.
 - Output follows Google's `gcloud` conventions, through the helpers in `ui.py`: everyday words by
   default (topic, book, section, passage; no internal terms), detail such as paths, tokens and models through `ui.detail` (shown with `-v`), names in
   `[brackets]` (`ui.name`), `Warning:` and `Error:` on stderr, a next step as a command to run

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from notebook_alchemy.client import NotebookLMClient, PlanLimits
+from notebook_alchemy.client import NotebookLMClient, PlanLimits, normalize_title
 from notebook_alchemy.config import AlchemyConfig
 from notebook_alchemy.engine import AlchemyEngine
 from notebook_alchemy.errors import SessionError, SyncError
@@ -50,8 +50,22 @@ def _books(names: tuple[str, ...] = ("Alpha_Topics", "Beta_Topics")) -> list[Boo
 
 
 def _previous_upload(engine: AlchemyEngine, nb_id: str, titles: list[str]) -> None:
-    """A record of an earlier (0.2-style, titles only) upload of these titles to the notebook."""
-    engine._write_json(engine._sync_state_path(nb_id), {"titles": titles}, "test record")
+    """Record the specific source ids an earlier upload owned, including duplicate copies."""
+    ids: dict[str, str] = {}
+    orphans: list[str] = []
+    for source in engine.client.list_sources(nb_id):
+        title = next((t for t in titles if normalize_title(t) == normalize_title(source["title"])), None)
+        if title is None:
+            continue
+        if title in ids:
+            orphans.append(source["id"])
+        else:
+            ids[title] = source["id"]
+    engine._write_json(
+        engine._sync_state_path(nb_id),
+        {"titles": titles, "ids": ids, "orphans": orphans},
+        "test record",
+    )
 
 
 # --- sync -----------------------------------------------------------------------------------------
@@ -316,7 +330,7 @@ class PipelineAI:
         from notebook_alchemy.claude import ClaudeResult
 
         self.prompts.append(prompt)
-        if prompt.startswith("Video:"):
+        if prompt.startswith("Video title:"):
             nums = [int(n) for n in _re.findall(r"^\[(\d+)\]", prompt, _re.MULTILINE)]
             segs = [
                 {"from": nums[0], "to": nums[-1], "keep": True, "headline": "Registering", "kind": "rule"}
@@ -463,6 +477,19 @@ def test_a_source_of_yours_with_a_books_title_is_left_alone(tmp_path: Path) -> N
     assert result.replaced == 0 and fake.titles("Chan").count("Alpha Topics") == 2
 
 
+def test_title_only_record_cannot_claim_a_source_with_the_same_title(tmp_path: Path) -> None:
+    fake = FakeNotebookLM()
+    nb = fake.seed("Chan", ["Alpha Topics", "My own notes"])
+    original = {s["id"] for s in fake.sources[nb]}
+    engine = _fake_engine(tmp_path, fake)
+    engine._write_json(engine._sync_state_path(nb), {"titles": ["Alpha Topics"]}, "test record")
+
+    result = engine.publish("Chan", _books())
+
+    assert result.replaced == 0
+    assert original <= {s["id"] for s in fake.sources[nb]}
+
+
 def test_a_book_that_fails_to_upload_keeps_its_old_copy(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     engine = _fake_engine(tmp_path, fake)
@@ -578,7 +605,7 @@ def test_an_old_copy_that_could_not_be_removed_is_removed_next_time(tmp_path: Pa
     assert old_beta not in _ids_by_title(fake).values()
 
 
-def test_books_a_0_2_upload_recorded_under_its_own_file_name_are_replaced(tmp_path: Path) -> None:
+def test_title_only_0_2_record_does_not_claim_existing_sources(tmp_path: Path) -> None:
     fake = FakeNotebookLM()
     engine = _fake_engine(tmp_path, fake)
     nb = fake.seed("Chan", ["Old Domain: Basics", "_INDEX", "My own notes"])
@@ -587,8 +614,14 @@ def test_books_a_0_2_upload_recorded_under_its_own_file_name_are_replaced(tmp_pa
     legacy.write_text(json.dumps({"titles": ["Old Domain: Basics", "_INDEX"]}), encoding="utf-8")
     assert legacy != engine._sync_state_path(nb)
     result = engine.publish("Chan", _books())
-    assert fake.titles("Chan") == ["Alpha Topics", "Beta Topics", "My own notes"]  # yours stays
-    assert result.pruned == 2 and not legacy.exists()
+    assert fake.titles("Chan") == [
+        "Alpha Topics",
+        "Beta Topics",
+        "My own notes",
+        "Old Domain: Basics",
+        "_INDEX",
+    ]
+    assert result.pruned == 0 and not legacy.exists()
 
 
 def test_the_transcript_route_stops_when_notebooklm_ends_the_sign_in(tmp_path: Path) -> None:
