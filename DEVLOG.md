@@ -14,6 +14,10 @@ Completed material decisions, newest first. Current work is in GitHub issues.
   ceiling before each request using both estimates and reported usage, records billed unusable answers,
   and labels model-written words in the overview. A single request can exceed its estimate, so the
   ceiling is not a provider-enforced spending limit.
+- The first account-backed attempt exposed repeated 503/429 responses and exhausted the Free-tier daily
+  request allowance without a transcript. The official SDK's retry setting is now one attempt per
+  video, and a 503 stops the watch loop. The guard's test failed when the setting was removed and
+  passed when restored. The notebook comparison remains open in #68 until a live run returns words.
 - MCP runs return a durable local receipt immediately. Polling reads the final pipeline result;
   concurrent calls receive the active run ID, and a stopped server leaves an interrupted receipt that
   tells the operator to resume from caches.

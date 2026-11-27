@@ -38,6 +38,11 @@ videos, source readback, and actual usage against that baseline. Shorts are coun
 default. A ready source count alone does not prove improved content; inspect newly recovered passages
 and a sample of older ones for omissions and formatting regressions.
 
+The Gemini watch client makes one SDK attempt per video. A quota response (429) or provider outage
+(503) stops the watch step and preserves cached words. Check the project's Usage and Rate Limit pages
+in AI Studio before resuming; failed requests can consume the daily request allowance even when no
+transcript or output tokens were returned. Resume after the quota resets or the service recovers.
+
 ## Hosted Execution
 
 `.github/workflows/validate.yml` runs the same checks, a dependency audit and a secret scan on Linux and

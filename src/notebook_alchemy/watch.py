@@ -105,8 +105,14 @@ class GeminiWatcher:
         with self._lock:
             if self._sdk is None:
                 from google import genai
+                from google.genai import types
 
-                self._sdk = genai.Client(api_key=self._api_key)
+                # Each failed video is reported to the caller; SDK retries can exhaust a small
+                # daily quota before the caller sees a 429 or provider outage.
+                self._sdk = genai.Client(
+                    api_key=self._api_key,
+                    http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
+                )
             return self._sdk
 
     def watch_video(self, video_id: str) -> WatchResult:
@@ -191,6 +197,14 @@ class GeminiWatcher:
             return GeminiError(
                 "The Gemini API quota or rate limit was reached while watching videos.",
                 hint="Wait for quota reset or check billing in Google AI Studio; cached words are kept.",
+                status=code,
+                detail=detail,
+                stop_run=True,
+            )
+        if code == 503:
+            return GeminiError(
+                "The Gemini API is temporarily unavailable while watching videos.",
+                hint="Check Gemini service status and run the same command later; cached words are kept.",
                 status=code,
                 detail=detail,
                 stop_run=True,

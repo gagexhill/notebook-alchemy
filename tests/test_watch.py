@@ -71,12 +71,29 @@ def test_watch_uses_interactions_api_and_gemini_4_hydrogen() -> None:
     assert model == "gemini-4-hydrogen" and inp == 1000 and out == 200 and cost > 0
 
 
+def test_watch_client_sends_one_request_per_video(monkeypatch: pytest.MonkeyPatch) -> None:
+    from google import genai
+
+    sdk, calls = _fake_sdk()
+    client_args: dict[str, Any] = {}
+
+    def make_client(**kwargs: Any) -> SimpleNamespace:
+        client_args.update(kwargs)
+        return sdk
+
+    monkeypatch.setattr(genai, "Client", make_client)
+    GeminiWatcher(KEY).watch_video("vid00000001")
+    assert len(calls) == 1
+    assert client_args["http_options"].retry_options.attempts == 1
+
+
 @pytest.mark.parametrize(
     ("code", "expected_stop", "needle"),
     [
         (401, True, "key was not accepted"),
         (429, True, "quota or rate limit"),
         (404, True, "not available"),
+        (503, True, "temporarily unavailable"),
         (500, False, "transcription failed"),
     ],
 )
