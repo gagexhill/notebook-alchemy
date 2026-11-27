@@ -93,7 +93,7 @@ link       yt-dlp   captions,  filler,   Claude,   topics,  order, dupes,    pla
    - When new videos bring passages that fit nowhere, the map grows: new sections or topics are added, and nothing already placed moves. A section past 200 passages is divided into named subsections.
    - One request per section orders it, finds duplicates and finds passages a newer one replaces.
    - Old news is left out; old rules and figures are kept, marked "As of".
-6. **Books and upload.** One plain-Markdown book per topic (split into parts only past 450,000 words; a section stays in its part from run to run), plus an `_OVERVIEW`. Each goes to NotebookLM as a file. The tool waits for processing, corrects any title NotebookLM changes, replaces earlier copies of books whose text changed (the rest are left as they are), removes books the last run made that this one no longer has, and reads the notebook back. A rerun updates the same notebook.
+6. **Books and upload.** One plain-Markdown book per topic (split into parts only past 450,000 words; a section stays in its part from run to run), plus an `_OVERVIEW`. Each goes to NotebookLM as a file. The tool waits for processing, corrects any title NotebookLM changes, replaces earlier copies of books whose text changed (the rest are left as they are), removes books the last run made that this one no longer has, and reads the notebook back. It replaces or removes only sources recorded by ID as its own. Older title-only records cannot prove ownership, so their sources stay in the notebook. A rerun updates the same notebook.
 
 ---
 

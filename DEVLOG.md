@@ -2,6 +2,11 @@
 
 Completed material decisions, newest first. Current work is in GitHub issues.
 
+## Source ownership from IDs only (2026-11-27)
+
+- An older title-only upload record could claim a user-owned NotebookLM source with the same title. A hermetic regression reproduced its deletion during an ordinary upload. Upload reconciliation now treats only recorded source IDs as owned. Sources named only in a version 0.2 record remain in the notebook; the obsolete local record is removed after a successful upload. The operator can review those older sources in NotebookLM and remove them there if appropriate.
+- The focused regression failed before the change and passed after it. The project dependency audit reported no known vulnerabilities; advisories from an audit of the shared Python environment affected packages outside this project's resolved dependencies.
+
 ## Desktop LLM MCP connector, global `.env`, `--watch`, and slot-safe uploads (`0.4.0`, `#43`, `#60`, `#61`, `#63`, `#64`, 2026-11-19)
 
 - **Shared service layer & global `.env` (#60).** Extracted `service.py` from `cli.py` so CLI commands and MCP tools share one pipeline, validation, and error path. `config.py` now loads `~/.notebook-alchemy/.env` after `./.env` (and supports `ALCHEMY_ENV_FILE`), and `setup` writes global by default (`--local` opts into `./.env`), so MCP desktop hosts spawned from arbitrary working directories see the same keys and profile.
