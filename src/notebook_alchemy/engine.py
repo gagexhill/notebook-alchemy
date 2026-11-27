@@ -767,8 +767,8 @@ class AlchemyEngine:
             "orphans": [str(o) for o in orphans],
             "sorted_by_ai": data.get("sorted_by_ai") if isinstance(data.get("sorted_by_ai"), bool) else None,
             "videos_read": data.get("videos_read") if isinstance(data.get("videos_read"), int) else 0,
-            # Titles a version 0.2 upload recorded under its own file name; matched by title until a
-            # successful upload has replaced or removed them.
+            # A version 0.2 title-only record is removed after a successful upload; its titles
+            # never establish ownership of NotebookLM sources.
             "legacy_titles": [str(t) for t in legacy.get("titles", []) if isinstance(t, str)],
         }
 
@@ -849,9 +849,8 @@ class AlchemyEngine:
             self.remember_notebook(channel_key, nb_id)
         before = [] if created else [s for s in self.client.list_sources(nb_id) if s.get("id")]
 
-        # Only sources this tool uploaded are ever replaced or removed: by the ids it recorded, or, for
-        # a record from version 0.2 (titles only), by those titles. A source of yours with the same
-        # title as a book is left alone.
+        # Only source ids this tool recorded as its own may be replaced or removed. A title-only
+        # legacy record cannot distinguish an earlier upload from a user's source with that title.
         record = self._read_record(nb_id)
         if record["sorted_by_ai"] and not sorted_by_ai and not allow_unsorted:
             raise AlchemyError(
@@ -871,13 +870,7 @@ class AlchemyEngine:
         built = {"sorted_by_ai": sorted_by_ai, "videos_read": videos_read}
         orphans = set(record["orphans"])
         mine_ids = set(record["ids"].values()) | orphans
-        legacy = {normalize_title(t) for t in record["titles"]} if not record["ids"] else set()
-        legacy |= {normalize_title(t) for t in record["legacy_titles"]}
-        ours = [
-            s
-            for s in before
-            if str(s["id"]) in mine_ids or normalize_title(str(s.get("title", ""))) in legacy
-        ]
+        ours = [s for s in before if str(s["id"]) in mine_ids]
         book_titles = {normalize_title(b.title) for b in books}
         title_by_id = {str(s["id"]): str(s.get("title", "")) for s in before}
         status_by_id = {str(s["id"]): str(s.get("status", "ready") or "ready").lower() for s in before}
@@ -906,9 +899,7 @@ class AlchemyEngine:
             stuck_unowned = sum(
                 1
                 for s in before
-                if str(s["id"]) not in mine_ids
-                and normalize_title(str(s.get("title", ""))) not in legacy
-                and str(s.get("status", "")).lower() in ("preparing", "error")
+                if str(s["id"]) not in mine_ids and str(s.get("status", "")).lower() in ("preparing", "error")
             )
             stuck_note = (
                 f" ({stuck_unowned} other source(s) in the notebook are stuck in preparing/error)"
